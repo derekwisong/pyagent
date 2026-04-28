@@ -77,7 +77,7 @@ def _on_tool_call(
 ) -> None:
     summary = _summarize_args(args)
     label = f"{name}  {summary}" if summary else name
-    console.print(f"{_agent_label(agent_id)}[dim]· {label}[/dim]")
+    console.print(f"{_agent_label(agent_id)}[dim grey42]· {label}[/dim grey42]")
 
 
 def _on_tool_result(
