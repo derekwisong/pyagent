@@ -30,10 +30,11 @@ by the API; this is about *when and how* to use them.
   you so the ledgers follow the user across working directories. Using
   `read_file` / `write_file` instead would create copies in whatever
   directory you happen to be in — use the ledger tools.
-- **Delegating to a fresh agent** — `spawn_subagent` when the work
-  needs a different system prompt (focused expertise, narrower role)
-  or when several jobs can run in parallel. The new agent boots in
-  its own subprocess with the same default tool set as you.
+- **Delegating to a fresh agent** — `spawn_subagent` is your
+  default for fan-out, context insulation, and fresh-eyes review.
+  Don't wait to be told; the shapes are listed in PRIMER. The new
+  agent boots in its own subprocess with the same default tool set
+  as you.
   - One job, one expertise → `spawn_subagent` then `call_subagent`
     to block on the result inline.
   - Several jobs in parallel → spawn one per job, fire
@@ -41,8 +42,9 @@ by the API; this is about *when and how* to use them.
     pause until at least one is back. Async replies arrive on your
     next turn as user-role messages of the form
     `[subagent <name> (<id>) reports]: <text>` — read the inbox.
-  - Don't spawn for work you could do directly. Each subagent burns
-    its own tokens.
+  - Skip subagents only when the job is small enough to finish
+    before one boots, or so tangled in your live context that
+    re-briefing costs more than doing it yourself.
   - `terminate_subagent` when done. Live subagents count against
     the fanout cap (default 5; depth cap default 3). Caps refuse
     with a `<refused: …>` marker — adapt, don't retry.
