@@ -63,6 +63,18 @@ pyagent --model gemini                         # gemini-2.5-flash
 pyagent --model gemini/gemini-2.5-pro
 ```
 
+If `--model` is omitted, pyagent picks one in this order:
+
+1. **`default_model`** in `config.toml` (e.g. `default_model = "openai"`).
+2. **Auto-detect** from the API-key env vars: `ANTHROPIC_API_KEY` →
+   `OPENAI_API_KEY` → `GEMINI_API_KEY`/`GOOGLE_API_KEY`. The first that's
+   set wins.
+3. If neither is available, pyagent exits with a pointed error telling
+   you which env vars it looks for.
+
+The session header prints the resolved provider/model so you can confirm
+what was picked.
+
 Make sure the matching API key from the table above is set in your
 environment before launching.
 
@@ -149,16 +161,15 @@ Memory work is meant to happen **organically**, mid-conversation: when the
 agent learns a preference, a convention, or something genuinely worth
 remembering, it updates the appropriate ledger then and there.
 
-As a safety net, the CLI also runs a single **end-of-session pass** when
-you exit (Ctrl+D or Ctrl+C at the prompt). It asks the agent to sweep the
-conversation for anything that should have been recorded but wasn't, and
-to update the ledgers. If the agent has already kept things tidy, it will
-say so and exit. The pass only fires when the session actually added new
-turns; resumed-but-idle sessions exit immediately. A second Ctrl+C during
-the pass skips it cleanly.
-
-To skip the pass entirely (throwaway chats, sensitive conversations,
-scripted runs), launch with `--no-memory-pass-on-exit`.
+An optional **end-of-session pass** is available as a safety net: launch
+with `--memory-pass-on-exit` and the CLI will, on exit (Ctrl+D or Ctrl+C
+at the prompt), ask the agent to sweep the conversation for anything
+that should have been recorded but wasn't, and update the ledgers. The
+pass only fires when the session actually added new turns; resumed-but-
+idle sessions exit immediately. A second Ctrl+C during the pass skips
+it cleanly. It's off by default — the expectation is that the agent
+records memory organically mid-conversation, so this is for rare
+"final sweep" cases.
 
 Conversation history and large tool outputs are persisted separately, under
 `.pyagent/sessions/<session-id>/`. Resume a session with `pyagent --resume
@@ -166,18 +177,19 @@ Conversation history and large tool outputs are persisted separately, under
 
 ## Skills
 
-Skills are bundles of instructions (and optional helper tools) the agent can
-load on demand. The system prompt advertises *that* a skill exists; the agent
-calls `use_skill(<name>)` when its description matches what the user is
-asking for, and the skill's body lands in context for the rest of the
+Skills are bundles of instructions (and optional helper scripts) the agent
+can load on demand. The system prompt advertises *that* a skill exists; the
+agent calls `read_skill(<name>)` when its description matches what the user
+is asking for, and the skill's body lands in context for the rest of the
 session.
 
 A skill is a directory with a `SKILL.md`:
 
 ```
 example-skill/
-  SKILL.md         # YAML-ish frontmatter + instructions for the agent
-  tools.py         # optional, exports a TOOLS = {"name": fn, ...} dict
+  SKILL.md          # YAML-ish frontmatter + instructions for the agent
+  scripts/          # optional — CLI helpers the agent invokes via the shell tool
+    cli.py
 ```
 
 Frontmatter fields:
@@ -186,39 +198,100 @@ Frontmatter fields:
 | --- | --- |
 | `name` | Catalog identifier the agent uses to load the skill. |
 | `description` | One-line summary; the agent uses this to decide relevance. |
-| `tools` | Optional. Path (relative to `SKILL.md`) of a Python file whose `TOOLS` dict gets registered with the agent on first activation. |
 
-Discovery order (first wins, local overrides everything):
+Skills don't register Python tools. Helper scripts under `scripts/` are
+invoked via the regular shell tool, so they go through the same Bash safety
+checks as any other command.
 
-1. `./.pyagent/skills/<name>/SKILL.md` — project-local
-2. `<config-dir>/skills/<name>/SKILL.md` — user-installed
+Discovery order (later wins, project-local overrides everything):
 
-Skills that ship a `tools` module run arbitrary Python on activation, so the
-first `use_skill(<name>)` call in a session prompts the human for one-time
-approval. Pure-instructional skills (no `tools`) skip the prompt — their
-effects route through the existing tool layer with its own permissions.
+1. `<package>/skills/<name>/` — bundled with pyagent
+2. `<config-dir>/skills/<name>/` — user-installed
+3. `./.pyagent/skills/<name>/` — project-local
+
+The catalog re-renders before every model call, so a skill you (or the
+agent) just authored shows up on the next call — no restart needed.
 
 ### Bundled skills
 
-Run `pyagent-skills list` to see what's bundled and what's installed.
-Install a bundled skill into your config dir with:
+Bundled skills load directly from the package — no install step, no copy on
+disk. Upgrading pyagent updates them for free.
 
-```
-pyagent-skills install aviation-weather
-pyagent-skills install flight-tracker
-pyagent-skills install faa-registry
+Only **`write-skill`** is enabled out of the box. The rest are opt-in to
+keep the catalog tight. Enable additional bundled skills by listing their
+names in `<config-dir>/config.toml`:
+
+```toml
+built_in_skills_enabled = ["write-skill", "flight-tracker"]
 ```
 
-Bundled skills:
+Setting `built_in_skills_enabled` replaces the default list, so include
+every bundled skill you want available — `write-skill` included.
+
+Run `pyagent-skills list` to see each bundled skill's name, description,
+and current `[enabled]` / `[disabled]` state.
 
 | Skill | What it does |
 | --- | --- |
-| `write-skill` | Authoring guide — install this if you want the agent to be able to write new skills for you. |
+| `write-skill` | Authoring guide — load this when you want the agent to write a new skill for you. **Enabled by default.** |
 | `aviation-weather` | METARs, TAFs, PIREPs, AFD, AIRMETs/SIGMETs around an airport. Uses aviationweather.gov; no key needed. |
 | `flight-tracker` | Live aircraft state vectors near a point or by ICAO24 hex via OpenSky. Anonymous works; OAuth2 client credentials unlock more. |
 | `faa-registry` | Look up FAA aircraft registry records (US tail numbers) by N-number, owner, or make/model. |
 
-`pyagent-skills uninstall <name>` removes an installed copy. Project-local
-skills under `./.pyagent/skills/` always override an installed one of the
-same name — drop a `SKILL.md` in there to customize a bundled skill for a
-single project without touching the installed copy.
+To customize a bundled skill, copy its directory into `<config-dir>/skills/`
+or `./.pyagent/skills/` and edit. The override takes precedence regardless
+of `built_in_skills_enabled` — user-installed and project-local tiers are
+never gated by config.
+
+`pyagent-skills uninstall <name>` removes a user- or project-local copy.
+Bundled skills can't be uninstalled (they ship with the package); to keep
+one out of the catalog, just leave it out of `built_in_skills_enabled`.
+
+## Configuration
+
+Pyagent reads its config from `<config-dir>/config.toml`. A missing file is
+fine — bundled defaults apply. The `pyagent-config` CLI inspects and
+initializes the file:
+
+```
+pyagent-config show          # effective merged config (defaults + overrides)
+pyagent-config defaults      # bundled defaults as a commented-out template
+pyagent-config init          # write the template to config.toml if absent
+```
+
+`init` never overwrites; pass `--force` if you really want to start over.
+The written template is fully commented out, so the file's presence does
+not change behavior — uncomment lines to override defaults.
+
+## Managing sessions
+
+Conversation history lives under `./.pyagent/sessions/<session-id>/`. The
+`pyagent-sessions` CLI inspects and cleans it up:
+
+```
+pyagent-sessions list                          # all sessions, newest first
+pyagent-sessions delete <id>                   # remove one session
+pyagent-sessions delete --all                  # remove every session in this project
+pyagent-sessions prune --older-than 30         # delete anything inactive 30+ days
+pyagent-sessions prune --keep 10               # keep newest 10, drop the rest
+```
+
+`prune` defaults to dry-run; pass `--no-dry-run` to actually delete.
+
+## Resetting
+
+Pyagent's reset flags overwrite files in `<config-dir>` with the bundled
+defaults. They never touch your workspace (`./.pyagent/`) — sessions and
+project-local skills are yours to manage.
+
+| Flag | Effect |
+| --- | --- |
+| `--reset-soul` / `--reset-tools` / `--reset-primer` | Overwrite the spec doc with the bundled default. |
+| `--reset-user` | Overwrite `USER.md` (preferences). |
+| `--reset-memory` | Overwrite `MEMORY.md` (long-term memory). |
+| `--reset-skills` | Remove every user-installed skill under `<config-dir>/skills/`. |
+| `--reset-all` | All of the above, with one consolidated confirmation. |
+| `--yes` / `-y` | Skip the confirmation prompt for destructive resets. |
+
+The destructive resets (USER, MEMORY, skills) prompt before doing anything;
+spec-doc resets don't, since those are pure revert-to-ship-state.

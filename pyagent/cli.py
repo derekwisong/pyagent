@@ -2,6 +2,7 @@ import logging
 import multiprocessing
 import re
 import readline  # imported for side effect: enables line editing and history in input()
+import shutil
 import sys
 from multiprocessing.connection import Connection
 from pathlib import Path
@@ -13,6 +14,8 @@ from rich.markdown import Markdown
 from rich.traceback import install as install_traceback
 
 from pyagent import agent_proc
+from pyagent import config
+from pyagent import llms
 from pyagent import paths
 from pyagent import permissions
 from pyagent import protocol
@@ -120,24 +123,42 @@ _PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
 }
 
 
-# Default model name per provider, mirroring each LLM client's
-# constructor default. Used when the user passes bare `--model
-# anthropic` (no `/name`) so the cost meter still resolves a price.
-_DEFAULT_MODELS: dict[str, str] = {
-    "anthropic": "claude-sonnet-4-6",
-    "openai": "gpt-4o",
-    "gemini": "gemini-2.5-flash",
-}
-
-
 def _model_name(model_str: str) -> str:
     """Extract the bare model name from a 'provider/name' string.
 
-    Falls back to the provider's default model if no `/name` was
-    given so the pricing lookup still works on `--model anthropic`.
+    Falls back to the provider's default model (via the llms registry)
+    if no `/name` was given so the pricing lookup still works on
+    `--model anthropic`.
     """
-    provider, _, name = model_str.partition("/")
-    return name or _DEFAULT_MODELS.get(provider, "")
+    _, _, name = llms.resolve_model(model_str).partition("/")
+    return name
+
+
+def _resolve_model(cli_model: str | None) -> str:
+    """Pick a model string. Precedence: --model > config.default_model
+    > auto-detect from API-key env vars. Raises a click error if all
+    three are empty so the user gets a pointed message instead of a
+    "ANTHROPIC_API_KEY is not set" deep in the SDK.
+    """
+    if cli_model:
+        return llms.resolve_model(cli_model)
+    cfg_default = (config.load().get("default_model") or "").strip()
+    if cfg_default:
+        return llms.resolve_model(cfg_default)
+    detected = llms.auto_detect_provider()
+    if detected:
+        return llms.resolve_model(detected.name)
+    expected = ", ".join(
+        v
+        for spec in llms.PROVIDERS
+        for v in spec.env_vars
+    )
+    raise click.UsageError(
+        "no model selected and no API-key env var is set.\n"
+        f"Set one of: {expected}\n"
+        "Or pass --model <provider> (e.g. --model openai),\n"
+        "or pin a default with `pyagent-config init` then editing default_model."
+    )
 
 
 def _estimate_cost_usd(
@@ -262,9 +283,9 @@ def _update_agents_state(
         return
 
 
-# A safety-net pass at session end. Organic ledger work is supposed to
-# happen mid-conversation (see SOUL.md); this sweep catches whatever
-# slipped through.
+# Optional safety-net pass at session end. Organic ledger work is
+# supposed to happen mid-conversation (see SOUL.md), so this sweep is
+# off by default — opt in with --memory-pass-on-exit when you want it.
 _END_OF_SESSION_PROMPT = (
     "The session is wrapping up. Review this conversation: if anything "
     "should have been recorded in your USER or MEMORY ledger and wasn't, "
@@ -486,9 +507,12 @@ def _drive_turn(
 )
 @click.option(
     "--model",
-    default="anthropic",
-    show_default=True,
-    help="Provider, optionally with '/model-name' (e.g. anthropic, openai/gpt-4o).",
+    default=None,
+    help=(
+        "Provider, optionally with '/model-name' (e.g. anthropic, "
+        "openai/gpt-4o). If unset: use config.default_model, else "
+        "auto-detect from API-key env vars."
+    ),
 )
 @click.option(
     "--resume",
@@ -529,16 +553,30 @@ def _drive_turn(
     help="Overwrite <config-dir>/MEMORY.md with the bundled template. Destructive — wipes long-term memory.",
 )
 @click.option(
-    "--reset-all",
+    "--reset-skills",
     is_flag=True,
-    help="Shortcut: --reset-soul --reset-tools --reset-primer --reset-user --reset-memory together.",
+    help="Remove every user-installed skill under <config-dir>/skills/. "
+    "Bundled skills are unaffected (they ship with the package).",
 )
 @click.option(
-    "--no-memory-pass-on-exit",
-    "no_memory_pass_on_exit",
+    "--reset-all",
     is_flag=True,
-    help="Skip the end-of-session memory pass. Useful for throwaway "
-    "sessions, sensitive conversations, or scripted runs.",
+    help="Shortcut: every --reset-* flag together (SOUL, TOOLS, PRIMER, USER, MEMORY, skills).",
+)
+@click.option(
+    "--yes",
+    "-y",
+    "assume_yes",
+    is_flag=True,
+    help="Skip the confirmation prompt for destructive resets (USER, MEMORY, skills).",
+)
+@click.option(
+    "--memory-pass-on-exit",
+    "memory_pass_on_exit",
+    is_flag=True,
+    help="Run a safety-net memory pass at session end. Off by default — "
+    "the agent is expected to record memory organically mid-conversation. "
+    "Enable when you want a final sweep for things that may have slipped.",
 )
 @click.option(
     "--verbose",
@@ -550,15 +588,17 @@ def main(
     soul: Path | None,
     tools_md: Path | None,
     primer: Path | None,
-    model: str,
+    model: str | None,
     resume_id: str | None,
     reset_soul: bool,
     reset_tools: bool,
     reset_primer: bool,
     reset_user: bool,
     reset_memory: bool,
+    reset_skills: bool,
     reset_all: bool,
-    no_memory_pass_on_exit: bool,
+    assume_yes: bool,
+    memory_pass_on_exit: bool,
     verbose: bool,
 ) -> None:
     install_traceback(show_locals=False)
@@ -567,25 +607,77 @@ def main(
     if verbose:
         logging.getLogger("pyagent").setLevel(logging.INFO)
 
-    any_reset = False
-    for flag, name, seed in (
-        (reset_soul or reset_all, "SOUL.md", "SOUL.md"),
-        (reset_tools or reset_all, "TOOLS.md", "TOOLS.md"),
-        (reset_primer or reset_all, "PRIMER.md", "PRIMER.md"),
-        (reset_user or reset_all, "USER.md", "USER.md"),
-        (reset_memory or reset_all, "MEMORY.md", "MEMORY.md"),
-    ):
-        if flag:
-            path = paths.reset_to_default(name, seed)
-            console.print(f"[yellow]reset {name} → {path}[/yellow]")
-            any_reset = True
+    will_reset_soul = reset_soul or reset_all
+    will_reset_tools = reset_tools or reset_all
+    will_reset_primer = reset_primer or reset_all
+    will_reset_user = reset_user or reset_all
+    will_reset_memory = reset_memory or reset_all
+    will_reset_skills = reset_skills or reset_all
+    any_reset = any(
+        (
+            will_reset_soul,
+            will_reset_tools,
+            will_reset_primer,
+            will_reset_user,
+            will_reset_memory,
+            will_reset_skills,
+        )
+    )
+
     if any_reset:
+        skills_root = paths.config_dir() / "skills"
+        skill_dirs: list[Path] = []
+        if will_reset_skills and skills_root.exists():
+            skill_dirs = sorted(p for p in skills_root.iterdir() if p.is_dir())
+
+        destructive: list[str] = []
+        if will_reset_user:
+            destructive.append("USER.md (accumulated preferences)")
+        if will_reset_memory:
+            destructive.append("MEMORY.md (long-term memory)")
+        if will_reset_skills:
+            if skill_dirs:
+                names = ", ".join(p.name for p in skill_dirs)
+                destructive.append(
+                    f"{len(skill_dirs)} user-installed skill(s): {names}"
+                )
+            else:
+                destructive.append("user-installed skills (none currently)")
+
+        if destructive and not assume_yes:
+            console.print("[red]This will permanently remove:[/red]")
+            for line in destructive:
+                console.print(f"  - {line}")
+            if not click.confirm("Continue?", default=False):
+                console.print("[dim]aborted.[/dim]")
+                return
+
+        for flag, name, seed in (
+            (will_reset_soul, "SOUL.md", "SOUL.md"),
+            (will_reset_tools, "TOOLS.md", "TOOLS.md"),
+            (will_reset_primer, "PRIMER.md", "PRIMER.md"),
+            (will_reset_user, "USER.md", "USER.md"),
+            (will_reset_memory, "MEMORY.md", "MEMORY.md"),
+        ):
+            if flag:
+                path = paths.reset_to_default(name, seed)
+                console.print(f"[yellow]reset {name} → {path}[/yellow]")
+
+        if will_reset_skills:
+            for d in skill_dirs:
+                shutil.rmtree(d)
+                console.print(f"[yellow]removed user skill {d.name}[/yellow]")
+            if not skill_dirs:
+                console.print(f"[dim]no user-installed skills in {skills_root}[/dim]")
+
         if resume_id:
             console.print(
                 f"[dim](--resume {resume_id} ignored: reset flags exit "
                 "without launching the REPL)[/dim]"
             )
         return
+
+    model = _resolve_model(model)
 
     if resume_id:
         session = Session(session_id=resume_id)
@@ -605,7 +697,7 @@ def main(
     prior = session.load_history()
     _seed_input_history(prior)
 
-    config = {
+    agent_config = {
         "cwd": str(Path.cwd().resolve()),
         "model": model,
         "session_id": session.id,
@@ -629,7 +721,7 @@ def main(
     parent_conn, child_conn = ctx.Pipe(duplex=True)
     proc = ctx.Process(
         target=agent_proc.child_main,
-        args=(config, child_conn),
+        args=(agent_config, child_conn),
         name="pyagent-agent",
         daemon=False,
     )
@@ -652,11 +744,8 @@ def main(
             watcher.start()
             thinking.start()
 
-        provider, _, model_name = model.partition("/")
         console.print(f"[dim]session: {session.id}[/dim]")
-        console.print(
-            f"[dim]model:   {provider}/{model_name or 'default'}[/dim]"
-        )
+        console.print(f"[dim]model:   {model}[/dim]")
         if prior:
             console.print(f"[dim]resumed {len(prior)} entries[/dim]")
 
@@ -728,7 +817,7 @@ def main(
                 console.print("[red]agent subprocess exited unexpectedly[/red]")
                 break
 
-        if not no_memory_pass_on_exit and turns_run > 0 and proc.is_alive():
+        if memory_pass_on_exit and turns_run > 0 and proc.is_alive():
             try:
                 protocol.send(
                     parent_conn,

@@ -290,11 +290,6 @@ _DANGEROUS_PATTERNS: list[tuple[str, str]] = [
         "force push to main/master",
     ),
     (r"\bchmod\s+-R\s+[0-7]{3,4}\s+/(?:\s|$)", "recursive chmod on /"),
-    (
-        r"(?:>\s*\S*|\b(?:rm|mv|cp|tee|sed\s+-i\S*)\s+[^|;&]*)"
-        r"\.auto_installed\b",
-        "tampering with the skills auto-install marker",
-    ),
 ]
 
 

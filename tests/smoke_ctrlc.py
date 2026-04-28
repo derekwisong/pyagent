@@ -47,7 +47,6 @@ def main() -> None:
             str(pyagent_bin),
             "--model",
             "pyagent/echo",
-            "--no-memory-pass-on-exit",
         ],
         cwd=str(work),
         stdin=subprocess.PIPE,

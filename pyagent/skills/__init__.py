@@ -18,44 +18,30 @@ existing shell tool. Nothing is imported into the agent's process —
 each script call is a subprocess, gated by the same Bash safety as
 any other shell command.
 
-Resolution order (first wins, local overrides everything):
-  1. ./.pyagent/skills/<name>/SKILL.md       — project-local
-  2. <config-dir>/skills/<name>/SKILL.md     — user-installed
+Resolution order (later wins, so project-local overrides everything):
+  1. <package>/skills/<name>/SKILL.md         — bundled with pyagent
+  2. <config-dir>/skills/<name>/SKILL.md      — user-installed
+  3. ./.pyagent/skills/<name>/SKILL.md        — project-local
 
-Bundled skills live at `pyagent/skills/<name>/` inside the package.
-They are normally opt-in via `pyagent-skills install`, with one
-exception: a bundled skill whose frontmatter sets `auto_install: true`
-is seeded into `<config-dir>/skills/<name>/` on first run.
-
-Auto-install is tracked in `<config-dir>/skills/.auto_installed`,
-which lists the bundled skill names that have already been seeded.
-On launch, any flagged bundled skill *not* in that file gets copied
-in (and added to the file). Uninstalling a seeded skill removes the
-directory but leaves the line — so it stays uninstalled across
-restarts. To opt back in, either rerun `pyagent-skills install
-<name>` or delete the matching line from `.auto_installed`.
-
-Note: `.auto_installed` lives in the user's writable config dir, so
-the agent can technically modify it through its normal file/shell
-tools. The marker is a convention to keep auto-install behavior
-predictable, not a security boundary.
+Bundled skills load directly from the installed package. Upgrading
+pyagent updates them for free. To customize a bundled skill, copy its
+directory into the user-installed or project-local root and edit
+there — the override takes precedence.
 """
 
 from __future__ import annotations
 
 import logging
-import shutil
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
-from pyagent import paths
+from pyagent import config, paths
 
 logger = logging.getLogger(__name__)
 
 LOCAL_SKILLS_DIR = Path(".pyagent") / "skills"
 PACKAGE_SKILLS_PKG = "pyagent.skills"
-_AUTO_INSTALLED_MARKER = ".auto_installed"
 
 
 @dataclass
@@ -125,96 +111,28 @@ def _bundled_root() -> Path:
     return Path(str(resources.files(PACKAGE_SKILLS_PKG)))
 
 
-_AUTO_INSTALLED_HEADER = (
-    "# Bundled skills that have been auto-seeded into this directory.\n"
-    "# Each line is a skill name. A name listed here is treated as\n"
-    "# already-handled and will NOT be re-seeded on subsequent runs,\n"
-    "# even if the matching directory is removed. Delete a line to\n"
-    "# opt that skill back into auto-install on next launch.\n"
-)
-
-
-def _read_auto_installed(target_root: Path) -> set[str]:
-    marker = target_root / _AUTO_INSTALLED_MARKER
-    if not marker.exists():
+def _enabled_bundled_names() -> set[str]:
+    """Names of built-in skills the user has opted into via config.toml."""
+    cfg = config.load()
+    raw = cfg.get("built_in_skills_enabled", [])
+    if not isinstance(raw, list):
+        logger.warning("config.built_in_skills_enabled is not a list; ignoring")
         return set()
-    try:
-        text = marker.read_text()
-    except OSError as e:
-        logger.warning("could not read %s: %s", marker, e)
-        return set()
-    return {
-        line.strip()
-        for line in text.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
-
-
-def _write_auto_installed(target_root: Path, names: set[str]) -> None:
-    marker = target_root / _AUTO_INSTALLED_MARKER
-    target_root.mkdir(parents=True, exist_ok=True)
-    body = "\n".join(sorted(names))
-    marker.write_text(_AUTO_INSTALLED_HEADER + body + ("\n" if body else ""))
-
-
-def _seed_auto_install_skills() -> None:
-    """Seed bundled skills with `auto_install: true` into the user's
-    config-dir skills folder.
-
-    A skill is seeded the first time it's seen. After that, its name
-    is recorded in `<config-dir>/skills/.auto_installed` and the
-    seeder will skip it forever — even if the destination directory
-    has been deleted via `pyagent-skills uninstall`. Removing the
-    line from `.auto_installed` (or running `pyagent-skills install`
-    manually) is how a user opts back in.
-
-    Errors are logged and swallowed — a broken seed must never block
-    discovery of the user's other skills.
-    """
-    try:
-        bundled = _bundled_root()
-    except (ModuleNotFoundError, FileNotFoundError):
-        return
-    if not bundled.exists():
-        return
-    target_root = paths.config_dir() / "skills"
-    seeded = _read_auto_installed(target_root)
-    changed = False
-    for skill_md in bundled.glob("*/SKILL.md"):
-        try:
-            fm, _ = _parse_frontmatter(skill_md.read_text())
-        except OSError as e:
-            logger.warning("auto_install scan: %s unreadable: %s", skill_md, e)
-            continue
-        if fm.get("auto_install", "").strip().lower() != "true":
-            continue
-        name = fm.get("name") or skill_md.parent.name
-        if name in seeded:
-            continue
-        dest = target_root / name
-        if not dest.exists():
-            try:
-                target_root.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(skill_md.parent, dest)
-            except OSError as e:
-                logger.warning("auto_install seed of %s failed: %s", name, e)
-                continue
-            logger.info("seeded bundled skill %s -> %s", name, dest)
-        seeded.add(name)
-        changed = True
-    if changed:
-        try:
-            _write_auto_installed(target_root, seeded)
-        except OSError as e:
-            logger.warning(
-                "could not update %s: %s", target_root / _AUTO_INSTALLED_MARKER, e
-            )
+    return {n for n in raw if isinstance(n, str)}
 
 
 def discover() -> dict[str, Skill]:
-    """Discover all installed skills. Local overrides user."""
-    _seed_auto_install_skills()
-    skills = _scan_dir(paths.config_dir() / "skills")
+    """Discover all skills across the three tiers. Later tiers win.
+
+    Bundled skills are filtered against `built_in_skills_enabled` in
+    config.toml — only explicitly enabled ones appear. User-installed
+    and project-local tiers are unfiltered (their presence on disk is
+    the enablement).
+    """
+    bundled = _scan_dir(_bundled_root())
+    enabled = _enabled_bundled_names()
+    skills = {n: s for n, s in bundled.items() if n in enabled}
+    skills.update(_scan_dir(paths.config_dir() / "skills"))
     skills.update(_scan_dir(LOCAL_SKILLS_DIR))
     return skills
 
@@ -231,6 +149,11 @@ def catalog(skills: dict[str, Skill]) -> str:
         "load that skill's instructions. The call is idempotent — if a "
         "long session has pushed the body out of working memory or you "
         "are unsure of a script's exact syntax, just call it again.",
+        "",
+        "This list re-renders before every model call, so a skill you "
+        "or the user just installed shows up on the next call — no "
+        "session restart needed. The body still requires `read_skill` "
+        "to load.",
         "",
     ]
     for skill in sorted(skills.values(), key=lambda s: s.name):
