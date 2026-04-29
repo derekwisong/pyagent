@@ -124,7 +124,8 @@ def read_file(
     Args:
         path: Path to the file to read.
         start: First line to return (1-indexed, inclusive). Text only.
-            Defaults to 1.
+            Matches the line numbers `grep` emits and the editor's
+            line gutter. Defaults to 1.
         end: Last line to return (1-indexed, inclusive). Text only.
             Defaults to end of file.
 
@@ -184,12 +185,19 @@ def read_file(
 def write_file(path: str, content: str) -> str:
     """Write content to a file, overwriting any existing file.
 
+    Overwrites unconditionally. If you only want to append or modify
+    a portion, `read_file` first, edit in memory, then write back —
+    there is no streaming or partial-write mode. The full content
+    goes to disk in one shot.
+
     Args:
         path: Path to the file to write.
-        content: Content to write.
+        content: Full content to write.
 
     Returns:
-        Confirmation message with the number of bytes written.
+        Confirmation message with the resolved path and byte count, or
+        an error marker if the parent directory is missing, the path
+        names a directory, or permission is denied.
     """
     if not permissions.require_access(path):
         return _denied(path)
@@ -206,6 +214,12 @@ def write_file(path: str, content: str) -> str:
 
 def list_directory(path: str) -> list[str]:
     """List the entries in a directory.
+
+    Reach for this when you don't yet know a directory's layout — it's
+    cheaper than `grep`-on-a-tree when you're just orienting. Use it
+    before `read_file` or `grep` if the file paths aren't already known.
+    Directories come back with a trailing `/` so they're visually
+    distinct from regular files.
 
     Args:
         path: Directory to list.
@@ -232,8 +246,11 @@ def list_directory(path: str) -> list[str]:
 def grep(pattern: str, path: str) -> list[str]:
     """Search for a regex pattern in a file or directory tree.
 
-    Searches recursively if `path` is a directory. Files that cannot be
-    decoded as UTF-8 text are skipped.
+    First reach for any "where does X appear?" question — cheaper than
+    reading whole files to skim. Searches recursively if `path` is a
+    directory. Files that cannot be decoded as UTF-8 text are skipped.
+    Output line numbers match `read_file`'s `start`/`end` so you can
+    pipe a hit into a targeted read.
 
     Args:
         pattern: Regex pattern to search for.
@@ -305,11 +322,28 @@ def _safety_check(command: str) -> str | None:
 def execute(command: str) -> str:
     """Run a shell command and return its output.
 
+    Hard 60-second timeout per call; commands that exceed it are killed
+    (whole process group) and return `<command timed out after 60s: ...>`.
+    Use this for git, scripts, builds, tests, one-off shell utilities,
+    and HTTP requests that need more than `fetch_url`'s GET-only support.
+
+    Runs with the user's privileges. Destructive or irreversible
+    operations (`rm -rf`, force pushes, dropping data, killing
+    processes, mass file moves, anything that touches shared state)
+    need explicit user consent *before* invocation, not after. A small
+    allowlist of clearly dangerous patterns (recursive rm at root,
+    fork bombs, piping curl|sh, force push to main, etc.) is refused
+    automatically with `<refused: ...>`; treat that as a speed bump
+    against accidents, not a sandbox.
+
     Args:
         command: Shell command to run.
 
     Returns:
-        Combined report of exit code, stdout, and stderr.
+        Multi-line report — `exit_code: N`, then `stdout:` followed by
+        captured stdout, then `stderr:` followed by captured stderr.
+        Timeout or refusal come back as a leading `<...>` marker
+        instead of the normal report.
     """
     blocked = _safety_check(command)
     if blocked:
@@ -367,12 +401,18 @@ _FETCH_UA = (
 def fetch_url(url: str) -> str:
     """Fetch a URL via HTTP GET and return the response body as text.
 
+    GET-only. Non-2xx responses come back as data (a `status: 404` line
+    followed by the body) rather than as errors — read the status line
+    and adapt. For POST, custom headers, auth, or anything beyond a
+    plain GET, drop into `execute` with `curl` instead.
+
     Args:
         url: URL to fetch.
 
     Returns:
-        Status code followed by the response body. Network failures are
-        reported as an error string rather than raised.
+        Status code line followed by the response body. Network
+        failures (DNS, connection refused, timeout) are reported as a
+        leading `<request failed: ...>` marker rather than raised.
     """
     try:
         response = requests.get(

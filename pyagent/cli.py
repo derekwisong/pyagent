@@ -19,6 +19,7 @@ from pyagent import llms
 from pyagent import paths
 from pyagent import permissions
 from pyagent import protocol
+from pyagent import roles
 from pyagent.cancel import CancelWatcher
 from pyagent.session import Session
 
@@ -362,6 +363,46 @@ def _prompt_permission(
         sys.stderr.write(
             f"  unrecognized: {answer!r} — please answer y, n, or a\n"
         )
+
+
+def _handle_model_command(
+    parent_conn: Connection, line: str, current_model: str
+) -> str:
+    """Parse `/model <spec>` and (on success) ask the child to swap.
+
+    `spec` is either a role name (resolved via `roles.resolve`) or a
+    raw provider/model string. On bad input, prints an error and
+    returns `current_model` unchanged. On success, sends a `set_model`
+    event upstream and returns the resolved model string for the
+    caller to adopt as its display value.
+
+    The CLI updates its display optimistically — if the child fails
+    to construct the new client (e.g. missing API key), it emits an
+    `info` event with the error and leaves its existing client in
+    place; the caller will see the message on the next turn.
+    """
+    parts = line.split(maxsplit=1)
+    if len(parts) < 2:
+        console.print(
+            "[red]usage: /model <provider[/model-name]> | <role-name>[/red]"
+        )
+        return current_model
+    spec = parts[1].strip()
+    try:
+        resolved, _ = roles.resolve(spec)
+    except ValueError as e:
+        console.print(f"[red]bad model spec {spec!r}: {e}[/red]")
+        return current_model
+    if not resolved:
+        console.print("[red]empty model spec[/red]")
+        return current_model
+    try:
+        protocol.send(parent_conn, "set_model", model=resolved)
+    except (BrokenPipeError, OSError):
+        console.print("[red]agent subprocess died[/red]")
+        return current_model
+    console.print(f"[dim]model: {resolved}[/dim]")
+    return resolved
 
 
 def _drive_turn(
@@ -786,7 +827,11 @@ def main(
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 break
-            if not prompt.strip():
+            stripped = prompt.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("/model"):
+                model = _handle_model_command(parent_conn, stripped, model)
                 continue
             try:
                 protocol.send(parent_conn, "user_prompt", prompt=prompt)

@@ -40,6 +40,7 @@ from typing import Any
 from pyagent import paths
 from pyagent import permissions
 from pyagent import protocol
+from pyagent import roles as roles_mod
 from pyagent import skills as skills_mod
 from pyagent import subagent as subagent_mod
 from pyagent import tools as agent_tools
@@ -250,11 +251,40 @@ class _ChildState:
                     pass
         elif kind == "permission_response":
             self.permission_replies.put(event)
+        elif kind == "set_model":
+            self._handle_set_model(event.get("model", ""))
         elif kind == "shutdown":
             self.shutdown_event.set()
             self.work_queue.put({"type": "shutdown"})
         else:
             logger.warning("child: unknown event type %r", kind)
+
+    def _handle_set_model(self, model: str) -> None:
+        """Swap the agent's LLM client to a new model.
+
+        Mid-turn swaps are tolerated — `_call_llm` reads `agent.client`
+        fresh on each turn, so the next API call uses the new client.
+        Construction failures (unknown provider, missing API key) are
+        surfaced as `info` events; the existing client stays in place.
+        """
+        if self.agent is None or not model:
+            return
+        try:
+            new_client = get_client(model)
+        except Exception as e:
+            self.send(
+                "info",
+                level="warn",
+                message=(
+                    f"set_model {model!r} failed: "
+                    f"{type(e).__name__}: {e}"
+                ),
+            )
+            return
+        self.agent.client = new_client
+        self.send(
+            "info", level="info", message=f"model swapped to {model}"
+        )
 
     def _handle_subagent_event(self, sid: str, conn: Connection) -> None:
         try:
@@ -361,44 +391,54 @@ def _register_tools(
     parent_session: Session | None = None,
     base_config: dict[str, Any] | None = None,
     allow_meta: bool = False,
+    allowlist: list[str] | None = None,
 ) -> None:
     """Register the default tool set on `agent`.
 
-    Kept in lockstep with cli.py's previous in-process registration.
-    `allow_meta=True` also registers spawn_subagent / call_subagent /
-    terminate_subagent — used for root agents and (eventually) for
-    subagents once recursion lands.
+    `allow_meta=True` registers spawn_subagent / call_subagent /
+    terminate_subagent on top of the default set — used for root
+    agents and for subagents whose role permits further spawning.
+
+    `allowlist` (when non-None) restricts registration to only the
+    named tools — used for role-scoped subagents like a read-only
+    validator. Names not in the default set are silently ignored.
+    The allowlist *cannot* add tools that don't exist; it can only
+    narrow.
     """
-    agent.add_tool("read_file", agent_tools.read_file, auto_offload=False)
-    agent.add_tool("write_file", agent_tools.write_file)
-    agent.add_tool("list_directory", agent_tools.list_directory)
-    agent.add_tool("grep", agent_tools.grep)
-    agent.add_tool("execute", agent_tools.execute)
-    agent.add_tool("fetch_url", agent_tools.fetch_url)
-    agent.add_tool("read_ledger", agent_tools.read_ledger, auto_offload=False)
-    agent.add_tool("write_ledger", agent_tools.write_ledger)
-    agent.add_tool("read_skill", skills_mod.read_skill, auto_offload=False)
+    def _add(name: str, fn: Any, **kw: Any) -> None:
+        if allowlist is None or name in allowlist:
+            agent.add_tool(name, fn, **kw)
+
+    _add("read_file", agent_tools.read_file, auto_offload=False)
+    _add("write_file", agent_tools.write_file)
+    _add("list_directory", agent_tools.list_directory)
+    _add("grep", agent_tools.grep)
+    _add("execute", agent_tools.execute)
+    _add("fetch_url", agent_tools.fetch_url)
+    _add("read_ledger", agent_tools.read_ledger, auto_offload=False)
+    _add("write_ledger", agent_tools.write_ledger)
+    _add("read_skill", skills_mod.read_skill, auto_offload=False)
     if allow_meta:
         assert state is not None and parent_session is not None and base_config is not None
-        agent.add_tool(
+        _add(
             "spawn_subagent",
             subagent_mod.make_spawn_subagent(
                 state, agent, parent_session, base_config
             ),
         )
-        agent.add_tool(
+        _add(
             "call_subagent",
             subagent_mod.make_call_subagent(state, agent),
         )
-        agent.add_tool(
+        _add(
             "call_subagent_async",
             subagent_mod.make_call_subagent_async(state, agent),
         )
-        agent.add_tool(
+        _add(
             "wait_for_subagents",
             subagent_mod.make_wait_for_subagents(state, agent),
         )
-        agent.add_tool(
+        _add(
             "terminate_subagent",
             subagent_mod.make_terminate_subagent(state, agent),
         )
@@ -409,10 +449,12 @@ def _bootstrap(
 ) -> tuple[Agent, Session]:
     """Replicate the CLI's startup setup inside the child process.
 
-    Handles both root agents (the original Phase 2 path) and subagents
-    (new in Phase 3): subagents have `is_subagent=True` in the config,
-    use a custom session_root, and skip the SystemPromptBuilder in
-    favor of the system_prompt_override string from spawn_subagent.
+    Handles both root agents and subagents. Subagents have
+    `is_subagent=True` in the config and use a custom session_root.
+    Both build a `SystemPromptBuilder`; the subagent path additionally
+    layers a `role_body` (from the spawn-time role definition) and a
+    `task_body` (from the spawn-time `system_prompt` argument) on top
+    of the universal SOUL/TOOLS/PRIMER base.
     """
     # Close stdin so a buggy library or tool that calls input() can't
     # steal raw keystrokes from the CLI's CancelWatcher (which is the
@@ -435,6 +477,16 @@ def _bootstrap(
 
     client = get_client(config["model"])
 
+    # role_meta_tools defaults True so non-role spawns and root agents
+    # keep the existing fan-out behavior. Roles can disable meta-tools
+    # to mark a subagent as a leaf (validator, summarizer, etc.).
+    allow_meta = bool(config.get("role_meta_tools", True))
+    # role_tools is the allowlist; None means inherit the default set.
+    allowlist = config.get("role_tools")
+    # Leaf subagents skip the role catalog — showing roles they can't
+    # spawn is misleading prose.
+    catalog_for_roles = roles_mod.catalog if allow_meta else ""
+
     if is_subagent:
         session = Session(
             session_id=config["session_id"],
@@ -449,8 +501,14 @@ def _bootstrap(
             )
         except OSError:
             pass
-        system: str | SystemPromptBuilder = config.get(
-            "system_prompt_override", ""
+        system: SystemPromptBuilder = SystemPromptBuilder(
+            soul=Path(config["soul_path"]),
+            tools=Path(config["tools_path"]),
+            primer=Path(config["primer_path"]),
+            skills_catalog=skills_mod.live_catalog,
+            roles_catalog=catalog_for_roles,
+            role_body=config.get("role_body", ""),
+            task_body=config.get("task_body", ""),
         )
     else:
         session = Session(session_id=config["session_id"])
@@ -459,6 +517,7 @@ def _bootstrap(
             tools=Path(config["tools_path"]),
             primer=Path(config["primer_path"]),
             skills_catalog=skills_mod.live_catalog,
+            roles_catalog=catalog_for_roles,
         )
 
     agent = Agent(
@@ -471,21 +530,19 @@ def _bootstrap(
     # status (sync vs async mode) when routing turn_complete events.
     state.agent = agent
 
-    # Root agents get the meta-tools so they can spawn subagents.
-    # Subagents (this iteration) get the default tools but no meta.
-    # Meta-tools registered on every agent now — root and subagents
-    # alike. Recursion is bounded by `max_depth` in the config (the
-    # spawn tool refuses if `agent.depth + 1 > max_depth`), which is
-    # the only safety mechanism that needed to be present. The
-    # subagent's session_root nests under its parent's session dir
-    # automatically, so a sub-sub-agent ends up at
-    # `<root>/subagents/X/subagents/Y/`.
+    # Meta-tools registered when the role allows further spawning.
+    # Recursion is bounded by `max_depth` in config (the spawn tool
+    # refuses if `agent.depth + 1 > max_depth`). Roles with
+    # `meta_tools = false` mark a subagent as a leaf — no spawn /
+    # call / terminate registered. Tool allowlist further narrows
+    # the default set when a role has `tools = [...]`.
     _register_tools(
         agent,
         state=state,
         parent_session=session,
         base_config=config,
-        allow_meta=True,
+        allow_meta=allow_meta,
+        allowlist=allowlist,
     )
 
     agent.conversation = session.load_history()
@@ -640,15 +697,15 @@ def child_main(config: dict[str, Any], conn: Connection) -> None:
       - model: provider string, optionally `provider/model-name`
       - session_id: existing session id (already created by upstream)
       - soul_path / tools_path / primer_path: resolved persona paths
-        (root agent only — subagents use `system_prompt_override`)
+        (inherited unchanged by subagents — they use the same SOUL,
+        TOOLS, and PRIMER as the root)
       - approved_paths: list[str] replayed via `pre_approve` so the
         user isn't re-prompted for paths already accepted upstream
-      - is_subagent: bool. When true, this is a Phase 3 subagent:
+      - is_subagent: bool. When true, this is a subagent:
         - session lives at `session_root`
-        - system prompt is `system_prompt_override`, NOT the persona
-          file stack (the spawning agent gets to define a fresh persona)
-        - depth, parent_session_id are recorded on disk
-        - meta-tools (spawn/call/terminate) are NOT registered
+        - depth and parent_session_id are recorded on disk
+        - role_body (optional) and task_body are layered onto the
+          universal SOUL/TOOLS/PRIMER base by SystemPromptBuilder
     """
     _set_parent_death_signal()
     _ignore_sigint()
