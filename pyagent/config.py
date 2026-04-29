@@ -133,7 +133,10 @@ def _render_toml_value(v: Any) -> str:
 
 def render_toml(data: dict[str, Any], commented: bool = False) -> str:
     """Render a config dict as TOML text. Top-level scalars/lists first,
-    then tables — the order TOML requires.
+    then tables — the order TOML requires. Tables containing nested
+    tables (e.g. `models.<name>` role definitions) render each child
+    as its own `[parent.child]` section so `pyagent-config show` works
+    with role-defining configs.
 
     If `commented`, every value line is prefixed with `# ` so the file
     serves as documentation: the user uncomments lines they want to
@@ -146,11 +149,49 @@ def render_toml(data: dict[str, Any], commented: bool = False) -> str:
     for k, v in flat:
         lines.append(f"{prefix}{k} = {_render_toml_value(v)}")
     for k, v in tables:
-        lines.append("")
-        lines.append(f"{prefix}[{k}]")
-        for k2, v2 in v.items():
-            lines.append(f"{prefix}{k2} = {_render_toml_value(v2)}")
+        scalars = {kk: vv for kk, vv in v.items() if not isinstance(vv, dict)}
+        sub_tables = {kk: vv for kk, vv in v.items() if isinstance(vv, dict)}
+        if scalars:
+            lines.append("")
+            lines.append(f"{prefix}[{k}]")
+            for k2, v2 in scalars.items():
+                lines.append(f"{prefix}{k2} = {_render_toml_value(v2)}")
+        for k2, v2 in sub_tables.items():
+            lines.append("")
+            lines.append(f"{prefix}[{k}.{k2}]")
+            for k3, v3 in v2.items():
+                if isinstance(v3, dict):
+                    continue  # three-deep nesting not supported
+                lines.append(f"{prefix}{k3} = {_render_toml_value(v3)}")
     return "\n".join(lines) + "\n"
+
+
+_ROLE_EXAMPLE_BLOCK = """
+# Roles — named subagent models the orchestrator can address by name.
+#
+# Each [models.<name>] table defines a preset that `spawn_subagent`
+# resolves via its `model` argument. Required: model, description.
+# Optional: system_prompt / system_prompt_path (default subagent
+# persona body, layered onto SOUL/TOOLS/PRIMER), tools (allowlist
+# narrowing the default tool set), meta_tools (default true; set
+# false to make a leaf role that can't fan out further).
+#
+# [models.planner]
+# model = "anthropic/claude-opus-4-7"
+# description = "Deep reasoning, multi-step planning."
+# system_prompt = "You are a planner. Break tasks into steps before recommending edits."
+# tools = ["read_file", "grep", "list_directory", "fetch_url"]
+# meta_tools = false
+"""
+
+
+def commented_template() -> str:
+    """Render the full commented-out template: documented defaults
+    plus a commented role example so users can discover the
+    `[models.<name>]` schema from `pyagent-config defaults` and the
+    file written by `pyagent-config init`.
+    """
+    return render_toml(DEFAULTS, commented=True) + _ROLE_EXAMPLE_BLOCK
 
 
 def init_default(force: bool = False) -> tuple[Path, bool]:
@@ -163,5 +204,5 @@ def init_default(force: bool = False) -> tuple[Path, bool]:
     if target.exists() and not force:
         return target, False
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(render_toml(DEFAULTS, commented=True))
+    target.write_text(commented_template())
     return target, True

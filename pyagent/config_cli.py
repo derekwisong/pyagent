@@ -41,7 +41,7 @@ def defaults_cmd() -> None:
 
     Pipe to a file, or use `pyagent-config init` to drop it in place.
     """
-    click.echo(config.render_toml(config.DEFAULTS, commented=True), nl=False)
+    click.echo(config.commented_template(), nl=False)
 
 
 @main.command("init")
