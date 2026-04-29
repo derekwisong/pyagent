@@ -78,6 +78,22 @@ what was picked.
 Make sure the matching API key from the table above is set in your
 environment before launching.
 
+### Switching models mid-session
+
+At the prompt, type `/model <spec>` to swap the running agent's LLM
+client without restarting:
+
+```
+> /model openai/gpt-4o
+> /model anthropic
+> /model planner          # role name (see Roles section)
+```
+
+The swap takes effect on the next API call. The status footer updates
+to reflect the new model. A bad spec leaves the existing client in
+place and prints a warning. Subagents are not affected — each child
+keeps the model it was spawned with.
+
 ## Design
 
 ### The agent loop
@@ -249,9 +265,14 @@ one out of the catalog, just leave it out of `built_in_skills_enabled`.
 
 ## Configuration
 
-Pyagent reads its config from `<config-dir>/config.toml`. A missing file is
-fine — bundled defaults apply. The `pyagent-config` CLI inspects and
-initializes the file:
+Pyagent reads config from two tiers, both optional:
+
+- `<config-dir>/config.toml` — user tier (per-user defaults)
+- `./.pyagent/config.toml` — project tier (per-repo overrides)
+
+Effective config is `defaults < user < project`, deep-merged. A missing
+file at any tier is fine — bundled defaults apply. The `pyagent-config`
+CLI inspects and initializes the user-tier file:
 
 ```
 pyagent-config show          # effective merged config (defaults + overrides)
@@ -262,6 +283,38 @@ pyagent-config init          # write the template to config.toml if absent
 `init` never overwrites; pass `--force` if you really want to start over.
 The written template is fully commented out, so the file's presence does
 not change behavior — uncomment lines to override defaults.
+
+### Roles (named subagent models)
+
+Define `[models.<name>]` tables in `config.toml` to give the
+orchestrator addressable subagent presets. The orchestrator then calls
+`spawn_subagent(model="planner")` (or any other defined role name)
+instead of repeating raw provider strings in every spawn. Roles also
+appear as targets for the `/model` slash command.
+
+```toml
+[models.planner]
+model = "anthropic/claude-opus-4-7"
+description = "Deep reasoning, multi-step planning."
+system_prompt = """
+You are a planner. Break tasks into steps before recommending edits.
+"""
+tools = ["read_file", "grep", "list_directory"]   # optional allowlist
+meta_tools = false                                # leaf role, can't fan out
+```
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `model` | yes | provider/model string in the same form as `--model`. |
+| `description` | yes | One-line summary; the orchestrator uses this to decide when to spawn this role. |
+| `system_prompt` | no | Default subagent persona body, layered onto SOUL/TOOLS/PRIMER (use `system_prompt_path` instead for longer prose; mutually exclusive). |
+| `tools` | no | Allowlist that narrows the default tool set. Absent = full default. |
+| `meta_tools` | no | Default `true`. Set `false` for leaves that should not themselves spawn subagents. |
+
+Roles render into a live "Available subagent models" catalog that the
+orchestrator sees in its system prompt. `/model <role-name>` and
+`spawn_subagent(model=...)` use the same lookup — role names win over
+raw provider strings.
 
 ## Managing sessions
 
