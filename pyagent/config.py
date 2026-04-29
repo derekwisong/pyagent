@@ -1,7 +1,11 @@
-"""Project configuration loaded from a TOML file.
+"""Project configuration loaded from TOML files.
 
-Lives at `<config-dir>/config.toml`. Missing or unreadable files fall
-back to `DEFAULTS`. User keys are deep-merged over the defaults so
+Two tiers, both optional:
+  - `<config-dir>/config.toml`         — user tier (per-user defaults)
+  - `./.pyagent/config.toml`           — project tier (per-repo overrides)
+
+Effective config = DEFAULTS < user < project, deep-merged. Missing or
+unreadable files fall back to `DEFAULTS`. Keys are deep-merged so
 partial overrides are sufficient — you only have to write the keys
 you actually want to change.
 
@@ -42,6 +46,7 @@ from pyagent import paths
 logger = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "config.toml"
+LOCAL_CONFIG_DIR = Path(".pyagent")
 
 DEFAULTS: dict[str, Any] = {
     "default_model": "",
@@ -68,26 +73,39 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return out
 
 
-def load() -> dict[str, Any]:
-    """Return effective config: DEFAULTS with user overrides merged in.
-
-    A missing or malformed config.toml is logged and ignored — agent
-    runs should never be blocked by a typo in user config.
-    """
-    cfg_path = paths.config_dir() / CONFIG_FILENAME
-    if not cfg_path.exists():
-        return _deep_merge(DEFAULTS, {})  # fresh copy
+def _read_toml(path: Path) -> dict[str, Any]:
+    """Read a TOML file. Missing returns {}; malformed warns and returns {}."""
+    if not path.exists():
+        return {}
     try:
-        with cfg_path.open("rb") as f:
-            user = tomllib.load(f)
+        with path.open("rb") as f:
+            return tomllib.load(f)
     except (OSError, tomllib.TOMLDecodeError) as e:
-        logger.warning("config.toml at %s unreadable: %s; using defaults", cfg_path, e)
-        return _deep_merge(DEFAULTS, {})
-    return _deep_merge(DEFAULTS, user)
+        logger.warning("config.toml at %s unreadable: %s; ignoring", path, e)
+        return {}
+
+
+def load() -> dict[str, Any]:
+    """Return effective config: DEFAULTS < user < project.
+
+    Three tiers, deep-merged in order. Project (./.pyagent/config.toml)
+    wins over user (~/.config/pyagent/config.toml) which wins over the
+    bundled DEFAULTS. A missing or malformed file at any tier is
+    logged and treated as empty — agent runs should never be blocked
+    by a typo in config.
+    """
+    user = _read_toml(paths.config_dir() / CONFIG_FILENAME)
+    project = _read_toml(LOCAL_CONFIG_DIR / CONFIG_FILENAME)
+    return _deep_merge(_deep_merge(DEFAULTS, user), project)
 
 
 def path() -> Path:
-    """Where the config file lives (whether or not it exists)."""
+    """Where the user-tier config file lives (whether or not it exists).
+
+    Project-tier config (./.pyagent/config.toml) is read but not
+    surfaced through this helper — the CLI commands that edit config
+    target the user tier.
+    """
     return paths.config_dir() / CONFIG_FILENAME
 
 

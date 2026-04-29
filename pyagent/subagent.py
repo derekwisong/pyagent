@@ -17,10 +17,9 @@ Caps are read from `pyagent.config` at registration time and enforced
 inside `spawn_subagent`. Refusal returns a leading-`<` error marker so
 the model sees the limit and adapts.
 
-This first cut is **single-level** — subagents do not themselves get
-the meta-tools registered, so the depth cap in practice acts as 1 even
-when the config allows more. Recursion will lift that restriction in
-a follow-up without changing the cap semantics.
+Subagents are recursive — every subagent gets the meta-tools
+registered, so a child can spawn its own children. Bounded by
+`subagents.max_depth` and `subagents.max_fanout` from config.
 """
 
 from __future__ import annotations
@@ -38,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from pyagent import config as config_mod
 from pyagent import permissions
 from pyagent import protocol
+from pyagent import roles as roles_mod
 
 if TYPE_CHECKING:
     from pyagent.agent import Agent
@@ -74,6 +74,8 @@ def _build_subagent_config(
     base_config: dict[str, Any],
     parent_session: "Session",
     parent_depth: int,
+    model_override: str = "",
+    role: roles_mod.Role | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Build the subagent's spawn config. Returns (subagent_id, config)."""
     sid = f"{name}-{uuid.uuid4().hex[:8]}"
@@ -83,8 +85,14 @@ def _build_subagent_config(
     cfg["session_root"] = str(session_root)
     cfg["depth"] = parent_depth + 1
     cfg["parent_session_id"] = parent_session.id
-    cfg["system_prompt_override"] = system_prompt
+    cfg["task_body"] = system_prompt
     cfg["is_subagent"] = True
+    if model_override:
+        cfg["model"] = model_override
+    if role is not None:
+        cfg["role_body"] = role.system_prompt
+        cfg["role_tools"] = list(role.tools) if role.tools is not None else None
+        cfg["role_meta_tools"] = role.meta_tools
     # Inherit current approved paths so the user isn't re-prompted for
     # paths they already accepted in the parent's process.
     cfg["approved_paths"] = [str(p) for p in permissions.approved_paths()]
@@ -102,22 +110,35 @@ def make_spawn_subagent(
     max_depth = cfg["subagents"]["max_depth"]
     max_fanout = cfg["subagents"]["max_fanout"]
 
-    def spawn_subagent(name: str, system_prompt: str) -> str:
-        """Spawn a subagent in its own subprocess with a custom system prompt.
+    def spawn_subagent(
+        name: str, system_prompt: str, model: str = ""
+    ) -> str:
+        """Spawn a subagent in its own subprocess.
 
-        The subagent has the same default tool set as the parent (read_file,
-        write_file, list_directory, grep, execute, fetch_url, read_ledger,
-        write_ledger, read_skill). It cannot itself spawn further subagents
-        in this version. Use `call_subagent(<id>, message)` to send it work,
-        and `terminate_subagent(<id>)` when you're done with it.
+        The subagent inherits the universal SOUL/TOOLS/PRIMER base, the
+        live skills catalog, and the same default tool set as the
+        parent (read_file, write_file, list_directory, grep, execute,
+        fetch_url, read_ledger, write_ledger, read_skill, plus
+        spawn/call/terminate so it can fan out further if the depth
+        cap allows). Use `call_subagent(<id>, message)` to send it
+        work and `terminate_subagent(<id>)` when you're done.
 
         Args:
             name: Short label for this subagent (e.g. "researcher",
-                "fact-checker"). Becomes part of the subagent id and the
-                CLI's display prefix for events from this child.
-            system_prompt: Full system prompt for the subagent. Replaces
-                the parent's persona for this child — write whatever
-                instructions, role, or constraints you want it to follow.
+                "fact-checker"). Becomes part of the subagent id and
+                the CLI's display prefix for events from this child.
+            system_prompt: The *task* description for this subagent —
+                what you want it to do, what to focus on, what to
+                ignore. Do NOT restate persona, voice, tool semantics,
+                or operating principles; the subagent already inherits
+                all of that. Keep this short and task-shaped.
+            model: Optional. Either a role name (looked up in the
+                "Available subagent models" catalog) or a raw
+                provider/model string ("anthropic/claude-opus-4-7",
+                "openai/gpt-4o"). When a role is named, the subagent
+                also inherits the role's default persona and tool
+                allowlist. Empty (the default) inherits the parent's
+                model with no role specialization.
 
         Returns:
             The subagent id string on success, or an error marker
@@ -134,12 +155,19 @@ def make_spawn_subagent(
                 f"terminate one before spawning another>"
             )
 
+        try:
+            resolved_model, role = roles_mod.resolve(model)
+        except ValueError as e:
+            return f"<refused: bad model {model!r}: {e}>"
+
         sid, sub_config = _build_subagent_config(
             name=name,
             system_prompt=system_prompt,
             base_config=base_config,
             parent_session=parent_session,
             parent_depth=agent.depth,
+            model_override=resolved_model,
+            role=role,
         )
 
         ctx = multiprocessing.get_context("spawn")
