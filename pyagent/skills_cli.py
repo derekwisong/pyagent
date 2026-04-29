@@ -1,35 +1,21 @@
-"""`pyagent-skills` — manage installed skills.
+"""`pyagent-skills` — inspect and remove skills.
 
-Bundled skills live under `pyagent/skills/<name>/` in this package.
-Users opt in by running `pyagent-skills install <name>`, which copies
-the bundled directory into `<config-dir>/skills/<name>/` so the agent
-discovers it on the next run.
+Bundled skills live under `pyagent/skills/<name>/` in the package and
+load directly from there at runtime — no install step. To customize a
+bundled skill, copy its directory into `<config-dir>/skills/` (user
+scope) or `./.pyagent/skills/` (project scope) and edit. The override
+takes precedence at discovery time.
 """
 
 from __future__ import annotations
 
 import shutil
-from importlib import resources
 from pathlib import Path
 
 import click
 
 from pyagent import paths
 from pyagent import skills as skills_mod
-
-_BUNDLED_PKG = "pyagent.skills"
-
-
-def _bundled_root() -> Path:
-    """Locate the on-disk path of `pyagent/skills/`. Works for editable
-    installs and normal site-packages — both expose a real Path.
-    """
-    root = resources.files(_BUNDLED_PKG)
-    return Path(str(root))
-
-
-def _bundled_skills() -> dict[str, skills_mod.Skill]:
-    return skills_mod._scan_dir(_bundled_root())
 
 
 def _installed_root() -> Path:
@@ -38,68 +24,59 @@ def _installed_root() -> Path:
 
 @click.group()
 def main() -> None:
-    """Manage pyagent skills (catalog the agent can load on demand)."""
+    """Inspect and remove pyagent skills."""
 
 
 @main.command("list")
 def list_cmd() -> None:
-    """List bundled and installed skills."""
-    bundled = _bundled_skills()
+    """List skills across all three tiers, with state annotations."""
+    bundled = skills_mod._scan_dir(skills_mod._bundled_root())
     installed = skills_mod._scan_dir(_installed_root())
     local = skills_mod._scan_dir(skills_mod.LOCAL_SKILLS_DIR)
+    enabled = skills_mod._enabled_bundled_names()
 
-    def render(label: str, found: dict[str, skills_mod.Skill]) -> None:
-        click.secho(label, bold=True)
-        if not found:
-            click.echo("  (none)")
-            return
-        for skill in sorted(found.values(), key=lambda s: s.name):
+    overridden_in_bundled = {n for n in bundled if n in installed or n in local}
+    overridden_in_installed = {n for n in installed if n in local}
+
+    click.secho("Bundled (ships with pyagent):", bold=True)
+    if bundled:
+        for skill in sorted(bundled.values(), key=lambda s: s.name):
+            state = "enabled" if skill.name in enabled else "disabled"
+            tags = [state]
+            if skill.name in overridden_in_bundled:
+                tags.append("overridden")
+            click.echo(f"  [{', '.join(tags)}] {skill.name}: {skill.description}")
+    else:
+        click.echo("  (none)")
+    click.echo()
+    click.echo(
+        "  Enable a bundled skill by adding its name to "
+        "built_in_skills_enabled in config.toml."
+    )
+    click.echo(
+        "  Run `pyagent-config init` to create the file with documented defaults,"
+    )
+    click.echo(f"  then edit {paths.config_dir() / 'config.toml'}.")
+    click.echo()
+
+    click.secho(f"User ({_installed_root()}):", bold=True)
+    if installed:
+        for skill in sorted(installed.values(), key=lambda s: s.name):
+            tag = "  (overridden)" if skill.name in overridden_in_installed else ""
+            click.echo(f"  {skill.name}{tag}: {skill.description}")
+    else:
+        click.echo("  (none)")
+    click.echo()
+
+    click.secho(
+        f"Project-local ({skills_mod.LOCAL_SKILLS_DIR}, wins all ties):",
+        bold=True,
+    )
+    if local:
+        for skill in sorted(local.values(), key=lambda s: s.name):
             click.echo(f"  {skill.name}: {skill.description}")
-
-    render("Bundled (run `pyagent-skills install <name>` to enable):", bundled)
-    click.echo()
-    render(f"Installed ({_installed_root()}):", installed)
-    click.echo()
-    render(f"Project-local ({skills_mod.LOCAL_SKILLS_DIR}, overrides installed):", local)
-
-
-@main.command("install")
-@click.argument("name")
-@click.option(
-    "--local",
-    "-l",
-    is_flag=True,
-    help=(
-        "Install into the current workspace's ./.pyagent/skills/ "
-        "instead of the user config dir. Workspace skills override "
-        "config-dir skills of the same name."
-    ),
-)
-@click.option(
-    "--force",
-    is_flag=True,
-    help="Overwrite an existing installation of the same skill.",
-)
-def install_cmd(name: str, local: bool, force: bool) -> None:
-    """Copy a bundled skill into the user config dir (or this workspace)."""
-    src = _bundled_root() / name
-    if not (src / "SKILL.md").exists():
-        available = ", ".join(sorted(_bundled_skills())) or "(none)"
-        raise click.ClickException(
-            f"no bundled skill named {name!r}. available: {available}"
-        )
-    root = skills_mod.LOCAL_SKILLS_DIR if local else _installed_root()
-    dest = root / name
-    if dest.exists():
-        if not force:
-            raise click.ClickException(
-                f"{dest} already exists. pass --force to overwrite."
-            )
-        shutil.rmtree(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(src, dest)
-    scope = "workspace" if local else "user"
-    click.echo(f"installed {name} ({scope}) -> {dest}")
+    else:
+        click.echo("  (none)")
 
 
 @main.command("uninstall")
@@ -117,7 +94,10 @@ def install_cmd(name: str, local: bool, force: bool) -> None:
     help="Uninstall every skill in the chosen scope.",
 )
 def uninstall_cmd(name: str | None, local: bool, all_: bool) -> None:
-    """Remove an installed skill."""
+    """Remove a user-installed or project-local skill.
+
+    Cannot remove bundled skills (they ship with the package).
+    """
     root = skills_mod.LOCAL_SKILLS_DIR if local else _installed_root()
     scope = "workspace" if local else "user"
 

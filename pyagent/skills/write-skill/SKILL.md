@@ -1,7 +1,6 @@
 ---
 name: write-skill
 description: Author a new pyagent skill — directory layout, SKILL.md frontmatter, helper scripts, and where to put it. Load this when the user asks you to create a skill.
-auto_install: true
 ---
 
 # Writing a pyagent skill
@@ -26,14 +25,27 @@ in the frontmatter. Hyphens are fine (`pdf-extract`, `git-cleanup`).
 
 ## Where to put `<root>`
 
-Pick based on scope. Discovery order is local-wins:
+Pick based on scope. Discovery is three-tier; later tiers override
+earlier ones:
 
-- `./.pyagent/skills/` — **project-local**. Lives in the user's working
-  directory. Overrides any user-wide skill of the same name.
+- `<package>/skills/` — **bundled** with pyagent itself. Read-only
+  from the agent's perspective; you don't author here. Updated by
+  upgrading the pyagent install. Bundled skills are gated by
+  `built_in_skills_enabled` in `<config-dir>/config.toml` — only
+  listed ones load. (Skills you author land in one of the two tiers
+  below, which are never gated.)
 - `<config-dir>/skills/` — **user-wide**. Available across every
   project the user runs pyagent in. The `<config-dir>` is OS-dependent
   (`~/.config/pyagent/` on Linux,
   `~/Library/Application Support/pyagent/` on macOS).
+- `./.pyagent/skills/` — **project-local**. Lives in the user's working
+  directory. Overrides user-wide and bundled skills of the same name.
+
+A user-wide or project-local skill with the same name as a bundled
+one shadows the bundled copy entirely — that's how customization
+works: copy the bundled directory to one of the override roots and
+edit there. The override loads regardless of whether the bundled
+skill is in `built_in_skills_enabled`.
 
 If you don't know which the user wants, ask once. Don't guess on
 behalf of "future projects".
@@ -56,15 +68,6 @@ Fields:
   domain. Bad: "Helper for PDF stuff." Good: "Extract text or tables
   from a PDF file on disk. Use when the user provides a .pdf path and
   wants its contents."
-- **auto_install** (optional, bundled skills only) — Set to `true` on
-  a bundled skill (one shipped under `pyagent/skills/<name>/` in the
-  package) to have it seeded into `<config-dir>/skills/<name>/` on
-  first run. Auto-install is one-shot per name: pyagent records seeded
-  names in `<config-dir>/skills/.auto_installed` and never re-seeds a
-  listed name, so `pyagent-skills uninstall <name>` keeps it
-  uninstalled across restarts. Has no meaning on user-installed or
-  project-local skills. The marker file falls under PRIMER's general
-  rule on pyagent config — leave it to the user.
 
 There is no `tools:` field. Skills don't register Python functions as
 agent tools — they ship CLI scripts the agent runs via the shell tool.
@@ -119,10 +122,10 @@ Conventions:
 
 ## Activation lifecycle
 
-1. Every turn, pyagent rescans the local and user roots, reads each
-   `SKILL.md` it finds, and rebuilds the catalog injected into the
-   system prompt. A skill authored or installed mid-session shows up
-   on the next turn — no restart needed.
+1. Before every model call, pyagent rescans all three roots (bundled,
+   user, project-local) and rebuilds the catalog injected into the
+   system prompt. A skill authored mid-session shows up on the next
+   inner call — no restart needed.
 2. When the agent calls `read_skill(<name>)`, the body is returned as
    the tool result, prefixed with the skill's resolved directory
    path. The lookup also reads from the live registry, so a freshly
@@ -143,10 +146,9 @@ When the user asks for a new skill, walk through:
    body. Keep the body focused — instructions, not a manual.
 4. **Write `scripts/cli.py`** (if applicable). Argparse subcommands,
    stdout output, executable-style entry point.
-5. **No restart needed** — the next turn's catalog rescan will pick
-   up the new skill. Mention the skill to the user so they know it's
-   available.
-6. If the user wants to package it for distribution: see the
-   `pyagent-skills install` mechanism — copying a directory under
-   `pyagent/skills/` in the source tree makes it bundled. That's a
-   developer-side workflow, not something to do from the agent.
+5. **No restart needed** — the next inner call's catalog rescan will
+   pick up the new skill. Mention the skill to the user so they know
+   it's available.
+6. If the user wants to ship it as a built-in: copy the directory
+   under `pyagent/skills/` in the source tree. That's a developer-side
+   workflow, not something to do from the agent.

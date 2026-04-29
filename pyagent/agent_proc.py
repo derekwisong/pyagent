@@ -426,7 +426,6 @@ def _bootstrap(
     os.chdir(config["cwd"])
     permissions.set_workspace(config["cwd"])
     permissions.pre_approve(paths.config_dir())
-    permissions.deny(paths.config_dir() / "skills" / ".auto_installed")
     for p in config.get("approved_paths", []):
         permissions.pre_approve(p)
     permissions.set_prompt_handler(state.permission_handler)

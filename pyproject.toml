@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 pyagent = "pyagent.cli:main"
+pyagent-config = "pyagent.config_cli:main"
 pyagent-skills = "pyagent.skills_cli:main"
 pyagent-sessions = "pyagent.sessions_cli:main"
 

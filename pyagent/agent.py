@@ -206,13 +206,17 @@ class Agent:
         on_usage: Callable[[dict[str, int]], None] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> str:
-        system = self._system_prompt()
         self.conversation.append({"role": "user", "content": prompt})
         texts: list[str] = []
         while True:
             # Drain any async-subagent replies that arrived since the
             # last LLM call so the model sees them on this turn.
             self._drain_pending_async()
+            # Rebuild every inner call so a skill installed mid-run
+            # shows up on the next iteration. The catalog renders
+            # sorted; identical filesystem state ⇒ identical string
+            # ⇒ prompt cache stays warm.
+            system = self._system_prompt()
             turn = self._call_llm(self.conversation, system)
             self.conversation.append(turn)
             usage = turn.get("usage") if isinstance(turn, dict) else None
