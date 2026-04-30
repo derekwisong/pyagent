@@ -421,7 +421,18 @@ def _register_tools(
     # memory-markdown plugin (see pyagent/plugins/memory_markdown/).
     # Disabling that plugin removes the tools entirely — clean
     # replacement surface for alternative memory backends.
-    _add("read_skill", skills_mod.read_skill, auto_offload=False)
+    # Skill bodies are single-shot reference content: the model reads
+    # one to decide what to do next, the next assistant turn records
+    # that decision, after which the body is dead weight on every
+    # subsequent turn. `evict_after_use=True` swaps the result for a
+    # short stub once the consuming assistant turn has produced
+    # output. Recovery is a second `read_skill` call. Issue #10.
+    _add(
+        "read_skill",
+        skills_mod.read_skill,
+        auto_offload=False,
+        evict_after_use=True,
+    )
     if allow_meta:
         assert state is not None and parent_session is not None and base_config is not None
         _add(
@@ -578,6 +589,12 @@ def _bootstrap(
 
     agent.conversation = session.load_history()
     if agent.conversation:
+        # JSONL on disk keeps full skill-body content (round-trip
+        # invariant — see smoke_session_replay). On resume, apply the
+        # same eviction pass that runs after each live assistant turn
+        # so in-memory state matches what would have been there had
+        # the session run continuously. Issue #10.
+        agent._apply_eviction()
         orphans = session.find_orphan_attachments()
         if orphans:
             session.purge_orphan_attachments(orphans=orphans)

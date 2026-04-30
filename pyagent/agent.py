@@ -54,6 +54,15 @@ class Agent:
         self.session = session
         self.tools: dict[str, Callable[..., Any]] = {}
         self._auto_offload: dict[str, bool] = {}
+        # Tools opted into post-consumption eviction. After an
+        # assistant turn produces output, any earlier tool_result for
+        # one of these tools is replaced in-memory by a one-line stub
+        # — the data was single-shot reference content, the model
+        # already extracted what it needed from it, and recovery is
+        # one tool call away. JSONL on disk keeps the full content
+        # (round-trip invariant); eviction is in-memory only.
+        # See issue #10.
+        self._evict_after_use: dict[str, bool] = {}
         self.conversation: list[Any] = []
         self.plugins = plugins
         # Subagent registry: id -> opaque entry (shape owned by the
@@ -88,9 +97,21 @@ class Agent:
         name: str,
         fn: Callable[..., Any],
         auto_offload: bool = True,
+        *,
+        evict_after_use: bool = False,
     ) -> None:
+        """Register a tool.
+
+        `evict_after_use=True` opts the tool into post-consumption
+        eviction: once an assistant turn has produced output that
+        followed the tool_result, the result's `content` field is
+        replaced in-memory by a short stub (see `_apply_eviction`).
+        Use for single-shot reference content (skill bodies, etc.) —
+        not for tools whose results the model may want to revisit.
+        """
         self.tools[name] = fn
         self._auto_offload[name] = auto_offload
+        self._evict_after_use[name] = evict_after_use
 
     def _tool_schemas(self) -> list[dict[str, Any]]:
         """Build JSON-schema tool definitions from each tool's type hints + docstring."""
@@ -280,6 +301,82 @@ class Agent:
         self._scrub_large_tool_args(call)
         return content
 
+    @staticmethod
+    def _eviction_stub(tool_name: str) -> str:
+        return (
+            f"[skill {tool_name!r} loaded earlier; content evicted "
+            f"to save context. Call read_skill({tool_name!r}) again "
+            f"to reload.]"
+        )
+
+    @staticmethod
+    def _assistant_turn_has_output(msg: Any) -> bool:
+        if not isinstance(msg, dict):
+            return False
+        if msg.get("role") != "assistant":
+            return False
+        if msg.get("text"):
+            return True
+        if msg.get("tool_calls"):
+            return True
+        return False
+
+    def _apply_eviction(self) -> int:
+        """Replace consumed eviction-flagged tool_result content with stubs.
+
+        Provable-staleness rule: a tool_result entry for a tool
+        registered with `evict_after_use=True` is stale once at least
+        one later assistant turn in the conversation has produced
+        output (text and/or tool_calls). The MOST RECENT such result
+        (no following assistant turn yet) is still load-bearing — the
+        agent is mid-consumption — so it is preserved.
+
+        Idempotent: a result whose content is already the stub is a
+        no-op on subsequent walks. JSONL on disk is not touched (see
+        issue #10 design notes; smoke_session_replay locks the
+        round-trip invariant).
+
+        Returns the number of result entries newly stubbed.
+        """
+        if not any(self._evict_after_use.values()):
+            return 0
+
+        # Build a forward-marching set of indices into self.conversation
+        # where an assistant turn with output appears. A tool_result at
+        # index i is stale iff there's at least one such assistant
+        # index > i.
+        assistant_with_output: list[int] = [
+            i for i, msg in enumerate(self.conversation)
+            if self._assistant_turn_has_output(msg)
+        ]
+        if not assistant_with_output:
+            return 0
+        last_with_output = assistant_with_output[-1]
+
+        stubbed = 0
+        for i, msg in enumerate(self.conversation):
+            if not isinstance(msg, dict):
+                continue
+            results = msg.get("tool_results")
+            if not results:
+                continue
+            # Stale only if SOME assistant turn with output appears
+            # later in the log. If the only assistant-with-output
+            # indices are all <= i, this batch is the most recent —
+            # leave it alone.
+            if i >= last_with_output:
+                continue
+            for r in results:
+                name = r.get("name")
+                if not name or not self._evict_after_use.get(name, False):
+                    continue
+                stub = self._eviction_stub(name)
+                if r.get("content") == stub:
+                    continue  # already evicted; idempotent
+                r["content"] = stub
+                stubbed += 1
+        return stubbed
+
     def _drain_pending_async(self) -> int:
         """Append every queued async-subagent reply as a user message.
 
@@ -325,6 +422,11 @@ class Agent:
                 self.conversation, stable, system_volatile=volatile
             )
             self.conversation.append(turn)
+            # After every assistant turn, evict stale single-shot tool
+            # results in-memory (see `_apply_eviction`). Cheap walk;
+            # only mutates entries belonging to tools registered with
+            # `evict_after_use=True`. JSONL on disk is untouched.
+            self._apply_eviction()
             usage = turn.get("usage") if isinstance(turn, dict) else None
             if usage:
                 for k in ("input", "output", "cache_creation", "cache_read"):
