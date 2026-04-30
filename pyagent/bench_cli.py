@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import shutil
 import sys
 import tempfile
 import time
@@ -48,6 +49,14 @@ class Scenario:
     description: str
     prompts: list[str]
     tools_hint: list[str] = field(default_factory=list)
+    # If set, snapshot this directory into the bench's tmpdir workspace
+    # before spawning the agent. `"cwd"` means the directory the user
+    # invoked `pyagent-bench` from; an absolute path snapshots that
+    # directory specifically. The agent operates on the snapshot, so
+    # any edits it makes don't touch the live source. Empty (default)
+    # means the workspace stays bare — appropriate for scenarios that
+    # source their inputs from the network (e.g. well_mako).
+    seed_workspace_from: str = ""
 
 
 @dataclass
@@ -103,6 +112,7 @@ def _load_scenario(name: str) -> Scenario:
         description=data.get("description", ""),
         prompts=prompts,
         tools_hint=list(data.get("tools", []) or []),
+        seed_workspace_from=str(data.get("seed_workspace_from", "") or ""),
     )
 
 
@@ -390,6 +400,36 @@ def run_cmd(
     workspace = Path(
         tempfile.mkdtemp(prefix=f"pyagent-bench-{sc.name}-")
     )
+
+    # Optionally snapshot a source directory into the workspace. Used
+    # by self-audit-style scenarios that need real code or data on
+    # disk; the snapshot keeps the agent's edits off the live source.
+    if sc.seed_workspace_from:
+        if sc.seed_workspace_from == "cwd":
+            seed_src = Path.cwd().resolve()
+        else:
+            seed_src = Path(sc.seed_workspace_from).expanduser().resolve()
+        if not seed_src.is_dir():
+            raise click.ClickException(
+                f"scenario {sc.name!r} seed source {seed_src} "
+                f"is not a directory."
+            )
+        click.echo(f"[bench] seed:      {seed_src} → {workspace}")
+        # Don't copy git/venv/cache cruft. .pyagent IS copied so the
+        # agent inherits the user's project-tier plugins, skills, and
+        # roles; the bench's own session is keyed by id under
+        # .pyagent/sessions/ and won't collide with anything carried
+        # over.
+        shutil.copytree(
+            seed_src,
+            workspace,
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns(
+                ".git", ".venv", "venv", "node_modules",
+                "__pycache__", "*.pyc", "*.egg-info", ".pytest_cache",
+            ),
+        )
+
     session_root = workspace / ".pyagent" / "sessions"
 
     # Mint the session up front so we can print + report the id even
