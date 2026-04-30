@@ -34,18 +34,58 @@ class AnthropicClient:
         conversation: list[dict[str, Any]],
         system: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        system_volatile: str | None = None,
     ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": self.max_tokens,
             "messages": [self._to_anthropic(m) for m in conversation],
         }
-        if system:
-            kwargs["system"] = (
-                [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
-                if self.cache
-                else system
-            )
+        if system or system_volatile:
+            # Two-block layout when the caller supplied BOTH a stable
+            # prefix AND a volatile tail: stable block carries
+            # cache_control, volatile block does not. Volatile content
+            # can change turn-to-turn without invalidating the cached
+            # prefix.
+            #
+            # Edge case: if `system` is empty/None but volatile is set,
+            # we cannot emit an empty stable block — Anthropic 400s on
+            # empty text content. Fall back to single-block layout
+            # carrying the volatile content (no cache benefit, but
+            # correct).
+            stable = (system or "").strip()
+            volatile = (system_volatile or "").strip()
+            if self.cache and stable and volatile:
+                kwargs["system"] = [
+                    {
+                        "type": "text",
+                        "text": system,
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                    {
+                        "type": "text",
+                        "text": system_volatile,
+                    },
+                ]
+            elif self.cache and stable:
+                kwargs["system"] = [
+                    {
+                        "type": "text",
+                        "text": system,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+            elif self.cache and volatile:
+                # Volatile-only: no cache marker, single block.
+                kwargs["system"] = [
+                    {"type": "text", "text": system_volatile}
+                ]
+            else:
+                kwargs["system"] = (
+                    f"{system or ''}\n\n{system_volatile}"
+                    if system_volatile
+                    else system
+                )
         if tools:
             if self.cache:
                 tools = [{**t} for t in tools]

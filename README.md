@@ -126,13 +126,15 @@ The following is a table of the built-in tools.
 | `grep` | Search for a regex pattern in a file or recursively across a directory. |
 | `execute` | Run a shell command (60s timeout). A small regex blocklist refuses obviously dangerous patterns. |
 | `fetch_url` | HTTP GET a URL and return status + body. |
-| `read_ledger` | Read a ledger by name (`USER` or `MEMORY`). The path is resolved automatically. |
-| `write_ledger` | Overwrite a ledger by name. The path is resolved automatically. |
+| `list_plugins` | List the plugins currently loaded. Self-improvement helper. |
+
+Memory tools (`read_ledger` / `write_ledger`) come from the bundled
+`memory-markdown` plugin, not core. See "Plugins" below.
 
 File tools resolve paths and refuse anything outside the workspace unless the
 human approves at a prompt. See `pyagent/permissions.py`. The user's pyagent
 config dir is pre-approved so the agent can read/write its persona and
-ledger files without prompting.
+plugin data without prompting.
 
 ### Soul and the system prompt
 
@@ -146,11 +148,7 @@ takes effect on the next turn — no restart needed.
   are sent separately; this file is judgment, not API reference.
 - **`PRIMER.md`** — safety and behavior rails. Workspace boundaries, what
   needs explicit consent, verifying before recommending.
-- **`USER.md`** — per-user notes about the person being helped. Auto-loaded
-  into the prompt if it exists. Seeded from `USER.md.template` on first
-  read/write.
-
-These files live in the user's pyagent config dir (Linux:
+SOUL/TOOLS/PRIMER live in the user's pyagent config dir (Linux:
 `~/.config/pyagent/`, macOS: `~/Library/Application Support/pyagent/`,
 Windows: `%APPDATA%\pyagent\`). On first run, the bundled defaults from the
 package are copied in; after that, edits to the config-dir copies take
@@ -158,34 +156,25 @@ effect immediately. A file with the same name in the current working
 directory takes precedence — handy for per-project SOUL/TOOLS overrides or
 for hacking on the prompts inside the pyagent repo itself.
 
-Paths can be overridden with `--soul`, `--tools`, `--primer`. The two
-ledgers (`USER.md`, `MEMORY.md`) are accessed exclusively through the
-`read_ledger` / `write_ledger` tools, which encapsulate the path resolution
-so the agent's notebook follows the user across working directories
-instead of getting scattered into every project folder.
+Paths can be overridden with `--soul`, `--tools`, `--primer`.
 
-### Memory and self updating
+### Memory
 
-`MEMORY.md` is the agent's long-term notebook. It lives in the config dir
-alongside `USER.md` and is *not* auto-loaded into the system prompt — the
-agent reads and edits it via the ledger tools. `SOUL.md` instructs the
-agent to keep it tidy: record what's truly memorable, prune by removing
-whole entries rather than blending them, and never wipe the file wholesale
-without an explicit ask.
+Long-term memory is provided by the bundled `memory-markdown` plugin
+(see "Plugins" below). It exposes two tools — `read_ledger` and
+`write_ledger` — backed by markdown files at
+`<config-dir>/plugins/memory-markdown/{USER,MEMORY}.md`. The plugin
+also contributes a prompt section that auto-loads USER content into
+every system prompt and a guidance section telling the agent how to
+use the ledgers. Disable the plugin (`built_in_plugins_enabled = []`
+in `config.toml`) to remove memory entirely; the agent will have no
+ledger tools and no ledger prose.
 
 Memory work is meant to happen **organically**, mid-conversation: when the
 agent learns a preference, a convention, or something genuinely worth
 remembering, it updates the appropriate ledger then and there.
 
-An optional **end-of-session pass** is available as a safety net: launch
-with `--memory-pass-on-exit` and the CLI will, on exit (Ctrl+D or Ctrl+C
-at the prompt), ask the agent to sweep the conversation for anything
-that should have been recorded but wasn't, and update the ledgers. The
-pass only fires when the session actually added new turns; resumed-but-
-idle sessions exit immediately. A second Ctrl+C during the pass skips
-it cleanly. It's off by default — the expectation is that the agent
-records memory organically mid-conversation, so this is for rare
-"final sweep" cases.
+To wipe a plugin's data: `pyagent-plugins reset memory-markdown`.
 
 Conversation history and large tool outputs are persisted separately, under
 `.pyagent/sessions/<session-id>/`. Resume a session with `pyagent --resume
@@ -262,6 +251,66 @@ never gated by config.
 `pyagent-skills uninstall <name>` removes a user- or project-local copy.
 Bundled skills can't be uninstalled (they ship with the package); to keep
 one out of the catalog, just leave it out of `built_in_skills_enabled`.
+
+## Plugins
+
+Plugins extend pyagent at runtime — they can register tools,
+contribute prompt sections, and observe the conversation loop. Unlike
+skills (which are passive markdown), plugins are active code that
+runs alongside the agent.
+
+A plugin is a directory with `manifest.toml` + `plugin.py` (drop-in)
+or an installed Python package declaring an entry point in the
+`pyagent.plugins` group. Discovery is three-tier (later wins on name
+collision, same as skills):
+
+1. **Bundled** — `pyagent/plugins/<name>/`. Filtered against
+   `built_in_plugins_enabled` in `config.toml`.
+2. **Entry-point installed** — `pip install pyagent-foo`.
+3. **Drop-in** — `<config-dir>/plugins/<name>/` (user) or
+   `./.pyagent/plugins/<name>/` (project).
+
+`pyagent-plugins list` shows what's discovered, with override
+warnings when a higher-tier plugin shadows a lower-tier one.
+`pyagent-plugins reset <name>` wipes a plugin's `<config-dir>/plugins/<name>/`
+data dir.
+
+### Bundled plugins
+
+| Plugin | Default enabled? |
+| --- | --- |
+| `memory-markdown` | yes |
+
+`memory-markdown` is the markdown ledger system (see "Memory" above).
+Disable it via `built_in_plugins_enabled = []` in `config.toml`.
+
+### Authoring a plugin
+
+The full design and API surface live in `docs/plugin-design.md` and
+`docs/plugin-feature-summary.md`. Quick start:
+
+```python
+# ~/.config/pyagent/plugins/hello/plugin.py
+def register(api):
+    def hello(name: str) -> str:
+        """Say hi."""
+        return f"hi, {name}"
+    api.register_tool("hello", hello)
+```
+
+```toml
+# ~/.config/pyagent/plugins/hello/manifest.toml
+name = "hello"
+version = "0.1.0"
+description = "Trivial example."
+api_version = "1"
+[provides]
+tools = ["hello"]
+```
+
+Restart pyagent. The LLM has a `hello` tool. See
+`pyagent/plugins/memory_markdown/` for a complete bundled example
+exercising tools, prompt sections, and lifecycle hooks.
 
 ## Configuration
 
@@ -340,11 +389,13 @@ project-local skills are yours to manage.
 | Flag | Effect |
 | --- | --- |
 | `--reset-soul` / `--reset-tools` / `--reset-primer` | Overwrite the spec doc with the bundled default. |
-| `--reset-user` | Overwrite `USER.md` (preferences). |
-| `--reset-memory` | Overwrite `MEMORY.md` (long-term memory). |
 | `--reset-skills` | Remove every user-installed skill under `<config-dir>/skills/`. |
 | `--reset-all` | All of the above, with one consolidated confirmation. |
 | `--yes` / `-y` | Skip the confirmation prompt for destructive resets. |
 
-The destructive resets (USER, MEMORY, skills) prompt before doing anything;
+The destructive reset (`--reset-skills`) prompts before doing anything;
 spec-doc resets don't, since those are pure revert-to-ship-state.
+
+Plugin data lives at `<config-dir>/plugins/<name>/`; wipe it with
+`pyagent-plugins reset <name>` (e.g. `pyagent-plugins reset memory-markdown`
+to clear USER and MEMORY ledgers).

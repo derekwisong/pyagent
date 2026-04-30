@@ -1,44 +1,54 @@
-"""System prompt assembly from per-section markdown files.
+"""System prompt assembly from per-section markdown files plus
+plugin-contributed sections.
 
-The agent calls `SystemPromptBuilder.build()` at the start of every
-run, so edits to SOUL.md / TOOLS.md / PRIMER.md / USER.md take effect
+The agent calls `SystemPromptBuilder.build_segments(ctx)` at the start
+of every turn, so edits to SOUL.md / TOOLS.md / PRIMER.md take effect
 on the next turn without restarting the process.
 
 Layered output (in order):
 
   1. SOUL.md        — universal voice + core directives
-  2. TOOLS.md       — operating principles (efficiency, errors, discretion)
+  2. TOOLS.md       — operating principles
   3. PRIMER.md      — workspace, shell, subagent guidance
-  4. role_body      — role-specific persona (subagents only; empty for root)
+  4. role_body      — role-specific persona (subagents only)
   5. skills_catalog — live-rendered list of available skills
   6. roles_catalog  — live-rendered list of available subagent roles
   7. task_body      — spawn-time task description (subagents only)
-  8. USER.md        — auto-loaded if it exists (user preferences)
-  9. footer         — persona file paths + don't-edit notice
+  8. plugin sections (non-volatile, in registration order) — these
+                      live inside the prompt-cache breakpoint so they
+                      stay warm across turns
+  9. footer         — persona file paths
 
-USER.md is auto-loaded (resolved via `paths.resolve`) so the agent
-always has the latest user notes in context. MEMORY.md is *not*
-auto-loaded — the agent reads it on demand via the ledger tools.
+  ── cache breakpoint ──
 
-The skills and roles catalogs can be supplied as callables, in which
-case they re-render every turn — letting newly-installed skills or
-freshly-defined roles appear without restarting.
+ 10. plugin sections (volatile, in registration order) — these live
+                      AFTER the breakpoint so their content can change
+                      turn-to-turn without invalidating the cached
+                      system block
+
+User-facing memory (USER.md / MEMORY.md) is contributed by the
+bundled `memory-markdown` plugin's prompt sections, not auto-loaded
+here. Disabling that plugin removes its sections cleanly.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
-from pyagent import paths
+if TYPE_CHECKING:
+    from pyagent.plugins import LoadedPlugins, PromptContext
 
 
 class SystemPromptBuilder:
-    """Assembles the system prompt: persona files + auto-loaded USER
-    ledger + a small footer naming the persona files' on-disk paths
-    so the agent can find them when the user explicitly asks to
-    edit them.
+    """Assembles the system prompt: persona files + plugin sections +
+    auto-loaded USER ledger + footer.
+
+    `build_segments(ctx)` returns a `(stable, volatile)` tuple so LLM
+    clients can place a cache breakpoint between them. `build()` is
+    retained for callers that don't care about cache placement; it
+    just concatenates the two segments.
     """
 
     def __init__(
@@ -50,6 +60,7 @@ class SystemPromptBuilder:
         roles_catalog: str | Callable[[], str] = "",
         role_body: str = "",
         task_body: str = "",
+        plugin_loader: "LoadedPlugins | None" = None,
     ) -> None:
         self.soul = Path(soul)
         self.tools = Path(tools)
@@ -58,15 +69,34 @@ class SystemPromptBuilder:
         self.roles_catalog = roles_catalog
         self.role_body = role_body
         self.task_body = task_body
+        self.plugin_loader = plugin_loader
 
-    def build(self) -> str:
-        sections = [
+    def build(self, ctx: "PromptContext | None" = None) -> str:
+        """Concatenated stable+volatile segments. Use only when cache
+        placement doesn't matter (e.g. tests, legacy callers)."""
+        stable, volatile = self.build_segments(ctx)
+        if volatile:
+            return f"{stable}\n\n{volatile}"
+        return stable
+
+    def build_segments(
+        self, ctx: "PromptContext | None" = None
+    ) -> tuple[str, str]:
+        """Return (stable, volatile) — the two halves of the system
+        prompt around the cache breakpoint."""
+        from pyagent.plugins import PromptContext as _PromptContext
+
+        if ctx is None:
+            ctx = _PromptContext()
+
+        sections: list[str] = [
             self.soul.read_text(),
             self.tools.read_text(),
             self.primer.read_text(),
         ]
         if self.role_body:
             sections.append(self.role_body)
+
         skills = (
             self.skills_catalog()
             if callable(self.skills_catalog)
@@ -74,6 +104,7 @@ class SystemPromptBuilder:
         )
         if skills:
             sections.append(skills)
+
         roles = (
             self.roles_catalog()
             if callable(self.roles_catalog)
@@ -81,13 +112,46 @@ class SystemPromptBuilder:
         )
         if roles:
             sections.append(roles)
+
         if self.task_body:
             sections.append(self.task_body)
-        user_path = paths.resolve("USER.md")
-        if user_path.exists():
-            sections.append(user_path.read_text())
+
+        # Plugin-contributed sections, split by `volatile`.
+        volatile_sections: list[str] = []
+        if self.plugin_loader is not None:
+            for section in self.plugin_loader.sections():
+                try:
+                    rendered = section.renderer(ctx)
+                except Exception:
+                    # A renderer raising is the plugin's bug; log and
+                    # skip its contribution this turn rather than
+                    # wedging the agent.
+                    import logging
+
+                    logging.getLogger(__name__).exception(
+                        "plugin %s prompt section %r renderer raised",
+                        section.plugin_name,
+                        section.name,
+                    )
+                    continue
+                if not rendered:
+                    continue
+                if section.volatile:
+                    volatile_sections.append(rendered)
+                else:
+                    sections.append(rendered)
+
+        # USER ledger auto-load was here pre-plugin; now owned by the
+        # memory-markdown plugin's "user-ledger" prompt section. With
+        # the plugin disabled, USER content does not appear in the
+        # system prompt at all — that is the clean-replacement
+        # contract.
+
         sections.append(self._persona_footer())
-        return "\n\n".join(s.rstrip() for s in sections)
+
+        stable = "\n\n".join(s.rstrip() for s in sections)
+        volatile = "\n\n".join(s.rstrip() for s in volatile_sections)
+        return stable, volatile
 
     def _persona_footer(self) -> str:
         return (

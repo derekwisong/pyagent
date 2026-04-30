@@ -9,7 +9,7 @@ from pathlib import Path
 
 import requests
 
-from pyagent import paths, permissions
+from pyagent import permissions
 from pyagent.session import Attachment
 
 # Track in-flight execute() shell subprocesses so the cancel pathway
@@ -46,69 +46,11 @@ def kill_active() -> int:
 def _denied(path: str) -> str:
     return f"<permission denied (outside workspace): {path}>"
 
-_LEDGERS: dict[str, str] = {
-    "USER": "USER.md",
-    "MEMORY": "MEMORY.md",
-}
 
-
-def read_ledger(name: str) -> str:
-    """Read one of the agent's ledgers.
-
-    Ledgers are the agent's persistent notebooks — `USER` (notes about
-    the person being helped) and `MEMORY` (long-term memorable facts).
-    Their on-disk locations are resolved automatically; do not use
-    `read_file` for these.
-
-    Args:
-        name: Ledger to read. One of: "USER", "MEMORY".
-
-    Returns:
-        The ledger's contents, an empty string if it has not been
-        written yet, or an error marker if `name` is not a known
-        ledger.
-    """
-    key = name.upper()
-    if key not in _LEDGERS:
-        valid = ", ".join(sorted(_LEDGERS))
-        return f"<unknown ledger: {name!r}; valid: {valid}>"
-    filename = _LEDGERS[key]
-    target = paths.resolve(filename, seed=filename)
-    if not permissions.require_access(target):
-        return _denied(str(target))
-    if not target.exists():
-        return ""
-    return target.read_text()
-
-
-def write_ledger(name: str, content: str) -> str:
-    """Overwrite one of the agent's ledgers with new content.
-
-    Ledgers are the agent's persistent notebooks — `USER` (notes about
-    the person being helped) and `MEMORY` (long-term memorable facts).
-    Their on-disk locations are resolved automatically; do not use
-    `write_file` for these. Writes overwrite; if you only want to add,
-    `read_ledger` first, edit, then `write_ledger`.
-
-    Args:
-        name: Ledger to write. One of: "USER", "MEMORY".
-        content: Full new content of the ledger.
-
-    Returns:
-        Confirmation message with the resolved path and byte count, or
-        an error marker if `name` is not a known ledger.
-    """
-    key = name.upper()
-    if key not in _LEDGERS:
-        valid = ", ".join(sorted(_LEDGERS))
-        return f"<unknown ledger: {name!r}; valid: {valid}>"
-    filename = _LEDGERS[key]
-    target = paths.resolve(filename, seed=filename)
-    if not permissions.require_access(target):
-        return _denied(str(target))
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content)
-    return f"Wrote {len(content)} bytes to {target}"
+# read_ledger / write_ledger moved to the bundled memory-markdown
+# plugin (pyagent/plugins/memory_markdown/) in stage 2 of the plugin
+# migration. They are no longer core tools — disabling the plugin
+# removes them entirely.
 
 
 def read_file(
@@ -182,17 +124,26 @@ def read_file(
     return "".join(lines[s : min(end, total)])
 
 
-def write_file(path: str, content: str) -> str:
-    """Write content to a file, overwriting any existing file.
+def write_file(path: str, content: str, append: bool = False) -> str:
+    """Write content to a file.
 
-    Overwrites unconditionally. If you only want to append or modify
-    a portion, `read_file` first, edit in memory, then write back —
-    there is no streaming or partial-write mode. The full content
-    goes to disk in one shot.
+    Default behavior overwrites the file. With `append=True`, content is
+    appended to the end (file is created if missing). For small targeted
+    modifications, prefer `edit_file` over re-emitting the whole file —
+    `edit_file` only sends the diff, so the prior version doesn't ride
+    every subsequent turn.
+
+    Append mode is the recovery path when a single artifact is too
+    large to emit in one tool call: write the first chunk normally,
+    then follow up with `append=True` calls. Do not fall back to shell
+    heredocs via `execute` for this — those embed the whole file in a
+    shell string that lives in the conversation forever.
 
     Args:
         path: Path to the file to write.
-        content: Full content to write.
+        content: Content to write (or append).
+        append: If True, append to the existing file instead of
+            overwriting. Defaults to False.
 
     Returns:
         Confirmation message with the resolved path and byte count, or
@@ -202,14 +153,102 @@ def write_file(path: str, content: str) -> str:
     if not permissions.require_access(path):
         return _denied(path)
     try:
-        Path(path).write_text(content)
+        if append:
+            with Path(path).open("a") as f:
+                f.write(content)
+        else:
+            Path(path).write_text(content)
     except FileNotFoundError:
         return f"<parent directory does not exist: {path}>"
     except IsADirectoryError:
         return f"<is a directory, not a file: {path}>"
     except PermissionError:
         return f"<permission denied: {path}>"
-    return f"Wrote {len(content)} bytes to {path}"
+    verb = "Appended" if append else "Wrote"
+    return f"{verb} {len(content)} bytes to {path}"
+
+
+def edit_file(
+    path: str,
+    old_string: str,
+    new_string: str,
+    replace_all: bool = False,
+) -> str:
+    """Replace text in a file by exact-string match.
+
+    Cheaper than re-emitting the whole file with `write_file`: the
+    diff is the only thing that enters the conversation. Reach for
+    this whenever you'd otherwise rewrite an existing file to change
+    a few lines.
+
+    `old_string` must match exactly once. If it appears multiple
+    times, expand it with surrounding context until it's unique — or
+    pass `replace_all=True` for renames and similar bulk swaps.
+
+    Args:
+        path: Path to the file to edit.
+        old_string: Exact text to find. Must be unique unless
+            `replace_all=True`. Multi-line strings are supported.
+        new_string: Replacement text.
+        replace_all: If True, replace every occurrence of
+            `old_string`. Defaults to False (single-occurrence
+            uniqueness required).
+
+    Returns:
+        Confirmation message naming the path and how many occurrences
+        were replaced (and the line number for single replacements),
+        or an error marker if the file is missing, the match is
+        ambiguous, or the match is not found.
+    """
+    if not permissions.require_access(path):
+        return _denied(path)
+    if not old_string:
+        return "<error: old_string is empty>"
+    if old_string == new_string:
+        return "<error: old_string and new_string are identical>"
+    p = Path(path)
+    try:
+        text = p.read_text()
+    except FileNotFoundError:
+        return f"<file not found: {path}>"
+    except IsADirectoryError:
+        return f"<is a directory, not a file: {path}>"
+    except PermissionError:
+        return f"<permission denied: {path}>"
+    except UnicodeDecodeError:
+        return f"<cannot decode {path} as UTF-8>"
+
+    count = text.count(old_string)
+    if count == 0:
+        return f"<error: old_string not found in {path}>"
+    if count > 1 and not replace_all:
+        return (
+            f"<error: old_string matches {count} times in {path}; "
+            f"expand it with surrounding context to make it unique, "
+            f"or pass replace_all=True>"
+        )
+
+    if replace_all:
+        new_text = text.replace(old_string, new_string)
+        success = (
+            f"Edited {path}: replaced {count} "
+            f"{'occurrence' if count == 1 else 'occurrences'}"
+        )
+    else:
+        idx = text.find(old_string)
+        line_no = text[:idx].count("\n") + 1
+        new_text = text[:idx] + new_string + text[idx + len(old_string):]
+        success = f"Edited {path}: replaced 1 occurrence at line {line_no}"
+
+    try:
+        p.write_text(new_text)
+    except FileNotFoundError:
+        return f"<file not found: {path}>"
+    except IsADirectoryError:
+        return f"<is a directory, not a file: {path}>"
+    except PermissionError:
+        return f"<permission denied: {path}>"
+    return success
 
 
 def list_directory(path: str) -> list[str]:

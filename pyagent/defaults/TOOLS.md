@@ -18,6 +18,16 @@ how to read errors, and the discretion the user is trusting you with.
   the context window. Slice with `grep`, ranges, or `head`/`tail`
   via `execute`.
 
+## Editing files
+
+- **Small change → `edit_file`**, not a full `write_file`. Only the
+  diff enters the conversation. `old_string` must match once;
+  expand it with context if not, or pass `replace_all=True`.
+- **Huge write → chunk with `write_file(append=True)`.** Don't
+  emit a shell heredoc via `execute` — that wedges the whole file
+  into the conversation forever. `append=True` creates the file
+  if missing, so the first chunk can use it too.
+
 ## Errors
 
 Predictable failures come back as data, not exceptions: a marker

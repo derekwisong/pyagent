@@ -173,4 +173,5 @@ class LLMClient(Protocol):
         conversation: list[dict[str, Any]],
         system: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        system_volatile: str | None = None,
     ) -> dict[str, Any]: ...

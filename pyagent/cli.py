@@ -284,21 +284,6 @@ def _update_agents_state(
         return
 
 
-# Optional safety-net pass at session end. Organic ledger work is
-# supposed to happen mid-conversation (see SOUL.md), so this sweep is
-# off by default — opt in with --memory-pass-on-exit when you want it.
-_END_OF_SESSION_PROMPT = (
-    "The session is wrapping up. Review this conversation: if anything "
-    "should have been recorded in your USER or MEMORY ledger and wasn't, "
-    "save it now via read_ledger / write_ledger. Most sessions have "
-    "nothing to add — extraction isn't the goal. Make small surgical "
-    "edits when you do save; don't rewrite wholesale.\n\n"
-    "Reply with ONE short line and nothing else. Examples: "
-    "'Nothing new.' / 'Updated USER.' / 'Saved 1 memory.' "
-    "No preamble, no recap, no flourish, no voice — just the fact."
-)
-
-
 def _seed_input_history(conversation: list[Any]) -> None:
     """Populate readline's in-memory history from prior user prompts so
     up/down arrow at the input cycles through what was typed before.
@@ -584,16 +569,6 @@ def _drive_turn(
     help="Overwrite <config-dir>/PRIMER.md with the bundled default.",
 )
 @click.option(
-    "--reset-user",
-    is_flag=True,
-    help="Overwrite <config-dir>/USER.md with the bundled template.",
-)
-@click.option(
-    "--reset-memory",
-    is_flag=True,
-    help="Overwrite <config-dir>/MEMORY.md with the bundled template. Destructive — wipes long-term memory.",
-)
-@click.option(
     "--reset-skills",
     is_flag=True,
     help="Remove every user-installed skill under <config-dir>/skills/. "
@@ -602,22 +577,16 @@ def _drive_turn(
 @click.option(
     "--reset-all",
     is_flag=True,
-    help="Shortcut: every --reset-* flag together (SOUL, TOOLS, PRIMER, USER, MEMORY, skills).",
+    help="Shortcut: every --reset-* flag together (SOUL, TOOLS, PRIMER, skills). "
+    "USER.md and MEMORY.md are owned by the memory-markdown plugin now; "
+    "use `pyagent-plugins reset memory-markdown` to wipe them.",
 )
 @click.option(
     "--yes",
     "-y",
     "assume_yes",
     is_flag=True,
-    help="Skip the confirmation prompt for destructive resets (USER, MEMORY, skills).",
-)
-@click.option(
-    "--memory-pass-on-exit",
-    "memory_pass_on_exit",
-    is_flag=True,
-    help="Run a safety-net memory pass at session end. Off by default — "
-    "the agent is expected to record memory organically mid-conversation. "
-    "Enable when you want a final sweep for things that may have slipped.",
+    help="Skip the confirmation prompt for destructive resets (skills).",
 )
 @click.option(
     "--verbose",
@@ -634,12 +603,9 @@ def main(
     reset_soul: bool,
     reset_tools: bool,
     reset_primer: bool,
-    reset_user: bool,
-    reset_memory: bool,
     reset_skills: bool,
     reset_all: bool,
     assume_yes: bool,
-    memory_pass_on_exit: bool,
     verbose: bool,
 ) -> None:
     install_traceback(show_locals=False)
@@ -651,16 +617,12 @@ def main(
     will_reset_soul = reset_soul or reset_all
     will_reset_tools = reset_tools or reset_all
     will_reset_primer = reset_primer or reset_all
-    will_reset_user = reset_user or reset_all
-    will_reset_memory = reset_memory or reset_all
     will_reset_skills = reset_skills or reset_all
     any_reset = any(
         (
             will_reset_soul,
             will_reset_tools,
             will_reset_primer,
-            will_reset_user,
-            will_reset_memory,
             will_reset_skills,
         )
     )
@@ -672,10 +634,6 @@ def main(
             skill_dirs = sorted(p for p in skills_root.iterdir() if p.is_dir())
 
         destructive: list[str] = []
-        if will_reset_user:
-            destructive.append("USER.md (accumulated preferences)")
-        if will_reset_memory:
-            destructive.append("MEMORY.md (long-term memory)")
         if will_reset_skills:
             if skill_dirs:
                 names = ", ".join(p.name for p in skill_dirs)
@@ -697,8 +655,6 @@ def main(
             (will_reset_soul, "SOUL.md", "SOUL.md"),
             (will_reset_tools, "TOOLS.md", "TOOLS.md"),
             (will_reset_primer, "PRIMER.md", "PRIMER.md"),
-            (will_reset_user, "USER.md", "USER.md"),
-            (will_reset_memory, "MEMORY.md", "MEMORY.md"),
         ):
             if flag:
                 path = paths.reset_to_default(name, seed)
@@ -730,7 +686,6 @@ def main(
     soul = paths.resolve("SOUL.md", override=soul, seed="SOUL.md")
     tools_md = paths.resolve("TOOLS.md", override=tools_md, seed="TOOLS.md")
     primer = paths.resolve("PRIMER.md", override=primer, seed="PRIMER.md")
-    paths.resolve("USER.md", seed="USER.md")
     permissions.pre_approve(paths.config_dir())
 
     # CLI keeps a read-only view of history for readline seeding and
@@ -813,7 +768,6 @@ def main(
             logger.warning("cli: unexpected pre-ready event %r", kind)
 
         logger.info("soul=%s tools=%s primer=%s", soul, tools_md, primer)
-        turns_run = 0
         # Per-agent state shared across turns. Root starts here;
         # subagents are added/removed as info events flow through
         # _update_agents_state.
@@ -857,40 +811,9 @@ def main(
             finally:
                 watcher.stop()
                 thinking.stop()
-            turns_run += 1
             if outcome == "fatal":
                 console.print("[red]agent subprocess exited unexpectedly[/red]")
                 break
-
-        if memory_pass_on_exit and turns_run > 0 and proc.is_alive():
-            try:
-                protocol.send(
-                    parent_conn,
-                    "user_prompt",
-                    prompt=_END_OF_SESSION_PROMPT,
-                    persist=False,
-                )
-            except (BrokenPipeError, OSError):
-                pass
-            else:
-                reflect = console.status(
-                    "[dim]reflecting on the session…[/dim]", spinner="dots"
-                )
-                reflect.start()
-                try:
-                    _drive_turn(
-                        parent_conn,
-                        watcher,
-                        pause_io=_pause_io,
-                        resume_io=_resume_io,
-                        status=reflect,
-                        agents=agents_state,
-                        model=model,
-                    )
-                except KeyboardInterrupt:
-                    console.print("[dim]skipped memory pass[/dim]")
-                finally:
-                    reflect.stop()
     except KeyboardInterrupt:
         # User Ctrl+C'd somewhere outside the input prompt's own
         # except (e.g. mid-turn while a tool was running, or during
