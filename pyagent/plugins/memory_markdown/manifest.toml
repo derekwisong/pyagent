@@ -1,0 +1,21 @@
+name = "memory-markdown"
+version = "0.1.0"
+description = "Markdown-file memory backend — the original ledger system."
+api_version = "1"
+
+# What this plugin promises to register. Validated at load time:
+# pyagent fails the plugin loud if register() registers anything not
+# listed, or fails to register everything listed. Also powers the
+# rich missing-tool error — when the LLM calls a tool that's gone,
+# pyagent can name the plugin that provided it.
+[provides]
+tools = ["read_ledger", "write_ledger"]
+prompt_sections = ["memory-guidance", "user-ledger"]
+
+# Spawn-tree behavior. Default true: the plugin loads in every agent
+# process, including subagents. memory-markdown does full-overwrite
+# writes that are not parallel-safe, so we set false here — root
+# loads it, subagents skip it. A future memory-sqlite or memory-vector
+# plugin with proper concurrency could leave this true.
+[load]
+in_subagents = false

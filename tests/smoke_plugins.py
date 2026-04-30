@@ -78,9 +78,17 @@ def _write_plugin(
 def _isolated_config_dir() -> tuple[Path, callable]:
     """Point pyagent.paths.config_dir() at a temp dir for the test.
 
+    Pre-seeds the temp config.toml with `built_in_plugins_enabled = []`
+    so the bundled memory-markdown plugin doesn't appear in test
+    fixtures by default. Tests that want bundled plugins enabled can
+    overwrite the config file.
+
     Returns the dir and a restore function.
     """
     tmp_cfg = Path(tempfile.mkdtemp(prefix="pyagent-plugin-cfg-"))
+    (tmp_cfg / "config.toml").write_text(
+        "built_in_plugins_enabled = []\n"
+    )
     original = paths.config_dir
     paths.config_dir = lambda: tmp_cfg  # type: ignore[assignment]
 
@@ -229,10 +237,13 @@ def test_missing_tool_error() -> None:
             provides_tools=["recall_memory"],
             plugin_py=plugin_py,
         )
-        # Disable via config
+        # Disable via config (preserve the built_in_plugins_enabled
+        # = [] from the test fixture so the bundled memory-markdown
+        # doesn't appear too).
         cfg_file = cfg / "config.toml"
         cfg_file.write_text(
-            '[plugins.memory-vector]\nenabled = false\n'
+            "built_in_plugins_enabled = []\n"
+            "[plugins.memory-vector]\nenabled = false\n"
         )
         loaded = plugins_mod.load()
         # Plugin disabled, but declared_tool_provenance retained.
@@ -610,6 +621,70 @@ def test_builtin_tool_takes_precedence_in_agent() -> None:
         restore()
 
 
+def test_bundled_memory_markdown_loads() -> None:
+    """With memory-markdown explicitly enabled, the bundled plugin
+    loads and exposes its tools/sections."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        # Override the fixture's empty list with the bundled plugin
+        # turned on.
+        (cfg / "config.toml").write_text(
+            'built_in_plugins_enabled = ["memory-markdown"]\n'
+        )
+        # Root-mode load (bundled plugin sets in_subagents=false).
+        loaded = plugins_mod.load(is_subagent=False)
+        names = [s.manifest.name for s in loaded.states]
+        assert "memory-markdown" in names, (
+            f"expected memory-markdown in {names}"
+        )
+        assert "read_ledger" in loaded.tools()
+        assert "write_ledger" in loaded.tools()
+        section_names = {s.name for s in loaded.sections()}
+        assert "memory-guidance" in section_names
+        assert "user-ledger" in section_names
+
+        # Subagent mode skips it (in_subagents=false).
+        sub_loaded = plugins_mod.load(is_subagent=True)
+        sub_names = [s.manifest.name for s in sub_loaded.states]
+        assert "memory-markdown" not in sub_names
+        print("✓ bundled memory-markdown loads in root, skipped in subagent")
+    finally:
+        restore()
+
+
+def test_graceful_degradation_when_memory_disabled() -> None:
+    """With built_in_plugins_enabled=[], the agent has no ledger
+    tools and no ledger prose, but its declared_tool_provenance
+    still cites memory-markdown so the rich missing-tool error works
+    on a session that previously called read_ledger."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        # Default fixture state: built_in_plugins_enabled = []
+        loaded = plugins_mod.load()
+        # No memory plugin loaded.
+        assert "read_ledger" not in loaded.tools()
+        assert "write_ledger" not in loaded.tools()
+        # But the bundled plugin was DISCOVERED (just not loaded), so
+        # declared_tool_provenance can cite it for the rich error.
+        assert (
+            loaded.declared_tool_provenance.get("read_ledger")
+            == "memory-markdown"
+        )
+        err = plugins_mod.format_missing_tool_error(
+            name="read_ledger",
+            available=["read_file", "grep"],
+            declared_tool_provenance=loaded.declared_tool_provenance,
+        )
+        assert "memory-markdown" in err
+        assert "read_ledger" in err
+        print(
+            "✓ graceful degradation: tools gone, missing-tool error "
+            "cites bundled plugin"
+        )
+    finally:
+        restore()
+
+
 def main() -> None:
     test_basic_load_and_register()
     test_provides_mismatch()
@@ -626,6 +701,8 @@ def main() -> None:
     test_message_wrapping()
     test_immutable_returns()
     test_builtin_tool_takes_precedence_in_agent()
+    test_bundled_memory_markdown_loads()
+    test_graceful_degradation_when_memory_disabled()
     print("\nALL CHECKS PASSED")
 
 

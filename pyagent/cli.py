@@ -284,21 +284,6 @@ def _update_agents_state(
         return
 
 
-# Optional safety-net pass at session end. Organic ledger work is
-# supposed to happen mid-conversation (see SOUL.md), so this sweep is
-# off by default — opt in with --memory-pass-on-exit when you want it.
-_END_OF_SESSION_PROMPT = (
-    "The session is wrapping up. Review this conversation: if anything "
-    "should have been recorded in your USER or MEMORY ledger and wasn't, "
-    "save it now via read_ledger / write_ledger. Most sessions have "
-    "nothing to add — extraction isn't the goal. Make small surgical "
-    "edits when you do save; don't rewrite wholesale.\n\n"
-    "Reply with ONE short line and nothing else. Examples: "
-    "'Nothing new.' / 'Updated USER.' / 'Saved 1 memory.' "
-    "No preamble, no recap, no flourish, no voice — just the fact."
-)
-
-
 def _seed_input_history(conversation: list[Any]) -> None:
     """Populate readline's in-memory history from prior user prompts so
     up/down arrow at the input cycles through what was typed before.
@@ -612,14 +597,6 @@ def _drive_turn(
     help="Skip the confirmation prompt for destructive resets (USER, MEMORY, skills).",
 )
 @click.option(
-    "--memory-pass-on-exit",
-    "memory_pass_on_exit",
-    is_flag=True,
-    help="Run a safety-net memory pass at session end. Off by default — "
-    "the agent is expected to record memory organically mid-conversation. "
-    "Enable when you want a final sweep for things that may have slipped.",
-)
-@click.option(
     "--verbose",
     "-v",
     is_flag=True,
@@ -639,7 +616,6 @@ def main(
     reset_skills: bool,
     reset_all: bool,
     assume_yes: bool,
-    memory_pass_on_exit: bool,
     verbose: bool,
 ) -> None:
     install_traceback(show_locals=False)
@@ -813,7 +789,6 @@ def main(
             logger.warning("cli: unexpected pre-ready event %r", kind)
 
         logger.info("soul=%s tools=%s primer=%s", soul, tools_md, primer)
-        turns_run = 0
         # Per-agent state shared across turns. Root starts here;
         # subagents are added/removed as info events flow through
         # _update_agents_state.
@@ -857,40 +832,9 @@ def main(
             finally:
                 watcher.stop()
                 thinking.stop()
-            turns_run += 1
             if outcome == "fatal":
                 console.print("[red]agent subprocess exited unexpectedly[/red]")
                 break
-
-        if memory_pass_on_exit and turns_run > 0 and proc.is_alive():
-            try:
-                protocol.send(
-                    parent_conn,
-                    "user_prompt",
-                    prompt=_END_OF_SESSION_PROMPT,
-                    persist=False,
-                )
-            except (BrokenPipeError, OSError):
-                pass
-            else:
-                reflect = console.status(
-                    "[dim]reflecting on the session…[/dim]", spinner="dots"
-                )
-                reflect.start()
-                try:
-                    _drive_turn(
-                        parent_conn,
-                        watcher,
-                        pause_io=_pause_io,
-                        resume_io=_resume_io,
-                        status=reflect,
-                        agents=agents_state,
-                        model=model,
-                    )
-                except KeyboardInterrupt:
-                    console.print("[dim]skipped memory pass[/dim]")
-                finally:
-                    reflect.stop()
     except KeyboardInterrupt:
         # User Ctrl+C'd somewhere outside the input prompt's own
         # except (e.g. mid-turn while a tool was running, or during

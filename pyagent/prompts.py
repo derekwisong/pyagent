@@ -38,8 +38,6 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from pyagent import paths
-
 if TYPE_CHECKING:
     from pyagent.plugins import LoadedPlugins, PromptContext
 
@@ -144,12 +142,11 @@ class SystemPromptBuilder:
                 else:
                     sections.append(rendered)
 
-        # Legacy USER.md auto-load. Once memory-markdown ships in
-        # Stage 2 with its own user-ledger prompt section, this block
-        # is removed and USER auto-load becomes plugin-owned.
-        user_path = paths.resolve("USER.md")
-        if user_path.exists():
-            sections.append(user_path.read_text())
+        # USER ledger auto-load was here pre-plugin; now owned by the
+        # memory-markdown plugin's "user-ledger" prompt section. With
+        # the plugin disabled, USER content does not appear in the
+        # system prompt at all — that is the clean-replacement
+        # contract.
 
         sections.append(self._persona_footer())
 

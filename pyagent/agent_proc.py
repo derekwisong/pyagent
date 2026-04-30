@@ -416,8 +416,10 @@ def _register_tools(
     _add("grep", agent_tools.grep)
     _add("execute", agent_tools.execute)
     _add("fetch_url", agent_tools.fetch_url)
-    _add("read_ledger", agent_tools.read_ledger, auto_offload=False)
-    _add("write_ledger", agent_tools.write_ledger)
+    # read_ledger / write_ledger are now provided by the bundled
+    # memory-markdown plugin (see pyagent/plugins/memory_markdown/).
+    # Disabling that plugin removes the tools entirely — clean
+    # replacement surface for alternative memory backends.
     _add("read_skill", skills_mod.read_skill, auto_offload=False)
     if allow_meta:
         assert state is not None and parent_session is not None and base_config is not None
