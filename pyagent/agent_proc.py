@@ -412,6 +412,7 @@ def _register_tools(
 
     _add("read_file", agent_tools.read_file, auto_offload=False)
     _add("write_file", agent_tools.write_file)
+    _add("edit_file", agent_tools.edit_file)
     _add("list_directory", agent_tools.list_directory)
     _add("grep", agent_tools.grep)
     _add("execute", agent_tools.execute)
