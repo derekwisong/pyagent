@@ -52,7 +52,8 @@ description = "Cheap and fast for narrow tasks."
 
 def test_role_load_and_resolve(tmp: Path) -> None:
     loaded = roles.load()
-    assert set(loaded) == {"skim", "cheap"}, loaded
+    # Bundled roles may also be present; assert legacy entries loaded.
+    assert {"skim", "cheap"} <= set(loaded), loaded
     skim = loaded["skim"]
     assert skim.model == "pyagent/echo", skim.model
     assert skim.tools == ("read_file", "grep"), skim.tools

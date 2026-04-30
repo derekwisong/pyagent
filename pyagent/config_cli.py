@@ -13,9 +13,13 @@ starting point doesn't have to copy-paste from the README.
 
 from __future__ import annotations
 
+from importlib import resources
+
 import click
 
 from pyagent import config
+from pyagent import paths
+from pyagent import roles as roles_mod
 
 
 @click.group()
@@ -62,9 +66,27 @@ def init_cmd(force: bool) -> None:
     if not written:
         click.echo(f"config.toml already exists at {target}")
         click.echo("(pass --force to overwrite)")
-        return
-    click.echo(f"wrote default config to {target}")
-    click.echo("Edit the file and uncomment lines to override defaults.")
+    else:
+        click.echo(f"wrote default config to {target}")
+        click.echo("Edit the file and uncomment lines to override defaults.")
+
+    # Also seed the roles directory with the bundled starter set so
+    # first-run users get the orchestrator-pattern starter library
+    # without having to discover `pyagent-roles init` separately.
+    roles_dir = paths.config_dir() / "roles"
+    roles_dir.mkdir(parents=True, exist_ok=True)
+    bundled_pkg = resources.files(roles_mod.PACKAGE_ROLES_PKG)
+    seeded = 0
+    for entry in sorted(bundled_pkg.iterdir(), key=lambda e: e.name):
+        if not entry.name.endswith(".md"):
+            continue
+        dest = roles_dir / entry.name
+        if dest.exists():
+            continue
+        dest.write_text(entry.read_text())
+        seeded += 1
+    if seeded:
+        click.echo(f"seeded {seeded} starter role(s) under {roles_dir}")
 
 
 if __name__ == "__main__":

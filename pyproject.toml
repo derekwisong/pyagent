@@ -27,6 +27,7 @@ pyagent-skills = "pyagent.skills_cli:main"
 pyagent-sessions = "pyagent.sessions_cli:main"
 pyagent-plugins = "pyagent.plugins_cli:main"
 pyagent-bench = "pyagent.bench_cli:main"
+pyagent-roles = "pyagent.roles_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["pyagent*"]
@@ -46,4 +47,6 @@ pyagent = [
     "plugins/**/*.json",
     # Bench scenarios.
     "bench/scenarios/*.toml",
+    # Bundled role library — one .md per role, parsed at runtime.
+    "roles_bundled/*.md",
 ]
