@@ -28,6 +28,27 @@ how to read errors, and the discretion the user is trusting you with.
   into the conversation forever. `append=True` creates the file
   if missing, so the first chunk can use it too.
 
+## Web pages and HTML
+
+- **Don't write your own HTML scrub.** `fetch_url` saves the raw page
+  to a session attachment and returns markdown of the article body
+  inline. That's one tool call instead of fetch → grep → re-write a
+  regex stripper across multiple turns.
+- **Reach for `html_select` when structure matters.** Tables, lists at
+  a specific selector, links inside a sidebar — markdown of the whole
+  page flattens these. `html_select(path, "table.wikitable tr")`
+  preserves rows. The path comes from the attachment `fetch_url`
+  saved.
+- **Use `format="void"` for triage.** When you're fetching several
+  candidate URLs to assess relevance later, `fetch_url(url,
+  format="void")` skips the inline markdown so you don't pay for
+  previews you won't read. The raw is still saved; come back with
+  `html_to_md` / `html_select` on the ones you want.
+- **`main_content=False`** when the page *is* a document and the
+  boilerplate is part of it (Wikipedia, docs, reference pages). The
+  default `True` is right for news / blogs / articles where chrome
+  dwarfs the body.
+
 ## Errors
 
 Predictable failures come back as data, not exceptions: a marker
