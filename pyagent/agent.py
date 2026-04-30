@@ -142,6 +142,14 @@ class Agent:
     # from blowing the request size on the next turn.
     HARD_OFFLOAD_CEILING = 64_000
 
+    # Tool-call args that exceed this size get scrubbed from the
+    # conversation after the tool runs. Prevents a write_file with
+    # 50KB of content from re-sending those bytes on every subsequent
+    # turn — the tool already executed, the result describes the
+    # outcome, and the bytes live at the file path on disk if anyone
+    # needs to recover them.
+    TOOL_ARG_ELIDE_THRESHOLD = 4_000
+
     def _render_tool_result(self, name: str, result: Any) -> str:
         if isinstance(result, Attachment):
             if not self.session:
@@ -173,6 +181,39 @@ class Agent:
                 preview = text[: self.session.preview_chars]
                 return self._format_offload_ref(path, len(text), preview)
         return text
+
+    def _scrub_large_tool_args(self, call: dict[str, Any]) -> None:
+        """Replace any oversized string arg with a short marker.
+
+        Called after a tool has finished executing. The original args
+        were what we sent into the tool; once the tool has run, those
+        bytes don't need to ride along on every subsequent LLM call.
+        Eliding them here means a write_file with 50KB of content
+        costs 50KB on the turn it ran and a few hundred bytes
+        thereafter, instead of 50KB forever.
+
+        The tool result message describes what happened (path, byte
+        count, success/error). If the agent later needs the actual
+        content, it can read_file the path and the result will
+        auto-offload via the attachment system. No information is
+        lost, just bytes deduplicated against on-disk state.
+
+        Mutates in place — `call["args"]` is a reference to the dict
+        inside `self.conversation`, so the change persists into next
+        turn's `_call_llm` payload and into the saved session.
+        """
+        args = call.get("args")
+        if not isinstance(args, dict):
+            return
+        for key, val in list(args.items()):
+            if (
+                isinstance(val, str)
+                and len(val) > self.TOOL_ARG_ELIDE_THRESHOLD
+            ):
+                args[key] = (
+                    f"<{len(val)} chars elided after tool ran; "
+                    f"see the tool result for the outcome>"
+                )
 
     @staticmethod
     def _format_offload_ref(path: Any, size: int, preview: str) -> str:
@@ -216,6 +257,10 @@ class Agent:
             self.plugins.call_after_tool_call(name, args, content)
         if on_tool_result:
             on_tool_result(name, content)
+        # Scrub bulky string args from the conversation so they don't
+        # re-cost on every subsequent turn. Mutates in place — `args`
+        # is a reference to the dict inside `self.conversation`.
+        self._scrub_large_tool_args(call)
         return content
 
     def _drain_pending_async(self) -> int:
