@@ -15,7 +15,14 @@ from pathlib import Path
 
 import click
 
+from pyagent import config
 from pyagent.session import Session
+from pyagent.sessions_audit import audit_session
+from pyagent.sessions_audit_render import (
+    ALL_SECTIONS,
+    render_json,
+    render_text,
+)
 
 
 def _root() -> Path:
@@ -206,6 +213,99 @@ def prune_cmd(
     for d in targets:
         shutil.rmtree(d)
     click.echo(f"deleted {len(targets)} session(s).")
+
+
+@main.command("audit")
+@click.argument("session_id")
+@click.option(
+    "--model",
+    default=None,
+    help=(
+        "Model used for cost estimation. Default: config.default_model, "
+        "else anthropic/claude-sonnet-4-6."
+    ),
+)
+@click.option("--cost-only", "-c", is_flag=True, help="Show header only.")
+@click.option(
+    "--turns-only", "-t", is_flag=True, help="Show per-turn table only."
+)
+@click.option(
+    "--attachments-only",
+    "-a",
+    is_flag=True,
+    help="Show attachments section only.",
+)
+@click.option(
+    "--bloat-only", "-b", is_flag=True, help="Show inline-bloat section only."
+)
+@click.option("--json", "json_out", is_flag=True, help="Emit JSON instead of text.")
+@click.option(
+    "--quiet",
+    "-q",
+    is_flag=True,
+    help="Suppress lower-bound / fallback warnings.",
+)
+@click.option(
+    "--top",
+    type=int,
+    default=20,
+    show_default=True,
+    help="Max bloat rows to show.",
+)
+def audit_cmd(
+    session_id: str,
+    model: str | None,
+    cost_only: bool,
+    turns_only: bool,
+    attachments_only: bool,
+    bloat_only: bool,
+    json_out: bool,
+    quiet: bool,
+    top: int,
+) -> None:
+    """Audit a session: cost, per-turn tokens, attachments, inline bloat."""
+    root = _root()
+    target = root / session_id
+    if not target.exists():
+        raise click.ClickException(f"no session {session_id!r} in {root}.")
+
+    # Resolve which sections the user wants. Default = all four. Any
+    # `--*-only` flag narrows to that one section. Multiple `-only`
+    # flags compose (so `-c -a` shows cost + attachments).
+    sections: set[str]
+    only_flags = {
+        "cost": cost_only,
+        "turns": turns_only,
+        "attachments": attachments_only,
+        "bloat": bloat_only,
+    }
+    if any(only_flags.values()):
+        sections = {k for k, v in only_flags.items() if v}
+    else:
+        sections = set(ALL_SECTIONS)
+
+    # Resolve model: --model > config.default_model > sonnet fallback.
+    if model:
+        resolved_model = model
+    else:
+        cfg_default = (config.load().get("default_model") or "").strip()
+        if cfg_default:
+            resolved_model = cfg_default
+        else:
+            resolved_model = "anthropic/claude-sonnet-4-6"
+            if not quiet:
+                click.echo(
+                    f"[note] no --model and no config.default_model — "
+                    f"using {resolved_model} for cost estimate.",
+                    err=True,
+                )
+
+    report = audit_session(target, model=resolved_model, top_bloat=top)
+
+    if json_out:
+        click.echo(render_json(report))
+        return
+    click.echo(render_text(report, sections=sections, top=top, quiet=quiet))
 
 
 if __name__ == "__main__":
