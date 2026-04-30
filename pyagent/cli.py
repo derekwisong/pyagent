@@ -213,16 +213,26 @@ def _format_usage_suffix(
     """Build the ` [Nk tok / $0.0X]` suffix for the status footer.
 
     Empty string when there's nothing to show (no LLM calls yet).
-    The displayed token total bundles all four counts (input, output,
-    cache writes, cache reads); the cost estimate weights cache writes
-    and reads by their respective multipliers on Anthropic.
+    On Anthropic the four token counts (input, output, cache writes,
+    cache reads) are disjoint — `input_tokens` excludes both cache
+    reads and writes — so the displayed total bundles all four. On
+    OpenAI / Gemini the providers' "input" already includes their
+    cached-token count; bundling cache_read on top would double-count
+    the same tokens in the displayed total. Cost estimation in
+    `_estimate_cost_usd` already gates the cache-pricing multipliers
+    to Anthropic; this gate keeps the displayed token count honest the
+    same way.
     """
-    total = (
-        input_tokens
-        + output_tokens
-        + cache_creation_tokens
-        + cache_read_tokens
-    )
+    name = _model_name(model)
+    if _is_anthropic_model(name):
+        total = (
+            input_tokens
+            + output_tokens
+            + cache_creation_tokens
+            + cache_read_tokens
+        )
+    else:
+        total = input_tokens + output_tokens
     if total == 0:
         return ""
     if total >= 1000:

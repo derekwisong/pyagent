@@ -187,6 +187,30 @@ def _check_cache_token_aggregation() -> None:
     assert "tok" in suf, suf
     print(f"✓ suffix activates on cache-only usage: {suf!r}")
 
+    # On Anthropic, the four token counts are disjoint (input excludes
+    # both cache reads and writes), so the displayed total bundles all
+    # four. On OpenAI / Gemini, the providers' "input" already includes
+    # the cached count — bundling cache_read on top would double-count.
+    # The display must gate the bundle the same way _estimate_cost_usd
+    # gates the cache pricing multipliers.
+    anth = _format_usage_suffix(
+        100, 50, "anthropic/claude-sonnet-4-6", 200, 1000
+    )
+    assert "1.4k tok" in anth, anth  # 100 + 50 + 200 + 1000 = 1350 → 1.4k
+    oai = _format_usage_suffix(100, 50, "openai/gpt-4o", 0, 1000)
+    # OpenAI's prompt_tokens already includes cache_read; total must
+    # not double-count. Expected: input + output = 150 (NOT 1150).
+    assert "150 tok" in oai, oai
+    assert "1.1k tok" not in oai, (
+        f"OpenAI suffix double-counted cache_read into displayed total: {oai!r}"
+    )
+    gem = _format_usage_suffix(100, 50, "gemini/gemini-2.5-flash", 0, 1000)
+    assert "150 tok" in gem, gem
+    assert "1.1k tok" not in gem, (
+        f"Gemini suffix double-counted cache_read into displayed total: {gem!r}"
+    )
+    print(f"✓ suffix gates cache bundling to Anthropic (anth={anth!r}, oai={oai!r})")
+
 
 def main() -> None:
     # 1. Model-name resolution
