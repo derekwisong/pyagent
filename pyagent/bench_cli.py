@@ -38,6 +38,7 @@ import click
 
 from pyagent import agent_proc, config, llms, paths, pricing, protocol
 from pyagent.session import Session
+from pyagent.sessions_audit import _total_tokens_summary
 
 
 @dataclass
@@ -277,7 +278,9 @@ def _render_report(report: BenchReport) -> str:
     lines.append(f"turns:       {report.turn_count}")
     lines.append(f"wall_time:   {report.wall_time_s:.1f}s")
     t = report.tokens
-    total = t["input"] + t["output"] + t["cache_creation"] + t["cache_read"]
+    # Anthropic-vs-other gate: on OpenAI/Gemini, prompt_tokens already
+    # includes the cached count; bundling cache_read would double-count.
+    total = _total_tokens_summary(report.model, t)
     lines.append(
         f"tokens:      {total:,} total "
         f"(input {t['input']:,} / output {t['output']:,} / "
@@ -298,7 +301,7 @@ def _render_report(report: BenchReport) -> str:
     else:
         lines.append("tool_calls:  (none)")
     lines.append("")
-    lines.append(f"To inspect this session in detail:")
+    lines.append("To inspect this session in detail:")
     lines.append(f"  pyagent-sessions audit {report.session_id}")
     return "\n".join(lines)
 
@@ -438,9 +441,8 @@ def run_cmd(
             if state.halt:
                 reason = "budget"
                 break
-            if prompt_idx == len(sc.prompts) - 1:
-                reason = "complete"
         else:
+            # Loop ran to completion without break — every prompt sent.
             reason = "complete"
     except KeyboardInterrupt:
         reason = "cancelled"

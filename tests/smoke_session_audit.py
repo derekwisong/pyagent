@@ -223,16 +223,83 @@ def _check_section_filtering() -> None:
     with tempfile.TemporaryDirectory() as td:
         session_dir = _write_synthetic_session(Path(td))
         report = audit_session(session_dir, model="anthropic/claude-sonnet-4-6")
+        # cost-only: header + cost section, no others.
         text = render_text(report, sections={"cost"}, top=20, quiet=True)
         assert "session:" in text  # header always shown
+        assert "tokens:" in text and "cost:" in text  # cost section
         assert "PER-TURN BREAKDOWN" not in text, text
         assert "ATTACHMENTS" not in text, text
         assert "INLINE BLOAT" not in text, text
 
+        # bloat-only: header + bloat, but cost section absent.
         text_b = render_text(report, sections={"bloat"}, top=20, quiet=True)
         assert "INLINE BLOAT" in text_b
         assert "PER-TURN BREAKDOWN" not in text_b
+        # Cost line lives in the "cost" section now — narrowing past
+        # "cost" must drop the tokens / cost lines too. ALL_SECTIONS
+        # is honest about what each flag controls.
+        assert "tokens:" not in text_b, text_b
+        assert "cost:" not in text_b, text_b
         print("✓ section filtering narrows output correctly")
+
+
+def _check_displayed_total_gates_to_anthropic() -> None:
+    """The displayed token total must NOT double-count cached tokens on
+    OpenAI / Gemini, where `prompt_tokens` / `prompt_token_count` already
+    includes the cached count. Anthropic's `input_tokens` excludes cache,
+    so the four-way bundle is correct there. This regression guard locks
+    both directions."""
+    with tempfile.TemporaryDirectory() as td:
+        session_dir = _write_synthetic_session(Path(td))
+
+        # Anthropic: bundle all four. totals were:
+        #   input 350, output 155, cache_creation 1000, cache_read 5100
+        #   sum = 6605 → "6.6K total" in the rendered header
+        anth = audit_session(session_dir, model="anthropic/claude-sonnet-4-6")
+        text_a = render_text(
+            anth, sections={"cost"}, top=20, quiet=True
+        )
+        assert "6.6K total" in text_a, text_a
+        assert "input 350" in text_a and "cache_read 5.1K" in text_a, text_a
+
+        # OpenAI: only input + output. 350 + 155 = 505 → "505 total".
+        # Crucially, NOT 6605 / 6.6K (that would mean we double-counted).
+        oai = audit_session(session_dir, model="openai/gpt-4o")
+        text_o = render_text(
+            oai, sections={"cost"}, top=20, quiet=True
+        )
+        assert "505 total" in text_o, text_o
+        assert "6.6K total" not in text_o, (
+            f"OpenAI rendered total double-counted cached tokens: {text_o!r}"
+        )
+        # Gemini: same gate.
+        gem = audit_session(session_dir, model="gemini/gemini-2.5-flash")
+        text_g = render_text(
+            gem, sections={"cost"}, top=20, quiet=True
+        )
+        assert "505 total" in text_g, text_g
+        assert "6.6K total" not in text_g, text_g
+        print(
+            f"✓ displayed total gates to Anthropic "
+            f"(anth=6.6K, openai=505, gemini=505)"
+        )
+
+
+def _check_lower_bound_warning_is_specific() -> None:
+    """The warning must name 'X of Y' so the user can judge how
+    incomplete the cost number is, not a generic 'at least one'."""
+    with tempfile.TemporaryDirectory() as td:
+        session_dir = _write_synthetic_session(Path(td))
+        report = audit_session(session_dir, model="anthropic/claude-sonnet-4-6")
+        # Synthetic session has 1 pre-#15 turn out of 3 total.
+        assert report.pre_15_turns == 1, report.pre_15_turns
+        text = render_text(
+            report, sections=ALL_SECTIONS, top=20, quiet=False
+        )
+        assert "1 of 3" in text, (
+            f"warning should name X of Y, got: {text!r}"
+        )
+        print("✓ lower-bound warning names X of Y assistant turns")
 
 
 def main() -> None:
@@ -241,6 +308,8 @@ def main() -> None:
     _check_render_text_smoke()
     _check_render_json_smoke()
     _check_section_filtering()
+    _check_displayed_total_gates_to_anthropic()
+    _check_lower_bound_warning_is_specific()
     print("\nALL CHECKS PASSED")
 
 

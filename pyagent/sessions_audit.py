@@ -68,23 +68,60 @@ class AuditReport:
     total_tokens: dict[str, int] = field(default_factory=dict)
     total_cost_usd: float | None = None
     cost_is_lower_bound: bool = False
+    # Number of assistant turns whose `usage` dict lacked cache fields
+    # (pre-#15 sessions). The renderer uses this for an "X of Y" warning
+    # so the user can judge how much the cost number is missing.
+    pre_15_turns: int = 0
     per_turn: list[TurnRow] = field(default_factory=list)
     attachments: list[AttachmentRow] = field(default_factory=list)
     orphan_attachments: list[str] = field(default_factory=list)
     inline_bloat: list[BloatRow] = field(default_factory=list)
 
 
-def _total_tokens(model: str, t: TurnRow) -> int:
-    """Per-turn token total mirroring `pricing.format_usage_suffix`'s gate.
+def _gated_total(
+    model: str,
+    *,
+    input: int,
+    output: int,
+    cache_creation: int,
+    cache_read: int,
+) -> int:
+    """Token total mirroring `pricing.format_usage_suffix`'s gate.
 
-    Anthropic: bundle all four (the four counts are disjoint).
-    Other providers: input + output only (their `input` already
-    includes cached tokens, so adding cache_read would double-count).
+    Anthropic: bundle all four (the four counts are disjoint —
+    `input_tokens` excludes cache reads and writes, so the sum is the
+    real prompt size). Other providers: input + output only (their
+    `prompt_tokens` / `prompt_token_count` already includes cached
+    tokens, so adding cache_read would double-count the same tokens).
+
+    Used by both per-turn rows and the aggregate header / bench report.
     """
     name = pricing.model_name(model)
     if pricing.is_anthropic_model(name):
-        return t.input + t.output + t.cache_creation + t.cache_read
-    return t.input + t.output
+        return input + output + cache_creation + cache_read
+    return input + output
+
+
+def _total_tokens(model: str, t: TurnRow) -> int:
+    """Convenience wrapper for per-turn rows."""
+    return _gated_total(
+        model,
+        input=t.input,
+        output=t.output,
+        cache_creation=t.cache_creation,
+        cache_read=t.cache_read,
+    )
+
+
+def _total_tokens_summary(model: str, totals: dict[str, int]) -> int:
+    """Convenience wrapper for the aggregate totals dict."""
+    return _gated_total(
+        model,
+        input=totals.get("input", 0),
+        output=totals.get("output", 0),
+        cache_creation=totals.get("cache_creation", 0),
+        cache_read=totals.get("cache_read", 0),
+    )
 
 
 def _iter_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -138,6 +175,7 @@ def audit_session(
     # follow-up). Approximation: we tag with the assistant index just
     # seen, which is what the human cares about for "blame which turn".
     last_assistant_idx = 0
+    pre_15_turns = 0
     totals = {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0}
 
     for entry in entries:
@@ -152,6 +190,7 @@ def audit_session(
                 # estimate is a lower bound — cache writes/reads cost
                 # real money on Anthropic.
                 cost_is_lower_bound = True
+                pre_15_turns += 1
             input_t = int(usage.get("input", 0) or 0)
             output_t = int(usage.get("output", 0) or 0)
             cache_w = int(usage.get("cache_creation", 0) or 0)
@@ -245,6 +284,7 @@ def audit_session(
         total_tokens=totals,
         total_cost_usd=total_cost_usd,
         cost_is_lower_bound=cost_is_lower_bound,
+        pre_15_turns=pre_15_turns,
         per_turn=per_turn,
         attachments=attachments,
         orphan_attachments=orphans,

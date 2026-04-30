@@ -11,8 +11,7 @@ import json
 from dataclasses import asdict
 from typing import Iterable
 
-from pyagent import pricing
-from pyagent.sessions_audit import AuditReport, _total_tokens
+from pyagent.sessions_audit import AuditReport, _total_tokens_summary
 
 ALL_SECTIONS = ("cost", "turns", "attachments", "bloat")
 
@@ -50,42 +49,42 @@ def render_text(
     quiet: bool = False,
 ) -> str:
     """Render the audit as plain text. `sections` narrows to a subset of
-    {"cost","turns","attachments","bloat"}; default = all four."""
+    {"cost","turns","attachments","bloat"}; default = all four. The
+    orientation header (session / model / turns) is always shown — only
+    the four named sections respect the filter."""
     sec = set(sections) if sections else set(ALL_SECTIONS)
     lines: list[str] = []
 
-    # Header is always shown — it's the orientation block, not a
-    # section. Only the four detail sections respect the filter.
-    tokens = report.total_tokens
-    total_all = (
-        tokens.get("input", 0)
-        + tokens.get("output", 0)
-        + tokens.get("cache_creation", 0)
-        + tokens.get("cache_read", 0)
-    )
+    # Always-shown orientation header.
     lines.append(f"session: {report.session_id}")
     lines.append(f"model:   {report.model or '(none)'}")
     lines.append(f"turns:   {report.turn_count}")
-    lines.append(
-        "tokens:  {total} total (input {i} / output {o} / "
-        "cache_creation {cw} / cache_read {cr})".format(
-            total=_humanize_tokens(total_all),
-            i=_humanize_tokens(tokens.get("input", 0)),
-            o=_humanize_tokens(tokens.get("output", 0)),
-            cw=_humanize_tokens(tokens.get("cache_creation", 0)),
-            cr=_humanize_tokens(tokens.get("cache_read", 0)),
-        )
-    )
-    lines.append(f"cost:    {_format_cost(report.total_cost_usd)}")
-    if report.cost_is_lower_bound and not quiet:
-        # Count assistant turns whose cache fields were missing.
-        # Approximated by per-turn rows where both cache values are
-        # zero AND the report was flagged — close enough for the
-        # warning. (We don't store the per-turn presence flag.)
+
+    if "cost" in sec:
+        # On Anthropic the four counts are disjoint and the displayed
+        # total bundles all four. On OpenAI / Gemini the providers'
+        # `prompt_tokens` / `prompt_token_count` already includes their
+        # cached count; bundling cache_read on top would double-count.
+        # `_total_tokens_summary` applies that gate.
+        tokens = report.total_tokens
+        total_all = _total_tokens_summary(report.model, tokens)
         lines.append(
-            "[!] cost is a LOWER BOUND — at least one assistant turn "
-            "predates cache logging."
+            "tokens:  {total} total (input {i} / output {o} / "
+            "cache_creation {cw} / cache_read {cr})".format(
+                total=_humanize_tokens(total_all),
+                i=_humanize_tokens(tokens.get("input", 0)),
+                o=_humanize_tokens(tokens.get("output", 0)),
+                cw=_humanize_tokens(tokens.get("cache_creation", 0)),
+                cr=_humanize_tokens(tokens.get("cache_read", 0)),
+            )
         )
+        lines.append(f"cost:    {_format_cost(report.total_cost_usd)}")
+        if report.cost_is_lower_bound and not quiet:
+            lines.append(
+                f"[!] cost is a LOWER BOUND — {report.pre_15_turns} of "
+                f"{report.turn_count} assistant turn(s) predate cache "
+                f"logging (#8 / PR #15)."
+            )
 
     if "turns" in sec:
         lines.append("")
