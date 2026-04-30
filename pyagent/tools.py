@@ -9,7 +9,7 @@ from pathlib import Path
 
 import requests
 
-from pyagent import paths, permissions
+from pyagent import permissions
 from pyagent.session import Attachment
 
 # Track in-flight execute() shell subprocesses so the cancel pathway
@@ -46,69 +46,11 @@ def kill_active() -> int:
 def _denied(path: str) -> str:
     return f"<permission denied (outside workspace): {path}>"
 
-_LEDGERS: dict[str, str] = {
-    "USER": "USER.md",
-    "MEMORY": "MEMORY.md",
-}
 
-
-def read_ledger(name: str) -> str:
-    """Read one of the agent's ledgers.
-
-    Ledgers are the agent's persistent notebooks — `USER` (notes about
-    the person being helped) and `MEMORY` (long-term memorable facts).
-    Their on-disk locations are resolved automatically; do not use
-    `read_file` for these.
-
-    Args:
-        name: Ledger to read. One of: "USER", "MEMORY".
-
-    Returns:
-        The ledger's contents, an empty string if it has not been
-        written yet, or an error marker if `name` is not a known
-        ledger.
-    """
-    key = name.upper()
-    if key not in _LEDGERS:
-        valid = ", ".join(sorted(_LEDGERS))
-        return f"<unknown ledger: {name!r}; valid: {valid}>"
-    filename = _LEDGERS[key]
-    target = paths.resolve(filename, seed=filename)
-    if not permissions.require_access(target):
-        return _denied(str(target))
-    if not target.exists():
-        return ""
-    return target.read_text()
-
-
-def write_ledger(name: str, content: str) -> str:
-    """Overwrite one of the agent's ledgers with new content.
-
-    Ledgers are the agent's persistent notebooks — `USER` (notes about
-    the person being helped) and `MEMORY` (long-term memorable facts).
-    Their on-disk locations are resolved automatically; do not use
-    `write_file` for these. Writes overwrite; if you only want to add,
-    `read_ledger` first, edit, then `write_ledger`.
-
-    Args:
-        name: Ledger to write. One of: "USER", "MEMORY".
-        content: Full new content of the ledger.
-
-    Returns:
-        Confirmation message with the resolved path and byte count, or
-        an error marker if `name` is not a known ledger.
-    """
-    key = name.upper()
-    if key not in _LEDGERS:
-        valid = ", ".join(sorted(_LEDGERS))
-        return f"<unknown ledger: {name!r}; valid: {valid}>"
-    filename = _LEDGERS[key]
-    target = paths.resolve(filename, seed=filename)
-    if not permissions.require_access(target):
-        return _denied(str(target))
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content)
-    return f"Wrote {len(content)} bytes to {target}"
+# read_ledger / write_ledger moved to the bundled memory-markdown
+# plugin (pyagent/plugins/memory_markdown/) in stage 2 of the plugin
+# migration. They are no longer core tools — disabling the plugin
+# removes them entirely.
 
 
 def read_file(

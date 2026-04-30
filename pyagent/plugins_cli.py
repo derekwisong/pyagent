@@ -9,6 +9,8 @@ beats bundled, by plugin name.
 
 from __future__ import annotations
 
+import shutil
+
 import click
 
 from pyagent import paths
@@ -79,6 +81,41 @@ def _print_tier_paths() -> None:
         "  Disable an entry-point or user-installed plugin via "
         "[plugins.<name>] enabled = false."
     )
+
+
+@main.command("reset")
+@click.argument("name")
+@click.option(
+    "--yes",
+    "-y",
+    "assume_yes",
+    is_flag=True,
+    help="Skip the confirmation prompt.",
+)
+def reset_cmd(name: str, assume_yes: bool) -> None:
+    """Wipe a plugin's user data dir.
+
+    Removes <config-dir>/plugins/<name>/ entirely. The plugin's
+    on_session_start re-seeds defaults next time pyagent runs.
+
+    Common case: `pyagent-plugins reset memory-markdown` to wipe
+    USER and MEMORY ledgers (replaces the old --reset-user /
+    --reset-memory CLI flags).
+    """
+    target = paths.config_dir() / "plugins" / name
+    if not target.exists():
+        click.echo(
+            f"no plugin data at {target} — nothing to reset.",
+            err=True,
+        )
+        return
+    if not assume_yes:
+        click.echo(f"This will permanently remove: {target}")
+        if not click.confirm("Continue?", default=False):
+            click.echo("aborted.")
+            return
+    shutil.rmtree(target)
+    click.echo(f"wiped {target}")
 
 
 if __name__ == "__main__":

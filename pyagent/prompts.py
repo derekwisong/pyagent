@@ -2,8 +2,8 @@
 plugin-contributed sections.
 
 The agent calls `SystemPromptBuilder.build_segments(ctx)` at the start
-of every turn, so edits to SOUL.md / TOOLS.md / PRIMER.md / USER.md
-take effect on the next turn without restarting the process.
+of every turn, so edits to SOUL.md / TOOLS.md / PRIMER.md take effect
+on the next turn without restarting the process.
 
 Layered output (in order):
 
@@ -17,19 +17,18 @@ Layered output (in order):
   8. plugin sections (non-volatile, in registration order) — these
                       live inside the prompt-cache breakpoint so they
                       stay warm across turns
-  9. USER.md        — auto-loaded if it exists (legacy; plugins can
-                      take this over by registering their own section)
- 10. footer         — persona file paths
+  9. footer         — persona file paths
 
   ── cache breakpoint ──
 
- 11. plugin sections (volatile, in registration order) — these live
+ 10. plugin sections (volatile, in registration order) — these live
                       AFTER the breakpoint so their content can change
                       turn-to-turn without invalidating the cached
                       system block
 
-The plugin-contributed sections are pulled from a `LoadedPlugins`
-object passed at build time; the agent always supplies one.
+User-facing memory (USER.md / MEMORY.md) is contributed by the
+bundled `memory-markdown` plugin's prompt sections, not auto-loaded
+here. Disabling that plugin removes its sections cleanly.
 """
 
 from __future__ import annotations
