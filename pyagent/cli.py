@@ -111,37 +111,19 @@ _TERM_INFO_RE = re.compile(
 )
 
 
-# USD per million tokens, (input, output). Models not listed get
-# token-only display, no $ amount. Update freely as pricing changes
-# — this is a best-effort estimate, not authoritative billing.
-_PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
-    "claude-opus-4-7": (15.0, 75.0),
-    "claude-sonnet-4-6": (3.0, 15.0),
-    "claude-haiku-4-5-20251001": (1.0, 5.0),
-    "gpt-4o": (2.5, 10.0),
-    "gpt-4o-mini": (0.15, 0.60),
-    "gemini-2.5-flash": (0.075, 0.30),
-}
-
-# Anthropic ephemeral-cache pricing multipliers applied to the model's
-# base input rate: writes are 1.25× input, reads are 0.1× input.
-_ANTHROPIC_CACHE_WRITE_MULT = 1.25
-_ANTHROPIC_CACHE_READ_MULT = 0.1
-
-
-def _is_anthropic_model(name: str) -> bool:
-    return name.startswith("claude-")
-
-
-def _model_name(model_str: str) -> str:
-    """Extract the bare model name from a 'provider/name' string.
-
-    Falls back to the provider's default model (via the llms registry)
-    if no `/name` was given so the pricing lookup still works on
-    `--model anthropic`.
-    """
-    _, _, name = llms.resolve_model(model_str).partition("/")
-    return name
+# Pricing math lives in pyagent.pricing now so the audit / bench
+# entry points can reuse it without dragging click + readline + rich
+# along. The aliases below preserve the private names existing tests
+# (smoke_token_meter etc.) import from this module — zero-touch.
+from pyagent.pricing import (
+    ANTHROPIC_CACHE_READ_MULT as _ANTHROPIC_CACHE_READ_MULT,
+    ANTHROPIC_CACHE_WRITE_MULT as _ANTHROPIC_CACHE_WRITE_MULT,
+    PRICING_USD_PER_MTOK as _PRICING_USD_PER_MTOK,
+    estimate_cost_usd as _estimate_cost_usd,
+    format_usage_suffix as _format_usage_suffix,
+    is_anthropic_model as _is_anthropic_model,
+    model_name as _model_name,
+)
 
 
 def _resolve_model(cli_model: str | None) -> str:
@@ -169,90 +151,6 @@ def _resolve_model(cli_model: str | None) -> str:
         "Or pass --model <provider> (e.g. --model openai),\n"
         "or pin a default with `pyagent-config init` then editing default_model."
     )
-
-
-def _estimate_cost_usd(
-    model: str,
-    input_tokens: int,
-    output_tokens: int,
-    cache_creation_tokens: int = 0,
-    cache_read_tokens: int = 0,
-) -> float | None:
-    """USD cost estimate, or None if the model isn't in the pricing
-    table. Falls back gracefully on unknown / future models — the
-    footer renders just the token count in that case.
-
-    Anthropic ephemeral-cache writes/reads are billed at multiples of
-    the base input rate. OpenAI and Gemini surface cached counts but
-    bill them inside `prompt_tokens` / `prompt_token_count` at the
-    regular input rate, so no separate adjustment is needed for those.
-    """
-    name = _model_name(model)
-    if not name:
-        # Model defaulted from provider; the AnthropicClient/etc set
-        # `client.model` but the CLI doesn't see that here. Skip cost.
-        return None
-    rates = _PRICING_USD_PER_MTOK.get(name)
-    if rates is None:
-        return None
-    in_rate, out_rate = rates
-    cost = input_tokens * in_rate + output_tokens * out_rate
-    if _is_anthropic_model(name):
-        cost += cache_creation_tokens * in_rate * _ANTHROPIC_CACHE_WRITE_MULT
-        cost += cache_read_tokens * in_rate * _ANTHROPIC_CACHE_READ_MULT
-    return cost / 1_000_000
-
-
-def _format_usage_suffix(
-    input_tokens: int,
-    output_tokens: int,
-    model: str,
-    cache_creation_tokens: int = 0,
-    cache_read_tokens: int = 0,
-) -> str:
-    """Build the ` [Nk tok / $0.0X]` suffix for the status footer.
-
-    Empty string when there's nothing to show (no LLM calls yet).
-    On Anthropic the four token counts (input, output, cache writes,
-    cache reads) are disjoint — `input_tokens` excludes both cache
-    reads and writes — so the displayed total bundles all four. On
-    OpenAI / Gemini the providers' "input" already includes their
-    cached-token count; bundling cache_read on top would double-count
-    the same tokens in the displayed total. Cost estimation in
-    `_estimate_cost_usd` already gates the cache-pricing multipliers
-    to Anthropic; this gate keeps the displayed token count honest the
-    same way.
-    """
-    name = _model_name(model)
-    if _is_anthropic_model(name):
-        total = (
-            input_tokens
-            + output_tokens
-            + cache_creation_tokens
-            + cache_read_tokens
-        )
-    else:
-        total = input_tokens + output_tokens
-    if total == 0:
-        return ""
-    if total >= 1000:
-        tok_str = f"{total / 1000:.1f}k tok"
-    else:
-        tok_str = f"{total} tok"
-    cost = _estimate_cost_usd(
-        model,
-        input_tokens,
-        output_tokens,
-        cache_creation_tokens,
-        cache_read_tokens,
-    )
-    if cost is None:
-        return f" [{tok_str}]"
-    if cost < 0.01:
-        cost_str = f"${cost:.4f}"
-    else:
-        cost_str = f"${cost:.3f}"
-    return f" [{tok_str} / {cost_str}]"
 
 
 def _agents_tokens(agents: dict) -> tuple[int, int, int, int]:

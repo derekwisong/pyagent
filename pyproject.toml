@@ -26,6 +26,7 @@ pyagent-config = "pyagent.config_cli:main"
 pyagent-skills = "pyagent.skills_cli:main"
 pyagent-sessions = "pyagent.sessions_cli:main"
 pyagent-plugins = "pyagent.plugins_cli:main"
+pyagent-bench = "pyagent.bench_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["pyagent*"]
@@ -43,4 +44,6 @@ pyagent = [
     "plugins/**/*.md",
     "plugins/**/*.toml",
     "plugins/**/*.json",
+    # Bench scenarios.
+    "bench/scenarios/*.toml",
 ]
