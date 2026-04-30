@@ -46,7 +46,7 @@ class EchoClient:
         return {
             "text": text,
             "tool_calls": [],
-            "usage": {"input": 0, "output": 0},
+            "usage": {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0},
         }
 
 
@@ -102,5 +102,5 @@ class LoremClient:
         return {
             "text": "\n\n".join(paragraphs),
             "tool_calls": [],
-            "usage": {"input": 0, "output": 0},
+            "usage": {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0},
         }

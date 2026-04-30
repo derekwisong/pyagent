@@ -112,6 +112,8 @@ class AnthropicClient:
             "usage": {
                 "input": getattr(usage, "input_tokens", 0) or 0,
                 "output": getattr(usage, "output_tokens", 0) or 0,
+                "cache_creation": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+                "cache_read": getattr(usage, "cache_read_input_tokens", 0) or 0,
             },
         }
 
