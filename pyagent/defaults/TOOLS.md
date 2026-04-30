@@ -20,20 +20,13 @@ how to read errors, and the discretion the user is trusting you with.
 
 ## Editing files
 
-- For small modifications, prefer `edit_file` over re-writing the
-  whole file with `write_file`. Cheaper, the diff is auditable, and
-  it doesn't leave the prior version's content riding every
-  subsequent turn.
-- For huge writes that must arrive in chunks, write the first chunk
-  with `write_file` (default) and follow up with
-  `write_file(append=True)` calls. `append=True` creates the file
-  if it doesn't exist, so the first chunk can use it too if you
-  prefer. Do NOT fall back to shell heredocs via `execute` — those
-  embed the whole file in a shell string that rides every
-  subsequent turn.
-- `edit_file` requires `old_string` to match exactly once. If it
-  matches more than once, expand it with surrounding context until
-  it's unique, or pass `replace_all=True` for renames.
+- **Small change → `edit_file`**, not a full `write_file`. Only the
+  diff enters the conversation. `old_string` must match once;
+  expand it with context if not, or pass `replace_all=True`.
+- **Huge write → chunk with `write_file(append=True)`.** Don't
+  emit a shell heredoc via `execute` — that wedges the whole file
+  into the conversation forever. `append=True` creates the file
+  if missing, so the first chunk can use it too.
 
 ## Errors
 

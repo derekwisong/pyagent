@@ -216,7 +216,7 @@ def edit_file(
     except PermissionError:
         return f"<permission denied: {path}>"
     except UnicodeDecodeError:
-        return f"<cannot edit binary file: {path}>"
+        return f"<cannot decode {path} as UTF-8>"
 
     count = text.count(old_string)
     if count == 0:
@@ -230,21 +230,25 @@ def edit_file(
 
     if replace_all:
         new_text = text.replace(old_string, new_string)
-        try:
-            p.write_text(new_text)
-        except PermissionError:
-            return f"<permission denied: {path}>"
-        noun = "occurrence" if count == 1 else "occurrences"
-        return f"Edited {path}: replaced {count} {noun}"
+        success = (
+            f"Edited {path}: replaced {count} "
+            f"{'occurrence' if count == 1 else 'occurrences'}"
+        )
+    else:
+        idx = text.find(old_string)
+        line_no = text[:idx].count("\n") + 1
+        new_text = text[:idx] + new_string + text[idx + len(old_string):]
+        success = f"Edited {path}: replaced 1 occurrence at line {line_no}"
 
-    idx = text.find(old_string)
-    line_no = text[:idx].count("\n") + 1
-    new_text = text[:idx] + new_string + text[idx + len(old_string):]
     try:
         p.write_text(new_text)
+    except FileNotFoundError:
+        return f"<file not found: {path}>"
+    except IsADirectoryError:
+        return f"<is a directory, not a file: {path}>"
     except PermissionError:
         return f"<permission denied: {path}>"
-    return f"Edited {path}: replaced 1 occurrence at line {line_no}"
+    return success
 
 
 def list_directory(path: str) -> list[str]:

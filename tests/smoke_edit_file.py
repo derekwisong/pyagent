@@ -11,6 +11,10 @@ Exercises (in-process):
   6. Empty `old_string` is refused upfront.
   7. old_string == new_string is refused upfront.
   8. Missing file surfaces the standard `<file not found: ...>` marker.
+  9. Path outside workspace is refused via `<permission denied (outside
+     workspace): ...>`.
+ 10. Path naming a directory surfaces `<is a directory, ...>`.
+ 11. Non-UTF-8 file surfaces `<cannot decode ... as UTF-8>`.
 
 Run with:
 
@@ -98,6 +102,32 @@ def main() -> None:
     assert "line 1" in out, out
     assert p4.read_text() == "just single line, no newline at end", p4.read_text()
     print(f"✓ single-line line number: {out!r}")
+
+    # 11. workspace gate refusal — path outside the configured workspace.
+    # Use a sibling tmpdir so the path actually exists but isn't in scope.
+    outside = Path(tempfile.mkdtemp(prefix="pyagent-smoke-edit-outside-"))
+    outside_file = outside / "scratch.txt"
+    outside_file.write_text("some content\n")
+    out = edit_file(str(outside_file), "some", "SOME")
+    assert out.startswith("<permission denied (outside workspace)"), out
+    # File must be untouched.
+    assert outside_file.read_text() == "some content\n", outside_file.read_text()
+    print(f"✓ workspace-gate refusal: {out!r}")
+
+    # 12. is-a-directory marker
+    a_dir = tmp / "subdir"
+    a_dir.mkdir()
+    out = edit_file(str(a_dir), "x", "y")
+    assert out.startswith("<is a directory"), out
+    print(f"✓ is-a-directory marker: {out!r}")
+
+    # 13. non-UTF-8 file (binary-ish content that can't decode as UTF-8)
+    binp = tmp / "binary.bin"
+    binp.write_bytes(b"\xff\xfe\xfd\x00not-utf-8")
+    out = edit_file(str(binp), "x", "y")
+    assert out.startswith("<cannot decode"), out
+    assert "UTF-8" in out, out
+    print(f"✓ non-UTF-8 marker: {out!r}")
 
     print("\nALL CHECKS PASSED")
 
