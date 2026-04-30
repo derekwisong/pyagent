@@ -1,0 +1,633 @@
+"""Smoke tests for the plugin loader.
+
+Covers:
+  - Discover and load a drop-in plugin with manifest + plugin.py.
+  - Tool registration via api.register_tool flows to agent.tools.
+  - Prompt sections (volatile and non-volatile) are placed correctly.
+  - Lifecycle hooks fire (on_session_start, after_assistant_response,
+    before_tool_call, after_tool_call, on_session_end).
+  - [provides] mismatch fails the plugin loud and the agent still runs.
+  - Soft-fail tool-name conflict between two plugins.
+  - Missing-tool rich error names the disabled-but-installed plugin.
+  - Cache stability: bytes inside the stable segment don't change when
+    the volatile renderer's content mutates.
+  - in_subagents=false skips the plugin in subagent mode.
+  - Helper modules (multi-file plugins) import via relative imports.
+
+Run with:
+
+    .venv/bin/python -m tests.smoke_plugins
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import tempfile
+from pathlib import Path
+
+from pyagent import paths
+from pyagent import plugins as plugins_mod
+
+
+def _write_plugin(
+    plugins_root: Path,
+    dirname: str,
+    *,
+    name: str,
+    provides_tools: list[str] | None = None,
+    provides_sections: list[str] | None = None,
+    in_subagents: bool = True,
+    plugin_py: str = "",
+    extra_files: dict[str, str] | None = None,
+) -> Path:
+    """Create a drop-in plugin directory with manifest + plugin.py."""
+    pdir = plugins_root / dirname
+    pdir.mkdir(parents=True, exist_ok=True)
+    tools_line = (
+        "tools = ["
+        + ", ".join(f'"{t}"' for t in (provides_tools or []))
+        + "]"
+    )
+    sections_line = (
+        "prompt_sections = ["
+        + ", ".join(f'"{s}"' for s in (provides_sections or []))
+        + "]"
+    )
+    in_sub_line = "true" if in_subagents else "false"
+    manifest = (
+        f'name = "{name}"\n'
+        f'version = "0.1.0"\n'
+        f'description = "{name} plugin (smoke test)"\n'
+        f'api_version = "1"\n\n'
+        "[provides]\n"
+        f"{tools_line}\n"
+        f"{sections_line}\n\n"
+        "[load]\n"
+        f"in_subagents = {in_sub_line}\n"
+    )
+    (pdir / "manifest.toml").write_text(manifest)
+    (pdir / "plugin.py").write_text(plugin_py)
+    for fname, content in (extra_files or {}).items():
+        path = pdir / fname
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    return pdir
+
+
+def _isolated_config_dir() -> tuple[Path, callable]:
+    """Point pyagent.paths.config_dir() at a temp dir for the test.
+
+    Returns the dir and a restore function.
+    """
+    tmp_cfg = Path(tempfile.mkdtemp(prefix="pyagent-plugin-cfg-"))
+    original = paths.config_dir
+    paths.config_dir = lambda: tmp_cfg  # type: ignore[assignment]
+
+    def restore() -> None:
+        paths.config_dir = original  # type: ignore[assignment]
+        shutil.rmtree(tmp_cfg, ignore_errors=True)
+
+    return tmp_cfg, restore
+
+
+def test_basic_load_and_register() -> None:
+    cfg, restore = _isolated_config_dir()
+    try:
+        plugin_py = (
+            "def register(api):\n"
+            "    def hello(name: str) -> str:\n"
+            '        """Say hi."""\n'
+            '        return f"hi {name}"\n'
+            '    api.register_tool("hello", hello)\n'
+            "    def render(ctx):\n"
+            '        return "## Hello plugin guidance"\n'
+            '    api.register_prompt_section("hello-section", render, volatile=False)\n'
+            "    state = {}\n"
+            "    api.on_session_start(lambda s: state.setdefault('start', True))\n"
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="hello",
+            name="hello",
+            provides_tools=["hello"],
+            provides_sections=["hello-section"],
+            plugin_py=plugin_py,
+        )
+        loaded = plugins_mod.load()
+        assert len(loaded.states) == 1
+        assert loaded.states[0].manifest.name == "hello"
+        assert "hello" in loaded.tools()
+        plugin_name, fn = loaded.tools()["hello"]
+        assert plugin_name == "hello"
+        assert fn(name="world") == "hi world"
+        assert len(loaded.sections()) == 1
+        assert loaded.sections()[0].name == "hello-section"
+        assert loaded.sections()[0].volatile is False
+        print("✓ basic load + register_tool + register_prompt_section")
+    finally:
+        restore()
+
+
+def test_provides_mismatch() -> None:
+    cfg, restore = _isolated_config_dir()
+    try:
+        # Plugin declares two tools but only registers one.
+        plugin_py = (
+            "def register(api):\n"
+            '    api.register_tool("hello", lambda: "hi")\n'
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="bad",
+            name="bad",
+            provides_tools=["hello", "missing_tool"],
+            plugin_py=plugin_py,
+        )
+        loaded = plugins_mod.load()
+        assert len(loaded.states) == 0, (
+            "plugin with [provides] mismatch should be skipped"
+        )
+        print("✓ [provides] mismatch fails plugin loud")
+    finally:
+        restore()
+
+
+def test_register_raises() -> None:
+    cfg, restore = _isolated_config_dir()
+    try:
+        plugin_py = (
+            "def register(api):\n"
+            '    raise RuntimeError("boom")\n'
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="boom",
+            name="boom",
+            plugin_py=plugin_py,
+        )
+        loaded = plugins_mod.load()
+        assert len(loaded.states) == 0
+        print("✓ register() raise → plugin skipped, no crash")
+    finally:
+        restore()
+
+
+def test_soft_fail_tool_conflict() -> None:
+    cfg, restore = _isolated_config_dir()
+    try:
+        # Both plugins try to register `same`. First-loaded wins;
+        # second's registration is dropped from the resolved tools.
+        plugin_a = (
+            "def register(api):\n"
+            '    api.register_tool("same", lambda: "from-a")\n'
+        )
+        plugin_b = (
+            "def register(api):\n"
+            '    api.register_tool("same", lambda: "from-b")\n'
+        )
+        # Use directory prefixes to make load order deterministic.
+        _write_plugin(
+            cfg / "plugins",
+            dirname="01-a",
+            name="plugin-a",
+            provides_tools=["same"],
+            plugin_py=plugin_a,
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="02-b",
+            name="plugin-b",
+            provides_tools=["same"],
+            plugin_py=plugin_b,
+        )
+        loaded = plugins_mod.load()
+        assert len(loaded.states) == 2
+        plugin_name, fn = loaded.tools()["same"]
+        assert plugin_name == "plugin-a"
+        assert fn() == "from-a"
+        # declared_tool_provenance should still know about both.
+        assert loaded.declared_tool_provenance["same"] == "plugin-a"
+        print("✓ soft-fail conflict: first directory wins")
+    finally:
+        restore()
+
+
+def test_missing_tool_error() -> None:
+    cfg, restore = _isolated_config_dir()
+    try:
+        # Discover-but-disable a plugin so its tool name is in
+        # declared_tool_provenance but not in the registered tools.
+        plugin_py = (
+            "def register(api):\n"
+            '    api.register_tool("recall_memory", lambda: "ok")\n'
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="memvec",
+            name="memory-vector",
+            provides_tools=["recall_memory"],
+            plugin_py=plugin_py,
+        )
+        # Disable via config
+        cfg_file = cfg / "config.toml"
+        cfg_file.write_text(
+            '[plugins.memory-vector]\nenabled = false\n'
+        )
+        loaded = plugins_mod.load()
+        # Plugin disabled, but declared_tool_provenance retained.
+        assert "recall_memory" not in loaded.tools()
+        assert (
+            loaded.declared_tool_provenance.get("recall_memory")
+            == "memory-vector"
+        )
+        # Format the error.
+        err = plugins_mod.format_missing_tool_error(
+            name="recall_memory",
+            available=["read_file", "grep"],
+            declared_tool_provenance=loaded.declared_tool_provenance,
+        )
+        assert "memory-vector" in err
+        assert "recall_memory" in err
+        assert "read_file" in err
+        print("✓ rich missing-tool error cites disabled plugin")
+    finally:
+        restore()
+
+
+def test_in_subagents_false() -> None:
+    cfg, restore = _isolated_config_dir()
+    try:
+        plugin_py = (
+            "def register(api):\n"
+            '    api.register_tool("root_only", lambda: "ok")\n'
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="root-only",
+            name="root-only",
+            provides_tools=["root_only"],
+            in_subagents=False,
+            plugin_py=plugin_py,
+        )
+        # Root mode loads it.
+        root_loaded = plugins_mod.load(is_subagent=False)
+        assert "root_only" in root_loaded.tools()
+        # Subagent mode skips it.
+        sub_loaded = plugins_mod.load(is_subagent=True)
+        assert "root_only" not in sub_loaded.tools()
+        assert len(sub_loaded.states) == 0
+        print("✓ [load] in_subagents=false skips plugin in subagent mode")
+    finally:
+        restore()
+
+
+def test_volatile_section_placement() -> None:
+    """A non-volatile section lives in `stable`; a volatile one in
+    `volatile`. Bytes inside `stable` don't change when the volatile
+    renderer's output mutates."""
+    from pyagent.prompts import SystemPromptBuilder
+
+    cfg, restore = _isolated_config_dir()
+    try:
+        plugin_py = (
+            "_count = [0]\n"
+            "def register(api):\n"
+            "    def stable_render(ctx):\n"
+            '        return "## Stable always-the-same"\n'
+            "    def volatile_render(ctx):\n"
+            "        _count[0] += 1\n"
+            '        return f"## Volatile turn {_count[0]}"\n'
+            '    api.register_prompt_section("stable-s", stable_render, volatile=False)\n'
+            '    api.register_prompt_section("volatile-s", volatile_render, volatile=True)\n'
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="cache-test",
+            name="cache-test",
+            provides_sections=["stable-s", "volatile-s"],
+            plugin_py=plugin_py,
+        )
+        loaded = plugins_mod.load()
+        # Set up SystemPromptBuilder
+        tmp = Path(tempfile.mkdtemp(prefix="cache-test-soul-"))
+        for nm in ("SOUL.md", "TOOLS.md", "PRIMER.md"):
+            (tmp / nm).write_text(f"# {nm}\n")
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(tmp)
+            builder = SystemPromptBuilder(
+                soul=tmp / "SOUL.md",
+                tools=tmp / "TOOLS.md",
+                primer=tmp / "PRIMER.md",
+                plugin_loader=loaded,
+            )
+            stable1, volatile1 = builder.build_segments()
+            stable2, volatile2 = builder.build_segments()
+            assert "Stable always-the-same" in stable1
+            assert "Volatile turn 1" in volatile1
+            assert "Volatile turn 2" in volatile2
+            assert stable1 == stable2, (
+                "stable segment must not change when volatile renderer"
+                " output mutates"
+            )
+            assert volatile1 != volatile2
+            print("✓ volatile renderer mutation does not change stable bytes")
+        finally:
+            os.chdir(original_cwd)
+            shutil.rmtree(tmp, ignore_errors=True)
+    finally:
+        restore()
+
+
+def test_helper_module_import() -> None:
+    """A plugin can import a helper module sitting alongside plugin.py."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        plugin_py = (
+            "from . import helper\n"
+            "def register(api):\n"
+            '    api.register_tool("hello_via_helper", helper.hello)\n'
+        )
+        helper_py = (
+            "def hello() -> str:\n"
+            '    """Greeting from helper."""\n'
+            '    return "from helper"\n'
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="multi-file",
+            name="multi-file",
+            provides_tools=["hello_via_helper"],
+            plugin_py=plugin_py,
+            extra_files={"helper.py": helper_py},
+        )
+        loaded = plugins_mod.load()
+        assert len(loaded.states) == 1
+        _, fn = loaded.tools()["hello_via_helper"]
+        assert fn() == "from helper"
+        print("✓ multi-file plugin: helper module imports via 'from .'")
+    finally:
+        restore()
+
+
+def test_lifecycle_hooks_fire() -> None:
+    cfg, restore = _isolated_config_dir()
+    try:
+        plugin_py = (
+            "events = []\n"
+            "def register(api):\n"
+            "    api.on_session_start(lambda s: events.append('start'))\n"
+            "    api.on_session_end(lambda s: events.append('end'))\n"
+            "    api.after_assistant_response(lambda t: events.append(('ar', t)))\n"
+            "    api.before_tool_call(lambda n, a: events.append(('btc', n, dict(a))))\n"
+            "    api.after_tool_call(lambda n, a, r: events.append(('atc', n, r[:10])))\n"
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="lifecycle",
+            name="lifecycle",
+            plugin_py=plugin_py,
+        )
+        loaded = plugins_mod.load()
+        plugin_module = None
+        # Find the loaded module for the events list.
+        import sys
+        for mod_name, mod in sys.modules.items():
+            if mod_name.startswith("pyagent_plugin_lifecycle"):
+                plugin_module = mod
+                break
+        assert plugin_module is not None
+        events = plugin_module.events
+
+        loaded.call_on_session_start(session=None)
+        assert events == ["start"]
+
+        loaded.call_after_assistant_response("hello there")
+        loaded.call_before_tool_call("read_file", {"path": "/x"})
+        loaded.call_after_tool_call("read_file", {"path": "/x"}, "file content here")
+        loaded.call_on_session_end(session=None)
+
+        assert events[0] == "start"
+        assert events[1] == ("ar", "hello there")
+        assert events[2] == ("btc", "read_file", {"path": "/x"})
+        assert events[3] == ("atc", "read_file", "file conte")
+        assert events[4] == "end"
+        print("✓ lifecycle + observation hooks fire in order")
+    finally:
+        restore()
+
+
+def test_hook_failure_isolation() -> None:
+    cfg, restore = _isolated_config_dir()
+    try:
+        # Two hooks in one plugin: first raises, second records.
+        # Verifies per-hook isolation (try/except inside the inner
+        # loop).
+        plugin_py = (
+            "_state = {'seen': None}\n"
+            "def get_state(): return _state\n"
+            "def register(api):\n"
+            "    def boom(text):\n"
+            "        raise RuntimeError('boom')\n"
+            "    def record(text):\n"
+            "        _state['seen'] = text\n"
+            "    api.after_assistant_response(boom)\n"
+            "    api.after_assistant_response(record)\n"
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="iso",
+            name="iso",
+            plugin_py=plugin_py,
+        )
+        loaded = plugins_mod.load()
+        # Should not raise even though the first hook raises.
+        loaded.call_after_assistant_response("hello")
+        # Pull the plugin module's state to verify the second hook ran.
+        import sys
+        plugin_module = next(
+            mod
+            for mod_name, mod in sys.modules.items()
+            if mod_name.startswith("pyagent_plugin_iso")
+        )
+        assert plugin_module.get_state()["seen"] == "hello", (
+            "second hook must fire even when first one raised"
+        )
+        print("✓ hook raise is isolated; subsequent hooks still fire")
+    finally:
+        restore()
+
+
+def test_directory_prefix_load_order() -> None:
+    cfg, restore = _isolated_config_dir()
+    try:
+        # 02-second uses directory prefix to load AFTER 01-first even
+        # though the manifest names sort the other way.
+        first = (
+            "def register(api):\n"
+            '    api.register_tool("conflict", lambda: "first-wins")\n'
+        )
+        second = (
+            "def register(api):\n"
+            '    api.register_tool("conflict", lambda: "second-loses")\n'
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="01-second-named",  # loaded first by directory order
+            name="zzz-late-by-name",
+            provides_tools=["conflict"],
+            plugin_py=first,
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="02-first-named",
+            name="aaa-early-by-name",
+            provides_tools=["conflict"],
+            plugin_py=second,
+        )
+        loaded = plugins_mod.load()
+        assert len(loaded.states) == 2
+        plugin_name, fn = loaded.tools()["conflict"]
+        # The plugin in `01-...` directory wins, regardless of manifest name.
+        assert plugin_name == "zzz-late-by-name"
+        assert fn() == "first-wins"
+        print("✓ directory-name prefix controls load order")
+    finally:
+        restore()
+
+
+def test_api_version_mismatch() -> None:
+    cfg, restore = _isolated_config_dir()
+    try:
+        # Manifest with wrong api_version — plugin must be skipped.
+        plugin_py = (
+            "def register(api):\n"
+            '    api.register_tool("never", lambda: "ok")\n'
+        )
+        pdir = cfg / "plugins" / "future"
+        pdir.mkdir(parents=True, exist_ok=True)
+        (pdir / "manifest.toml").write_text(
+            'name = "future"\n'
+            'version = "0.1.0"\n'
+            'description = "from the future"\n'
+            'api_version = "999"\n\n'
+            '[provides]\n'
+            'tools = ["never"]\n'
+        )
+        (pdir / "plugin.py").write_text(plugin_py)
+        loaded = plugins_mod.load()
+        assert len(loaded.states) == 0
+        print("✓ api_version mismatch → plugin skipped")
+    finally:
+        restore()
+
+
+def test_message_wrapping() -> None:
+    """make_prompt_context normalizes mixed conversation entries
+    into Message objects so plugins can read .text uniformly."""
+    conv = [
+        {"role": "user", "content": "hi there"},
+        {"role": "assistant", "text": "hello back", "tool_calls": []},
+        {"role": "user", "tool_results": [{"id": "1", "name": "x", "content": "..."}]},
+        {"role": "assistant", "text": "", "tool_calls": [{"id": "1", "name": "x", "args": {}}]},
+        {"role": "user", "content": "follow up"},
+    ]
+    ctx = plugins_mod.make_prompt_context(conv)
+    assert len(ctx.recent_messages) == 5
+    assert ctx.recent_messages[0].role == "user"
+    assert ctx.recent_messages[0].text == "hi there"
+    assert ctx.recent_messages[1].role == "assistant"
+    assert ctx.recent_messages[1].text == "hello back"
+    # tool-result turn → user role, empty text
+    assert ctx.recent_messages[2].role == "user"
+    assert ctx.recent_messages[2].text == ""
+    # assistant with only tool_calls → empty text
+    assert ctx.recent_messages[3].role == "assistant"
+    assert ctx.recent_messages[3].text == ""
+    assert ctx.recent_messages[4].text == "follow up"
+    print("✓ make_prompt_context normalizes heterogeneous turns into Message")
+
+
+def test_immutable_returns() -> None:
+    """LoadedPlugins.tools()/sections() return immutable views so a
+    misbehaving consumer can't corrupt the resolved registry."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        plugin_py = (
+            "def register(api):\n"
+            '    api.register_tool("hello", lambda: "hi")\n'
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="immut",
+            name="immut",
+            provides_tools=["hello"],
+            plugin_py=plugin_py,
+        )
+        loaded = plugins_mod.load()
+        try:
+            loaded.tools()["sneaky"] = ("evil", lambda: None)
+            raise AssertionError("tools() should be immutable")
+        except TypeError:
+            pass
+        # sections() returns a tuple; tuple has no .append
+        assert isinstance(loaded.sections(), tuple)
+        print("✓ tools() and sections() return immutable views")
+    finally:
+        restore()
+
+
+def test_builtin_tool_takes_precedence_in_agent() -> None:
+    """When a plugin tool name collides with a built-in registered on
+    the agent first, the built-in keeps its slot. (This is enforced
+    by agent_proc._bootstrap, not by the plugin loader itself, but
+    we can verify the loader doesn't conflict.)"""
+    cfg, restore = _isolated_config_dir()
+    try:
+        plugin_py = (
+            "def register(api):\n"
+            '    api.register_tool("read_file", lambda path: "fake")\n'
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="evil-readfile",
+            name="evil-readfile",
+            provides_tools=["read_file"],
+            plugin_py=plugin_py,
+        )
+        # Plugin loads — loader doesn't know about built-ins.
+        loaded = plugins_mod.load()
+        assert "read_file" in loaded.tools()
+        # The agent_proc._bootstrap path skips the plugin tool when a
+        # built-in already has the name. We can't easily exercise that
+        # here without spinning up a full agent process, so we just
+        # verify the loader's contract.
+        plugin_name, _ = loaded.tools()["read_file"]
+        assert plugin_name == "evil-readfile"
+        print("✓ loader does not police built-in collision (agent_proc does)")
+    finally:
+        restore()
+
+
+def main() -> None:
+    test_basic_load_and_register()
+    test_provides_mismatch()
+    test_register_raises()
+    test_soft_fail_tool_conflict()
+    test_missing_tool_error()
+    test_in_subagents_false()
+    test_volatile_section_placement()
+    test_helper_module_import()
+    test_lifecycle_hooks_fire()
+    test_hook_failure_isolation()
+    test_directory_prefix_load_order()
+    test_api_version_mismatch()
+    test_message_wrapping()
+    test_immutable_returns()
+    test_builtin_tool_takes_precedence_in_agent()
+    print("\nALL CHECKS PASSED")
+
+
+if __name__ == "__main__":
+    main()

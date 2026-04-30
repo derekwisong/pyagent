@@ -4,6 +4,11 @@ import threading
 from typing import Any, Callable
 
 from pyagent.llms import LLMClient
+from pyagent.plugins import (
+    LoadedPlugins,
+    format_missing_tool_error,
+    make_prompt_context,
+)
 from pyagent.prompts import SystemPromptBuilder
 from pyagent.session import Attachment, Session
 from pyagent.tool_schema import schema
@@ -42,6 +47,7 @@ class Agent:
         system: str | SystemPromptBuilder | None = None,
         session: Session | None = None,
         depth: int = 0,
+        plugins: LoadedPlugins | None = None,
     ) -> None:
         self.client = client
         self.system = system
@@ -49,6 +55,7 @@ class Agent:
         self.tools: dict[str, Callable[..., Any]] = {}
         self._auto_offload: dict[str, bool] = {}
         self.conversation: list[Any] = []
+        self.plugins = plugins
         # Subagent registry: id -> opaque entry (shape owned by the
         # subagent module). Exposed on Agent so meta-tools registered
         # via add_tool can mutate it from inside _route_tool.
@@ -84,20 +91,48 @@ class Agent:
         """Build JSON-schema tool definitions from each tool's type hints + docstring."""
         return [schema(name, fn) for name, fn in self.tools.items()]
 
-    def _system_prompt(self) -> str | None:
-        if isinstance(self.system, SystemPromptBuilder):
-            return self.system.build()
-        return self.system
+    def _system_prompt_segments(self) -> tuple[str | None, str | None]:
+        """Return (stable, volatile) for the current turn.
 
-    def _call_llm(self, messages: list[Any], system: str | None) -> Any:
+        Plugins contributing volatile prompt sections place their
+        rendered output in the volatile segment; LLM clients position
+        it after the cache_control breakpoint so dynamic content
+        doesn't invalidate the cached system prefix.
+        """
+        if isinstance(self.system, SystemPromptBuilder):
+            ctx = make_prompt_context(self.conversation)
+            stable, volatile = self.system.build_segments(ctx)
+            return (stable or None, volatile or None)
+        if self.system is None:
+            return (None, None)
+        return (self.system, None)
+
+    def _call_llm(
+        self,
+        messages: list[Any],
+        system: str | None,
+        system_volatile: str | None = None,
+    ) -> Any:
         """One model turn. Sends conversation + tool schemas, returns the assistant turn."""
         return self.client.respond(
             conversation=messages,
             system=system,
             tools=self._tool_schemas(),
+            system_volatile=system_volatile,
         )
 
     def _execute_tool(self, name: str, args: dict[str, Any]) -> str:
+        if name not in self.tools:
+            provenance = (
+                self.plugins.declared_tool_provenance
+                if self.plugins is not None
+                else {}
+            )
+            return format_missing_tool_error(
+                name=name,
+                available=list(self.tools.keys()),
+                declared_tool_provenance=provenance,
+            )
         result = self.tools[name](**args)
         return self._render_tool_result(name, result)
 
@@ -170,11 +205,15 @@ class Agent:
         args = call["args"]
         if on_tool_call:
             on_tool_call(name, args)
+        if self.plugins is not None:
+            self.plugins.call_before_tool_call(name, args)
         try:
             content = self._execute_tool(name, args)
         except Exception as e:
             logger.exception("tool %s raised", name)
             content = f"Error: {type(e).__name__}: {e}"
+        if self.plugins is not None:
+            self.plugins.call_after_tool_call(name, args, content)
         if on_tool_result:
             on_tool_result(name, content)
         return content
@@ -219,8 +258,10 @@ class Agent:
             # shows up on the next iteration. The catalog renders
             # sorted; identical filesystem state ⇒ identical string
             # ⇒ prompt cache stays warm.
-            system = self._system_prompt()
-            turn = self._call_llm(self.conversation, system)
+            stable, volatile = self._system_prompt_segments()
+            turn = self._call_llm(
+                self.conversation, stable, system_volatile=volatile
+            )
             self.conversation.append(turn)
             usage = turn.get("usage") if isinstance(turn, dict) else None
             if usage:
@@ -233,6 +274,8 @@ class Agent:
                 texts.append(text)
                 if on_text:
                     on_text(text)
+                if self.plugins is not None:
+                    self.plugins.call_after_assistant_response(text)
 
             tool_calls = turn.get("tool_calls", [])
             if not tool_calls:

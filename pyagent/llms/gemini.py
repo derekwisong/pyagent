@@ -51,12 +51,24 @@ class GeminiClient:
         conversation: list[dict[str, Any]],
         system: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        system_volatile: str | None = None,
     ) -> dict[str, Any]:
         contents = [self._to_gemini(m) for m in conversation]
 
+        # Gemini implicit caching keys on the prefix; concatenate
+        # stable + volatile into one system_instruction. Volatile
+        # mutating defeats the cache for its bytes; stable prefix
+        # still benefits.
+        full_system = system or ""
+        if system_volatile:
+            full_system = (
+                f"{full_system}\n\n{system_volatile}"
+                if full_system
+                else system_volatile
+            )
         config_kwargs: dict[str, Any] = {}
-        if system:
-            config_kwargs["system_instruction"] = system
+        if full_system:
+            config_kwargs["system_instruction"] = full_system
         if tools:
             config_kwargs["tools"] = [
                 types.Tool(

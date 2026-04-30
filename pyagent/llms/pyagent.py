@@ -33,6 +33,7 @@ class EchoClient:
         conversation: list[dict[str, Any]],
         system: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        system_volatile: str | None = None,
     ) -> dict[str, Any]:
         text = ""
         for msg in reversed(conversation):
@@ -90,6 +91,7 @@ class LoremClient:
         conversation: list[dict[str, Any]],
         system: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        system_volatile: str | None = None,
     ) -> dict[str, Any]:
         paragraphs = []
         for _ in range(random.randint(1, 5)):

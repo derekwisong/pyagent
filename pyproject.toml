@@ -23,6 +23,7 @@ pyagent = "pyagent.cli:main"
 pyagent-config = "pyagent.config_cli:main"
 pyagent-skills = "pyagent.skills_cli:main"
 pyagent-sessions = "pyagent.sessions_cli:main"
+pyagent-plugins = "pyagent.plugins_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["pyagent*"]
@@ -32,4 +33,12 @@ pyagent = [
     "defaults/*.md",
     "skills/*/SKILL.md",
     "skills/*/*.py",
+    # Bundled plugins live under plugins/<name>/. Recursive globs so
+    # nested helper modules (embeddings/, etc.) and arbitrary data
+    # files (defaults/*.md, schema/*.json, …) all get packaged.
+    "plugins/**/manifest.toml",
+    "plugins/**/*.py",
+    "plugins/**/*.md",
+    "plugins/**/*.toml",
+    "plugins/**/*.json",
 ]

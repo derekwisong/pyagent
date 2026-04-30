@@ -35,10 +35,22 @@ class OpenAIClient:
         conversation: list[dict[str, Any]],
         system: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        system_volatile: str | None = None,
     ) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
-        if system:
-            messages.append({"role": "system", "content": system})
+        # OpenAI prompt caching is automatic on the prefix; concatenate
+        # stable + volatile into one system message. Volatile content
+        # mutating each turn defeats the cache for the volatile bytes
+        # but the stable prefix still benefits.
+        full_system = system or ""
+        if system_volatile:
+            full_system = (
+                f"{full_system}\n\n{system_volatile}"
+                if full_system
+                else system_volatile
+            )
+        if full_system:
+            messages.append({"role": "system", "content": full_system})
         for m in conversation:
             messages.extend(self._to_openai(m))
 

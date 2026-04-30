@@ -39,6 +39,7 @@ from typing import Any
 
 from pyagent import paths
 from pyagent import permissions
+from pyagent import plugins as plugins_mod
 from pyagent import protocol
 from pyagent import roles as roles_mod
 from pyagent import skills as skills_mod
@@ -446,7 +447,7 @@ def _register_tools(
 
 def _bootstrap(
     config: dict[str, Any], state: _ChildState
-) -> tuple[Agent, Session]:
+) -> tuple[Agent, Session, plugins_mod.LoadedPlugins]:
     """Replicate the CLI's startup setup inside the child process.
 
     Handles both root agents and subagents. Subagents have
@@ -487,6 +488,11 @@ def _bootstrap(
     # spawn is misleading prose.
     catalog_for_roles = roles_mod.catalog if allow_meta else ""
 
+    # Plugin loading. is_subagent is True for spawned subagents — the
+    # plugins module honors `[load] in_subagents = false` to skip
+    # plugins that aren't parallel-safe.
+    loaded_plugins = plugins_mod.load(is_subagent=is_subagent)
+
     if is_subagent:
         session = Session(
             session_id=config["session_id"],
@@ -509,6 +515,7 @@ def _bootstrap(
             roles_catalog=catalog_for_roles,
             role_body=config.get("role_body", ""),
             task_body=config.get("task_body", ""),
+            plugin_loader=loaded_plugins,
         )
     else:
         session = Session(session_id=config["session_id"])
@@ -518,6 +525,7 @@ def _bootstrap(
             primer=Path(config["primer_path"]),
             skills_catalog=skills_mod.live_catalog,
             roles_catalog=catalog_for_roles,
+            plugin_loader=loaded_plugins,
         )
 
     agent = Agent(
@@ -525,6 +533,7 @@ def _bootstrap(
         system=system,
         session=session,
         depth=int(config.get("depth", 0)),
+        plugins=loaded_plugins,
     )
     # Hand the IO thread a reference so it can look up SubagentEntry
     # status (sync vs async mode) when routing turn_complete events.
@@ -545,6 +554,25 @@ def _bootstrap(
         allowlist=allowlist,
     )
 
+    # Plugin introspection tool, available to the agent for self-
+    # improvement workflows.
+    agent.add_tool(
+        "list_plugins", plugins_mod.make_list_plugins_tool(loaded_plugins)
+    )
+
+    # Register plugin tools. Built-ins win on conflict — a plugin that
+    # tries to claim a built-in tool name is logged and skipped.
+    builtin_names = set(agent.tools.keys())
+    for tool_name, (plugin_name, fn) in loaded_plugins.tools().items():
+        if tool_name in builtin_names:
+            logger.warning(
+                "plugin %s: tool %r conflicts with a built-in; skipping",
+                plugin_name,
+                tool_name,
+            )
+            continue
+        agent.add_tool(tool_name, fn)
+
     agent.conversation = session.load_history()
     if agent.conversation:
         orphans = session.find_orphan_attachments()
@@ -555,7 +583,7 @@ def _bootstrap(
                 level="info",
                 message=f"purged {len(orphans)} orphan attachment(s)",
             )
-    return agent, session
+    return agent, session, loaded_plugins
 
 
 def _run_turn(
@@ -712,7 +740,7 @@ def child_main(config: dict[str, Any], conn: Connection) -> None:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
     state = _ChildState(conn=conn)
     try:
-        agent, session = _bootstrap(config, state)
+        agent, session, loaded_plugins = _bootstrap(config, state)
     except Exception as e:
         logger.exception("child bootstrap failed")
         state.send(
@@ -734,6 +762,28 @@ def child_main(config: dict[str, Any], conn: Connection) -> None:
     )
     io_thread.start()
 
+    # Fire on_session_start AFTER ready + io_thread so cancel events
+    # can route while plugins are initializing. The work_queue is not
+    # dequeued until this returns — slow plugin startup hangs the
+    # agent (intentional; same blast radius as a hung tool).
+    #
+    # If the user pressed Esc during plugin startup, the IO thread
+    # set state.cancel_event. We honor it by short-circuiting the
+    # remaining hooks and shutting down — otherwise _run_turn would
+    # unconditionally clear the cancel on the first turn and mask
+    # the user's intent.
+    loaded_plugins.call_on_session_start(
+        session, cancel_check=state.cancel_event.is_set
+    )
+    if state.cancel_event.is_set():
+        state.send(
+            "info",
+            level="info",
+            message="cancelled during plugin startup; shutting down",
+        )
+        state.shutdown_event.set()
+        state.cancel_event.clear()
+
     while not state.shutdown_event.is_set():
         try:
             event = state.work_queue.get(timeout=0.5)
@@ -752,7 +802,15 @@ def child_main(config: dict[str, Any], conn: Connection) -> None:
             persist=event.get("persist", True),
         )
 
+    # Tear down subagents first, then fire on_session_end. End-hooks
+    # might write to disk or call APIs; they shouldn't race with
+    # subagents that are still alive forwarding events upstream.
     _terminate_subagents(state, agent)
+    try:
+        loaded_plugins.call_on_session_end(session)
+    except Exception:
+        logger.exception("on_session_end teardown raised")
+
     try:
         conn.close()
     except Exception:
