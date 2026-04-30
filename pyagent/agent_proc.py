@@ -613,6 +613,8 @@ def _run_turn(
                 "usage",
                 input=int(u.get("input", 0) or 0),
                 output=int(u.get("output", 0) or 0),
+                cache_creation=int(u.get("cache_creation", 0) or 0),
+                cache_read=int(u.get("cache_read", 0) or 0),
             ),
             cancel_event=state.cancel_event,
         )

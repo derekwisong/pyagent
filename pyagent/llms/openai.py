@@ -89,6 +89,8 @@ class OpenAIClient:
             )
 
         usage = getattr(response, "usage", None)
+        prompt_details = getattr(usage, "prompt_tokens_details", None)
+        cache_read = getattr(prompt_details, "cached_tokens", 0) or 0
         return {
             "role": "assistant",
             "text": message.content or "",
@@ -96,6 +98,8 @@ class OpenAIClient:
             "usage": {
                 "input": getattr(usage, "prompt_tokens", 0) or 0,
                 "output": getattr(usage, "completion_tokens", 0) or 0,
+                "cache_creation": 0,
+                "cache_read": cache_read,
             },
         }
 

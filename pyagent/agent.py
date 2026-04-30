@@ -67,7 +67,12 @@ class Agent:
         # `on_usage` callback fired in `run` lets agent_proc forward
         # per-call deltas upstream so the CLI can render a running
         # cost meter.
-        self.token_usage: dict[str, int] = {"input": 0, "output": 0}
+        self.token_usage: dict[str, int] = {
+            "input": 0,
+            "output": 0,
+            "cache_creation": 0,
+            "cache_read": 0,
+        }
         # Async subagent inbox. The IO thread (in agent_proc) puts
         # formatted reply strings here when an async-fired subagent
         # finishes its turn. `_drain_pending_async`, called at the
@@ -150,6 +155,13 @@ class Agent:
     # needs to recover them.
     TOOL_ARG_ELIDE_THRESHOLD = 4_000
 
+    # Tools that bypass auto_offload but still get the soft threshold
+    # applied — `read_file` is registered with auto_offload=False so a
+    # small explicit read returns inline, but the soft threshold
+    # (8000 chars by default) still needs to fire on a runaway ranged
+    # read of HTML / a wide log line / a binary mistakenly read as text.
+    SOFT_THRESHOLD_FORCED_TOOLS: frozenset[str] = frozenset({"read_file"})
+
     def _render_tool_result(self, name: str, result: Any) -> str:
         if isinstance(result, Attachment):
             if not self.session:
@@ -176,7 +188,12 @@ class Agent:
             auto = self._auto_offload.get(name, True)
             over_threshold = len(text) > self.session.attachment_threshold
             over_ceiling = len(text) > self.HARD_OFFLOAD_CEILING
-            if (auto and over_threshold) or over_ceiling:
+            forced_soft = (
+                not auto
+                and name in self.SOFT_THRESHOLD_FORCED_TOOLS
+                and over_threshold
+            )
+            if (auto and over_threshold) or over_ceiling or forced_soft:
                 path = self.session.write_attachment(name, text)
                 preview = text[: self.session.preview_chars]
                 return self._format_offload_ref(path, len(text), preview)
@@ -310,8 +327,8 @@ class Agent:
             self.conversation.append(turn)
             usage = turn.get("usage") if isinstance(turn, dict) else None
             if usage:
-                self.token_usage["input"] += int(usage.get("input", 0) or 0)
-                self.token_usage["output"] += int(usage.get("output", 0) or 0)
+                for k in ("input", "output", "cache_creation", "cache_read"):
+                    self.token_usage[k] += int(usage.get(k, 0) or 0)
                 if on_usage:
                     on_usage(usage)
 

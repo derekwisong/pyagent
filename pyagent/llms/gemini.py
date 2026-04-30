@@ -111,6 +111,8 @@ class GeminiClient:
             "usage": {
                 "input": getattr(usage_meta, "prompt_token_count", 0) or 0,
                 "output": getattr(usage_meta, "candidates_token_count", 0) or 0,
+                "cache_creation": 0,
+                "cache_read": getattr(usage_meta, "cached_content_token_count", 0) or 0,
             },
         }
 
