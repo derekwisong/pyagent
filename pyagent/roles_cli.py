@@ -185,7 +185,18 @@ def _toml_value(v: object) -> str:
 
 
 def _render_migrated_role(role: roles_mod.Role, original_name: str) -> str:
-    """Build the .md file text for a migrated role."""
+    """Build the .md file text for a migrated role.
+
+    `description` is only emitted in the frontmatter when the body is
+    empty — without a body, auto-derivation has nothing to chew on, so
+    the explicit description is the only thing that keeps the role
+    catalog informative. When the body is non-empty, omit
+    `description` and let auto-derivation pick it up from the first
+    paragraph; that keeps migrated files concise and matches the
+    bundled-roles convention (which never sets `description`
+    explicitly).
+    """
+    body = role.system_prompt.strip()
     fm_lines = ["+++"]
     if role.model:
         fm_lines.append(f"model = {_toml_value(role.model)}")
@@ -193,11 +204,15 @@ def _render_migrated_role(role: roles_mod.Role, original_name: str) -> str:
         fm_lines.append(f"tools = {_toml_value(list(role.tools))}")
     if role.meta_tools is not True:
         fm_lines.append(f"meta_tools = {_toml_value(role.meta_tools)}")
-    fm_lines.append(f"description = {_toml_value(role.description)}")
-    fm_lines.append("+++")
-    body = role.system_prompt.strip()
     if not body:
-        body = f"# Role: {original_name}\n\n(No persona body in the original [models.<name>] entry.)"
+        # No body to auto-derive from — pin the description explicitly.
+        fm_lines.append(f"description = {_toml_value(role.description)}")
+    fm_lines.append("+++")
+    if not body:
+        body = (
+            f"# Role: {original_name}\n\n"
+            "(No persona body in the original [models.<name>] entry.)"
+        )
     return "\n".join(fm_lines) + "\n\n" + body + "\n"
 
 
@@ -230,7 +245,12 @@ def migrate_cmd(force: bool) -> None:
         role = roles_mod._coerce_legacy_role(name, entry)
         if role is None:
             continue
-        dest = target_root / f"{name.upper()}.md"
+        # Filename mirrors the bundled all-caps + underscores convention:
+        # legacy `[models.deep-thought]` → DEEP_THOUGHT.md (not
+        # DEEP-THOUGHT.md). Lookup normalization treats both equivalently
+        # but consistent filenames keep `pyagent-roles list` tidy.
+        canonical = name.upper().replace("-", "_")
+        dest = target_root / f"{canonical}.md"
         if dest.exists() and not force:
             click.echo(f"skipped {dest} (exists)")
             skipped += 1

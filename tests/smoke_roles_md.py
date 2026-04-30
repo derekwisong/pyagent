@@ -350,7 +350,71 @@ def test_cli_migrate(tmp: Path, user_dir: Path) -> None:
     role = loaded["tomigrate"]
     # File-based resolution should now win — source set.
     assert role.source is not None, role
+
+    # When the legacy entry has a non-empty system_prompt, the migrated
+    # frontmatter should NOT pin description — auto-derivation from the
+    # body is enough, matching the bundled-roles convention. The
+    # description still gets resolved correctly via auto-derive.
+    assert "description = " not in text, (
+        f"description should be omitted when body is present: {text!r}"
+    )
+    assert role.description, "auto-derived description should be non-empty"
     print("✓ pyagent-roles migrate: writes .md and roles.load() picks it up")
+
+
+def test_cli_migrate_dashed_name(tmp: Path, user_dir: Path) -> None:
+    """Legacy role names with dashes (`[models.deep-thought]`) migrate
+    to canonical `DEEP_THOUGHT.md` — uppercase + underscores, matching
+    the bundled-roles convention. Lookup still works either way via
+    `_normalize_name`."""
+    (tmp / ".pyagent" / "config.toml").write_text(
+        '[models.deep-thought]\n'
+        'model = "pyagent/echo"\n'
+        'description = "Dashed name."\n'
+        'system_prompt = "Body content here."\n'
+    )
+    runner = CliRunner()
+    result = runner.invoke(roles_cli.main, ["migrate"])
+    assert result.exit_code == 0, result.output
+
+    canonical = user_dir / "roles" / "DEEP_THOUGHT.md"
+    dashed = user_dir / "roles" / "DEEP-THOUGHT.md"
+    assert canonical.exists(), f"expected {canonical}, got dir: " + str(
+        list((user_dir / "roles").iterdir())
+    )
+    assert not dashed.exists(), (
+        f"unexpected dashed filename {dashed} — should have been "
+        f"normalized to underscores"
+    )
+
+    # Lookup still works via the original dashed name (normalized).
+    roles._reset_deprecation_warning()
+    loaded = roles.load()
+    assert "deep_thought" in loaded, list(loaded.keys())
+    print(
+        "✓ pyagent-roles migrate: dashed names → underscored filenames"
+    )
+
+
+def test_cli_migrate_no_body_keeps_description(
+    tmp: Path, user_dir: Path
+) -> None:
+    """When the legacy [models.<name>] entry has no `system_prompt`,
+    the migrated file must keep `description` in the frontmatter — the
+    auto-derive has nothing to pull from."""
+    (tmp / ".pyagent" / "config.toml").write_text(
+        '[models.bare]\n'
+        'model = "pyagent/echo"\n'
+        'description = "Pin me explicitly."\n'
+    )
+    runner = CliRunner()
+    result = runner.invoke(roles_cli.main, ["migrate"])
+    assert result.exit_code == 0, result.output
+    out_path = user_dir / "roles" / "BARE.md"
+    assert out_path.exists()
+    text = out_path.read_text()
+    assert 'description = "Pin me explicitly."' in text, text
+    print("✓ pyagent-roles migrate: keeps description when body is empty")
 
 
 # ---- Test harness ---------------------------------------------------
@@ -415,6 +479,8 @@ def main() -> None:
         test_cli_show_and_path(tmp)
         test_cli_init_idempotent(tmp, user_dir)
         test_cli_migrate(tmp, user_dir)
+        test_cli_migrate_dashed_name(tmp, user_dir)
+        test_cli_migrate_no_body_keeps_description(tmp, user_dir)
 
         print("\nALL CHECKS PASSED")
     finally:
