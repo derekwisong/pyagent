@@ -1,0 +1,21 @@
+name = "well_mako"
+description = "Web research scenario mirroring the well-mako log analyzed manually: fetch two Wikipedia articles, cross-reference, write the analysis to disk."
+
+# `tools` is a hint for the human reading the scenario file; the agent
+# decides which tools to call. The actual runtime knob is the prompt
+# sequence below.
+tools = ["fetch_url", "read_file", "write_file"]
+
+[[prompts]]
+text = """Look up the Wikipedia article on Ada Lovelace at \
+https://en.wikipedia.org/wiki/Ada_Lovelace and give me a short bio \
+focused on her contributions to computing — three or four sentences."""
+
+[[prompts]]
+text = """Now compare what Wikipedia says about Lovelace's collaboration \
+with Charles Babbage to what the article on Babbage himself says at \
+https://en.wikipedia.org/wiki/Charles_Babbage. Where do they emphasize \
+different things?"""
+
+[[prompts]]
+text = "Save your full analysis as a markdown file at /tmp/bench-output.md and confirm the path."
