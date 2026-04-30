@@ -142,8 +142,11 @@ class Agent:
     @staticmethod
     def _format_offload_ref(path: Any, size: int, preview: str) -> str:
         header = (
-            f"[output saved to {path} ({size} chars) — "
-            f"call read_file on this path to view the full output]"
+            f"[output saved to {path} ({size} chars) — preview below. "
+            f"Do NOT read_file the whole attachment; that pulls every "
+            f"byte back into context permanently. If you need more, "
+            f"grep for what you want or read_file with start/end to "
+            f"slice a specific range.]"
         )
         if preview:
             return f"{header}\n\n--- preview ---\n{preview}"

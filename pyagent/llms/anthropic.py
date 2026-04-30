@@ -17,7 +17,7 @@ class AnthropicClient:
     def __init__(
         self,
         model: str = "claude-sonnet-4-6",
-        max_tokens: int = 4096,
+        max_tokens: int = 16384,
         api_key: str | None = None,
         cache: bool = True,
     ) -> None:
