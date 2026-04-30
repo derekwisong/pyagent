@@ -18,4 +18,4 @@ https://en.wikipedia.org/wiki/Charles_Babbage. Where do they emphasize \
 different things?"""
 
 [[prompts]]
-text = "Save your full analysis as a markdown file at /tmp/bench-output.md and confirm the path."
+text = "Save your full analysis as a markdown file named bench-output.md (relative path — the workspace is a fresh tmpdir set up by the bench) and confirm the path."
