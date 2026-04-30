@@ -170,12 +170,17 @@ def render_toml(data: dict[str, Any], commented: bool = False) -> str:
 _ROLE_EXAMPLE_BLOCK = """
 # Roles — named subagent models the orchestrator can address by name.
 #
-# Each [models.<name>] table defines a preset that `spawn_subagent`
-# resolves via its `model` argument. Required: model, description.
-# Optional: system_prompt / system_prompt_path (default subagent
-# persona body, layered onto SOUL/TOOLS/PRIMER), tools (allowlist
-# narrowing the default tool set), meta_tools (default true; set
-# false to make a leaf role that can't fan out further).
+# Roles now live as markdown files under <config-dir>/roles/ (or
+# .pyagent/roles/ for project overrides). Run `pyagent-roles init` to
+# seed the starter library, then `pyagent-roles list` to see what's
+# available. Each .md file is one role; optional Hugo-style TOML
+# frontmatter between `+++` delimiters declares model / tools /
+# meta_tools / description.
+#
+# The legacy [models.<name>] form below still works for backward
+# compatibility but emits a deprecation warning at startup. Run
+# `pyagent-roles migrate` to convert any [models.*] entries into
+# files automatically.
 #
 # [models.planner]
 # model = "anthropic/claude-opus-4-7"
