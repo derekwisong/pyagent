@@ -78,15 +78,8 @@ class AuditReport:
     inline_bloat: list[BloatRow] = field(default_factory=list)
 
 
-def _gated_total(
-    model: str,
-    *,
-    input: int,
-    output: int,
-    cache_creation: int,
-    cache_read: int,
-) -> int:
-    """Token total mirroring `pricing.format_usage_suffix`'s gate.
+def _total_tokens_summary(model: str, totals: dict[str, int]) -> int:
+    """Aggregate token total mirroring `pricing.format_usage_suffix`'s gate.
 
     Anthropic: bundle all four (the four counts are disjoint —
     `input_tokens` excludes cache reads and writes, so the sum is the
@@ -94,34 +87,19 @@ def _gated_total(
     `prompt_tokens` / `prompt_token_count` already includes cached
     tokens, so adding cache_read would double-count the same tokens).
 
-    Used by both per-turn rows and the aggregate header / bench report.
+    Used by the audit-report header and the bench report. Per-turn
+    rows in the breakdown table render the four counts separately, so
+    no per-turn variant is needed.
     """
     name = pricing.model_name(model)
     if pricing.is_anthropic_model(name):
-        return input + output + cache_creation + cache_read
-    return input + output
-
-
-def _total_tokens(model: str, t: TurnRow) -> int:
-    """Convenience wrapper for per-turn rows."""
-    return _gated_total(
-        model,
-        input=t.input,
-        output=t.output,
-        cache_creation=t.cache_creation,
-        cache_read=t.cache_read,
-    )
-
-
-def _total_tokens_summary(model: str, totals: dict[str, int]) -> int:
-    """Convenience wrapper for the aggregate totals dict."""
-    return _gated_total(
-        model,
-        input=totals.get("input", 0),
-        output=totals.get("output", 0),
-        cache_creation=totals.get("cache_creation", 0),
-        cache_read=totals.get("cache_read", 0),
-    )
+        return (
+            totals.get("input", 0)
+            + totals.get("output", 0)
+            + totals.get("cache_creation", 0)
+            + totals.get("cache_read", 0)
+        )
+    return totals.get("input", 0) + totals.get("output", 0)
 
 
 def _iter_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -256,9 +234,12 @@ def audit_session(
             # The offload prefix uses the path as written by the agent.
             # Match by suffix `attachments/<name>` so a relative or
             # absolute path both hit. Mirrors `Session.find_orphan_attachments`.
+            # The `attachments/` segment anchors the match so a tool
+            # result that happens to mention a bare filename can't
+            # falsely register as a reference.
             ref_count = 0
             for ref_path, count in attachment_refs.items():
-                if ref_path.endswith(f"attachments/{f.name}") or ref_path.endswith(f.name):
+                if ref_path.endswith(f"attachments/{f.name}"):
                     ref_count += count
             row = AttachmentRow(
                 filename=f.name,

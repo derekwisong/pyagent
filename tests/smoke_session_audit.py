@@ -302,6 +302,41 @@ def _check_lower_bound_warning_is_specific() -> None:
         print("✓ lower-bound warning names X of Y assistant turns")
 
 
+def _check_path_traversal_refused() -> None:
+    """`sessions_cli._resolve_session_dir` must refuse a session_id whose
+    resolved path escapes the sessions root, so a typo or hostile input
+    can't make audit/delete index files outside `<root>`."""
+    import click
+
+    from pyagent.sessions_cli import _resolve_session_dir
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "sessions"
+        root.mkdir()
+        # Legit: a real subdir resolves to an absolute path under root.
+        legit = root / "good-session"
+        legit.mkdir()
+        out = _resolve_session_dir(root, "good-session")
+        assert out == legit.resolve(), out
+        # Refusal: `..` traversal escapes the root.
+        try:
+            _resolve_session_dir(root, "../escape")
+        except click.ClickException as e:
+            assert "outside the sessions" in str(e), e
+        else:
+            raise AssertionError("expected ClickException for '../escape'")
+        # Refusal: absolute-path escape.
+        try:
+            _resolve_session_dir(root, "/etc/passwd")
+        except click.ClickException as e:
+            assert "outside the sessions" in str(e), e
+        else:
+            raise AssertionError(
+                "expected ClickException for '/etc/passwd'"
+            )
+    print("✓ session_id path-traversal refused; legit ids resolve cleanly")
+
+
 def main() -> None:
     _check_offload_regex_matches_format_offload_ref()
     _check_audit_synthetic_session()
@@ -310,6 +345,7 @@ def main() -> None:
     _check_section_filtering()
     _check_displayed_total_gates_to_anthropic()
     _check_lower_bound_warning_is_specific()
+    _check_path_traversal_refused()
     print("\nALL CHECKS PASSED")
 
 

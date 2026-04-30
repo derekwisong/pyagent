@@ -25,8 +25,32 @@ from pyagent.sessions_audit_render import (
 )
 
 
+# Used when --model is unset and no `default_model` is in config. Sonnet
+# is the broadly-available middle tier; the audit only uses this for
+# cost estimation, so a wrong default produces a wrong $ figure but
+# still-correct token totals. Centralized so future model bumps touch
+# one site.
+_DEFAULT_AUDIT_MODEL = "anthropic/claude-sonnet-4-6"
+
+
 def _root() -> Path:
     return Session.DEFAULT_ROOT
+
+
+def _resolve_session_dir(root: Path, session_id: str) -> Path:
+    """Resolve `<root>/<session_id>` and refuse if the result escapes
+    `root`. Defends against `--session-id ../foo` style traversal — the
+    audit and delete commands open files under the resolved path, so
+    even a read-only command shouldn't index outside the sessions root.
+    """
+    target = (root / session_id).resolve()
+    root_abs = root.resolve()
+    if not target.is_relative_to(root_abs):
+        raise click.ClickException(
+            f"session_id {session_id!r} resolves outside the sessions "
+            f"root {root_abs}; refusing."
+        )
+    return target
 
 
 def _session_dirs(root: Path) -> list[Path]:
@@ -135,7 +159,7 @@ def delete_cmd(session_id: str | None, all_: bool, dry_run: bool) -> None:
         return
     if not session_id:
         raise click.UsageError("provide a session_id or --all.")
-    target = root / session_id
+    target = _resolve_session_dir(root, session_id)
     if not target.exists():
         raise click.ClickException(f"no session {session_id!r} in {root}.")
     if not dry_run:
@@ -265,7 +289,7 @@ def audit_cmd(
 ) -> None:
     """Audit a session: cost, per-turn tokens, attachments, inline bloat."""
     root = _root()
-    target = root / session_id
+    target = _resolve_session_dir(root, session_id)
     if not target.exists():
         raise click.ClickException(f"no session {session_id!r} in {root}.")
 
@@ -292,7 +316,7 @@ def audit_cmd(
         if cfg_default:
             resolved_model = cfg_default
         else:
-            resolved_model = "anthropic/claude-sonnet-4-6"
+            resolved_model = _DEFAULT_AUDIT_MODEL
             if not quiet:
                 click.echo(
                     f"[note] no --model and no config.default_model — "
