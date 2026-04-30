@@ -436,22 +436,88 @@ _FETCH_UA = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
+# Cap the inline markdown so a giant page can't blow the conversation.
+# Past this size we truncate the inline body and tell the agent to call
+# html_to_md(path, ...) on the saved raw attachment for the full output.
+_FETCH_INLINE_MD_CEILING = 8000
 
-def fetch_url(url: str) -> str:
-    """Fetch a URL via HTTP GET and return the response body as text.
+# Soft import: when the html-tools plugin is enabled (the default),
+# fetch_url uses its conversion as a convenience. When the plugin is
+# disabled or its deps are missing, we fall back to raw-attachment-only.
+try:
+    from pyagent.plugins.html_tools import extraction as _html_extraction
+except ImportError:
+    _html_extraction = None
 
-    GET-only. Non-2xx responses come back as data (a `status: 404` line
-    followed by the body) rather than as errors — read the status line
-    and adapt. For POST, custom headers, auth, or anything beyond a
-    plain GET, drop into `execute` with `curl` instead.
+
+def _detect_content_type(headers: dict, body: str) -> tuple[str, bool]:
+    """Return (content_type, is_html). content_type is the mime portion
+    of the Content-Type header, lowercased; is_html is True for HTML
+    responses (used to decide whether markdown conversion applies)."""
+    raw = (headers.get("Content-Type") or headers.get("content-type") or "")
+    ctype = raw.split(";", 1)[0].strip().lower()
+    if not ctype:
+        # Cheap content sniff for hosts that don't set Content-Type.
+        head = body[:512].lstrip().lower()
+        if head.startswith("<!doctype html") or head.startswith("<html"):
+            ctype = "text/html"
+        elif head.startswith(("{", "[")):
+            ctype = "application/json"
+        else:
+            ctype = "text/plain"
+    is_html = "html" in ctype
+    return ctype, is_html
+
+
+def _suffix_for_content_type(ctype: str) -> str:
+    if "html" in ctype:
+        return ".html"
+    if "json" in ctype:
+        return ".json"
+    if "xml" in ctype:
+        return ".xml"
+    return ".txt"
+
+
+def fetch_url(
+    url: str,
+    format: str = "md",
+    main_content: bool = True,
+) -> "str | Attachment":
+    """Fetch a URL via HTTP GET; save the raw response and return a
+    convenience preview.
+
+    The raw response body is *always* saved to a session attachment.
+    The returned tool result names that path so you can follow up with
+    `html_to_md`, `html_select`, `grep`, or `read_file` against the
+    saved file — no need to re-fetch.
+
+    GET-only. Non-2xx responses still save and report normally; the
+    HTTP status appears in the result. For POST, custom headers, auth,
+    or anything beyond a plain GET, drop into `execute` with `curl`.
 
     Args:
         url: URL to fetch.
+        format: Output format. `"md"` (default) converts HTML responses
+            to markdown and includes it inline alongside the saved-path
+            stub — one tool call covers article-body extraction.
+            `"void"` skips conversion and returns only the path stub
+            with no inline body — use when you'll interrogate the page
+            with `html_select` / `grep` and don't want to pay tokens
+            for a markdown preview you won't read, or when fetching
+            multiple URLs to triage cheaply.
+        main_content: When `format="md"` and the response is HTML, run
+            a readability-style reduction first (drop nav/aside/footer
+            and prefer `<main>` / `<article>`). Default `True` matches
+            the news/blog/article majority. Set False for reference
+            pages (Wikipedia, docs) where the whole document is the
+            content.
 
     Returns:
-        Status code line followed by the response body. Network
-        failures (DNS, connection refused, timeout) are reported as a
-        leading `<request failed: ...>` marker rather than raised.
+        An attachment-style stub naming the saved path, the response
+        status and content type, and — when applicable — the converted
+        markdown inline. Network failures (DNS, connection refused,
+        timeout) come back as `<request failed: ...>` instead.
     """
     try:
         response = requests.get(
@@ -459,4 +525,70 @@ def fetch_url(url: str) -> str:
         )
     except requests.RequestException as e:
         return f"<request failed: {e}>"
-    return f"status: {response.status_code}\n{response.text}"
+
+    body = response.text
+    ctype, is_html = _detect_content_type(dict(response.headers), body)
+    suffix = _suffix_for_content_type(ctype)
+    size = len(body)
+
+    header_lines = [
+        f"Fetched {url} (status {response.status_code}, "
+        f"{size} chars, {ctype}).",
+    ]
+
+    if format == "void":
+        header_lines.append(
+            "No content returned (format=\"void\"). Use `html_to_md`, "
+            "`html_select`, `grep`, or `read_file` on the saved path "
+            "to interrogate."
+        )
+        preview = "\n".join(header_lines)
+        return Attachment(content=body, preview=preview, suffix=suffix)
+
+    if not is_html or _html_extraction is None:
+        if not is_html:
+            header_lines.append(
+                f"Non-HTML response. Use `read_file` / `grep` on the "
+                f"saved path to extract."
+            )
+        else:
+            header_lines.append(
+                "html-tools plugin not available; markdown conversion "
+                "skipped. Use `read_file` / `grep` on the saved path."
+            )
+        preview = "\n".join(header_lines)
+        return Attachment(content=body, preview=preview, suffix=suffix)
+
+    try:
+        md = _html_extraction.html_to_markdown(
+            body, main_content=main_content
+        )
+    except Exception as e:
+        header_lines.append(
+            f"Markdown conversion failed ({type(e).__name__}: {e}). "
+            f"Use `html_to_md` directly on the saved path or fall back "
+            f"to `read_file` / `grep`."
+        )
+        preview = "\n".join(header_lines)
+        return Attachment(content=body, preview=preview, suffix=suffix)
+
+    md_size = len(md)
+    truncated = md_size > _FETCH_INLINE_MD_CEILING
+    if truncated:
+        md_inline = (
+            md[:_FETCH_INLINE_MD_CEILING]
+            + "\n\n[markdown truncated; call "
+            "`html_to_md(<saved path>, main_content="
+            f"{main_content})` for the full output.]"
+        )
+    else:
+        md_inline = md
+
+    label = "main-content markdown" if main_content else "full-document markdown"
+    header_lines.append(
+        f"{label} ({md_size} chars{', truncated inline' if truncated else ''}). "
+        f"For CSS extraction or raw search, use `html_select` / "
+        f"`grep` / `read_file` on the saved path."
+    )
+    preview = "\n".join(header_lines) + "\n\n" + md_inline
+    return Attachment(content=body, preview=preview, suffix=suffix)

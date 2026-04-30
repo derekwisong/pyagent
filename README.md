@@ -125,11 +125,14 @@ The following is a table of the built-in tools.
 | `list_directory` | List the entries in a directory; directories are suffixed `/`. |
 | `grep` | Search for a regex pattern in a file or recursively across a directory. |
 | `execute` | Run a shell command (60s timeout). A small regex blocklist refuses obviously dangerous patterns. |
-| `fetch_url` | HTTP GET a URL and return status + body. |
+| `fetch_url` | HTTP GET a URL. Always saves the raw body to a session attachment; by default also returns markdown of the article body inline. `format="void"` skips the inline conversion for triage / batch fetches. |
 | `list_plugins` | List the plugins currently loaded. Self-improvement helper. |
 
-Memory tools (`read_ledger` / `write_ledger`) come from the bundled
-`memory-markdown` plugin, not core. See "Plugins" below.
+HTML tools (`html_to_md` / `html_select`) come from the bundled
+`html-tools` plugin and operate on saved attachments (or any local
+HTML file). Memory tools (`read_ledger` / `write_ledger`) come from
+the bundled `memory-markdown` plugin. Both ship default-enabled. See
+"Plugins" below.
 
 File tools resolve paths and refuse anything outside the workspace unless the
 human approves at a prompt. See `pyagent/permissions.py`. The user's pyagent

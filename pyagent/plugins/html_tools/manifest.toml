@@ -1,0 +1,17 @@
+name = "html-tools"
+version = "0.1.0"
+description = "Interrogate saved HTML attachments — convert to markdown, select by CSS."
+api_version = "1"
+
+# These tools operate on saved attachments produced by fetch_url (or any
+# local HTML file the agent has access to). fetch_url itself also calls
+# into this plugin's extraction module as a convenience for its default
+# format="md" path; if the plugin is disabled, fetch_url falls back to
+# raw-attachment-only and the agent loses the markdown convenience but
+# can still grep / read_file the saved HTML.
+[provides]
+tools = ["html_to_md", "html_select"]
+
+# Stateless and read-only — safe to load in subagents.
+[load]
+in_subagents = true
