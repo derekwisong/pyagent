@@ -56,6 +56,7 @@ DEFAULTS: dict[str, Any] = {
         "memory-vector",
         "html-tools",
         "code-mapper",
+        "web-search",
     ],
     "subagents": {
         "max_depth": 3,
