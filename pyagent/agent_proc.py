@@ -88,6 +88,18 @@ class _ChildState:
     # Tag every outbound event with our own agent_id when forwarding
     # subagent events upstream. None = root (no annotation needed).
     self_agent_id: str | None = None
+    # ask_parent / reply_to_subagent (issue #47):
+    #   - As subagent: each outstanding `ask_parent` call registers
+    #     a Queue here keyed by request_id. The IO thread routes the
+    #     parent's `parent_answer` event to the matching queue.
+    #   - As parent: each inbound `subagent_ask` from a direct child
+    #     records request_id -> sid here so `reply_to_subagent` knows
+    #     which child to send the answer to.
+    # Two distinct uses of "request_id keyed", lifetimes don't
+    # collide because asks-out and asks-in are separate populations.
+    _pending_ask_replies: dict[str, queue.Queue] = field(default_factory=dict)
+    _inbound_ask_sid: dict[str, str] = field(default_factory=dict)
+    _ask_lock: threading.Lock = field(default_factory=threading.Lock)
 
     def send(self, event_type: str, **payload: Any) -> None:
         """Send a typed event upstream (CLI for root, parent agent for sub).
@@ -258,6 +270,20 @@ class _ChildState:
                     pass
         elif kind == "permission_response":
             self.permission_replies.put(event)
+        elif kind == "parent_answer":
+            # Reply to a prior `ask_parent` from this subagent. Route
+            # to the matching request_id queue so the blocked tool
+            # call can return. Issue #47.
+            req_id = event.get("request_id", "")
+            with self._ask_lock:
+                rq = self._pending_ask_replies.pop(req_id, None)
+            if rq is not None:
+                rq.put(event.get("answer", "") or "")
+            else:
+                logger.warning(
+                    "parent_answer for unknown request_id %r; dropping",
+                    req_id,
+                )
         elif kind == "set_model":
             self._handle_set_model(event.get("model", ""))
         elif kind == "shutdown":
@@ -364,6 +390,47 @@ class _ChildState:
             if kind != "turn_complete":
                 self._forward_upstream(event, sid)
             return
+        if kind == "subagent_ask":
+            # A direct child is asking THIS agent a question
+            # mid-turn. Consume locally — record the request_id ->
+            # sid mapping so `reply_to_subagent` can find the
+            # waiting child, and inject the formatted question into
+            # the parent's `pending_async_replies` so it shows up
+            # as a user-role message at the start of the next turn.
+            # Issue #47.
+            #
+            # If `inner_id` is set, the event bubbled up from a
+            # grandchild via direct child `sid` — that's a bug,
+            # since `ask_parent` always targets the IMMEDIATE
+            # parent. Drop with a warning instead of forwarding
+            # to avoid leaking "wrong addressee" routing.
+            if inner_id is not None:
+                logger.warning(
+                    "subagent_ask bubbled past its direct parent "
+                    "(inner_id=%r via sid=%r); dropping",
+                    inner_id, sid,
+                )
+                # Surface to the CLI so the human can see something
+                # went sideways without a silent drop.
+                self._forward_upstream(event, sid)
+                return
+            req_id = event.get("request_id", "")
+            question = event.get("question", "") or ""
+            with self._ask_lock:
+                self._inbound_ask_sid[req_id] = sid
+            if self.agent is not None:
+                entry = self.agent._subagents.get(sid)
+                name = entry.name if entry else sid
+                formatted = (
+                    f"[subagent {name} ({sid}) asks (req={req_id})]: "
+                    f"{question}"
+                )
+                self.agent.pending_async_replies.put(formatted)
+            # Surface upstream so the CLI can render the cross-agent
+            # conversation in the transcript. _forward_upstream stamps
+            # `agent_id=sid` so the CLI knows which subagent originated.
+            self._forward_upstream(event, sid)
+            return
         # Everything else (assistant_text, tool_*, info, permission_request).
         # Learn the route if this event came from a deeper descendant,
         # then forward upstream so the CLI can render it.
@@ -457,6 +524,15 @@ def _register_tools(
         _add("add_task", make_add_task(checklist), auto_offload=False)
         _add("update_task", make_update_task(checklist), auto_offload=False)
         _add("list_tasks", make_list_tasks(checklist), auto_offload=False)
+    # ask_parent (issue #47): only meaningful for subagents — the
+    # root has no parent above. Gate on `state.self_agent_id` being
+    # set (which `_bootstrap` does for any `is_subagent=True` config).
+    if state is not None and state.self_agent_id is not None:
+        _add(
+            "ask_parent",
+            subagent_mod.make_ask_parent(state, agent),
+            auto_offload=False,
+        )
     if allow_meta:
         assert state is not None and parent_session is not None and base_config is not None
         _add(
@@ -480,6 +556,15 @@ def _register_tools(
         _add(
             "terminate_subagent",
             subagent_mod.make_terminate_subagent(state, agent),
+        )
+        # reply_to_subagent (issue #47): the counterpart to
+        # ask_parent. Only meaningful when this agent has children
+        # to reply to, hence gated on allow_meta alongside the
+        # spawn family.
+        _add(
+            "reply_to_subagent",
+            subagent_mod.make_reply_to_subagent(state, agent),
+            auto_offload=False,
         )
 
 

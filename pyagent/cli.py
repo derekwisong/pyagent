@@ -546,6 +546,19 @@ def _print_event(event: dict) -> None:
     elif kind == "ready":
         label = _agent_label(agent_id)
         console.print(f"{label}[dim]ready[/dim]")
+    elif kind == "subagent_ask":
+        # A subagent is asking its parent a question mid-turn.
+        # Yellow so the user spots cross-agent conversation in
+        # the same scan they use for permission prompts. The
+        # parent will see the same text as a synthesized user
+        # message at the start of its next turn (issue #47).
+        label = _agent_label(agent_id)
+        req_id = event.get("request_id", "")
+        question = event.get("question", "") or ""
+        console.print(
+            f"{label}[yellow]asks parent (req={req_id}):[/yellow] "
+            f"[dim]{question}[/dim]"
+        )
     elif kind == "agent_error":
         if agent_id is not None:
             console.print(

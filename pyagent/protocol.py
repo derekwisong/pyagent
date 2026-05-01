@@ -33,6 +33,14 @@ CLI → agent
         target agent to cache the path in `permissions.pre_approve`
         so the same path is not re-prompted. If `agent_id` is set,
         the parent agent forwards the response down to that subagent.
+  - parent_answer {request_id: str, answer: str, agent_id: str}
+        Sent FROM a parent agent DOWN to a direct-child subagent in
+        reply to that subagent's `subagent_ask`. Issued by the
+        parent's `reply_to_subagent` tool. The subagent's IO thread
+        routes it to the matching `request_id` queue, unblocking
+        its `ask_parent` tool call. Only ever travels one hop down
+        (parent → direct child); never bubbled past its recipient.
+        `agent_id` is the targeted subagent (set by the parent).
   - shutdown {}
         Clean exit. Child terminates any subagents it owns, closes its
         connection, and returns.
@@ -68,6 +76,18 @@ agent → CLI
         `{id, title, status, note}` dicts in insertion order. The
         CLI uses it to render a progress segment in the status footer
         and to print full state on `/tasks`.
+  - subagent_ask {request_id: str, question: str}
+        A subagent is asking its IMMEDIATE parent a question
+        mid-turn. Issued by the subagent's `ask_parent` tool. The
+        parent's IO thread consumes it (does NOT forward upstream
+        — asks are addressed to the direct parent), formats it as
+        `[subagent <name> (<sid>) asks (req=<rid>)]: <question>`,
+        and pushes onto the parent's `pending_async_replies` so
+        the parent sees it on its next LLM turn. The parent
+        responds via `reply_to_subagent(request_id, answer)`.
+        Surfaced in the CLI transcript as a yellow info line
+        `[subagent X asks]: ...` so the human can follow the
+        cross-agent conversation in real time.
   - turn_complete {final_text: str}
         The child finished a `user_prompt` (no errors). `final_text`
         is the aggregated assistant text returned by `agent.run` and

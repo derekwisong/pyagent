@@ -114,6 +114,34 @@ list is also a status indicator, not just an internal note.
 - **Titles are short imperative phrases.** "write migration",
   "run tests", "update README" — they appear in a one-line footer.
 
+## Asking the parent mid-task (subagents only)
+
+Subagents have an `ask_parent` tool that pauses the subagent's
+work and sends a question up to the parent agent. The parent
+sees the question as a user-role message at the start of its
+next turn and answers via `reply_to_subagent(request_id, answer)`.
+
+- **Use sparingly.** Each ask costs the parent a turn cycle
+  and blocks your work. Don't ask for things you can answer
+  yourself by reading the prompt or running a quick tool call.
+- **Be concrete and self-contained.** The parent has its own
+  context but doesn't have yours. Include any specifics it
+  needs to answer without a follow-up round-trip.
+- **One ask at a time.** A second `ask_parent` while the first
+  is pending is refused. Wait for the answer.
+- **Good fits:** missing dependency the parent should install,
+  ambiguous spec where you need a tie-breaker, permission
+  question outside your role's scope.
+- **Bad fits:** "what should I do next?" (too vague), "is this
+  right?" (you should be able to verify), anything answerable
+  by reading the system prompt.
+
+For parent agents replying: extract `request_id` from the
+`[subagent X asks (req=...)]` bracket of the inbound message
+and call `reply_to_subagent(request_id, answer)` exactly once.
+Replying twice to the same request fails — the entry is removed
+on first reply.
+
 ## Errors
 
 Predictable failures come back as data, not exceptions: a marker

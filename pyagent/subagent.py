@@ -427,6 +427,157 @@ def make_wait_for_subagents(
     return wait_for_subagents
 
 
+def make_ask_parent(
+    state: "_ChildState",
+    agent: "Agent",
+) -> Callable[..., str]:
+    """Build the `ask_parent` tool — only registered on subagents.
+
+    Sends a question up to the immediate parent agent and blocks
+    the subagent's tool call until the parent's `reply_to_subagent`
+    answer arrives, or until the 5-minute timeout fires. Issue #47.
+
+    The mechanics:
+      - generate a request_id
+      - create a Queue and register it under that id
+      - emit `subagent_ask` upstream
+      - block on Queue.get(timeout=300)
+      - on timeout, return a `<no answer ...>` marker so the
+        subagent can decide what to do (retry, give up, fail loudly)
+    """
+    _ASK_TIMEOUT_S = 300
+
+    def ask_parent(question: str) -> str:
+        """Ask the immediate parent agent for guidance, mid-task.
+
+        Use this when you (a subagent) hit something you can't
+        decide on your own and the parent has the context: an
+        ambiguous spec, a missing dependency, a permission
+        question, a tie-breaking judgment call. The parent sees
+        your question as a user-role message at the start of its
+        next turn and answers via `reply_to_subagent`.
+
+        This is **synchronous** — your tool call blocks until the
+        parent replies (or 5 minutes pass). If the parent is in
+        the middle of its own turn, you wait for that turn to
+        finish before it sees your question.
+
+        Use sparingly. Each ask costs the parent a turn cycle and
+        blocks your work. Don't ask for things you can answer
+        yourself by reading the prompt or running a quick tool
+        call.
+
+        Args:
+            question: Plain text. Be concrete and self-contained;
+                the parent has its own context but doesn't have
+                yours. Include any specifics it needs to answer
+                without a follow-up round-trip.
+
+        Returns:
+            The parent's reply string, or `<no answer from parent
+            within 300s>` on timeout.
+        """
+        question = (question or "").strip()
+        if not question:
+            return "<refused: empty question>"
+
+        req_id = f"req-{uuid.uuid4().hex[:8]}"
+        rq: queue.Queue = queue.Queue(maxsize=1)
+        with state._ask_lock:
+            # Refuse stacked asks — keep the model's reasoning
+            # straightforward (one question at a time per subagent).
+            if state._pending_ask_replies:
+                return (
+                    "<refused: another ask_parent is already in "
+                    "flight; await its answer first>"
+                )
+            state._pending_ask_replies[req_id] = rq
+
+        try:
+            state.send(
+                "subagent_ask", request_id=req_id, question=question
+            )
+        except Exception as e:
+            with state._ask_lock:
+                state._pending_ask_replies.pop(req_id, None)
+            return f"<send failed: {type(e).__name__}: {e}>"
+
+        try:
+            answer = rq.get(timeout=_ASK_TIMEOUT_S)
+        except queue.Empty:
+            with state._ask_lock:
+                state._pending_ask_replies.pop(req_id, None)
+            return f"<no answer from parent within {_ASK_TIMEOUT_S}s>"
+
+        return answer if answer else "<parent replied with empty answer>"
+
+    return ask_parent
+
+
+def make_reply_to_subagent(
+    state: "_ChildState",
+    agent: "Agent",
+) -> Callable[..., str]:
+    """Build the `reply_to_subagent` tool — registered on agents
+    that can spawn subagents (`allow_meta=True`).
+
+    Looks up the recorded sid for `request_id`, sends a
+    `parent_answer` event down the right pipe, and removes the
+    pending entry from the registry. Issue #47.
+    """
+
+    def reply_to_subagent(request_id: str, answer: str) -> str:
+        """Answer a subagent's `ask_parent` question.
+
+        When a subagent calls `ask_parent(question)` mid-task, you
+        see a user-role message of the form
+        `[subagent <name> (<sid>) asks (req=<request_id>)]: <question>`
+        at the start of your next turn. Extract the `request_id`
+        from that message and pass it here along with your answer
+        text. Your answer unblocks the subagent's tool call.
+
+        Args:
+            request_id: The `req-XXXXXXXX` id from the bracket of
+                the inbound ask message.
+            answer: Your reply to the subagent. Plain text. Be
+                concrete — the subagent will likely act on it
+                immediately.
+
+        Returns:
+            A short status string. Errors come back as `<...>`
+            markers (unknown request_id, target subagent already
+            terminated, etc.).
+        """
+        request_id = (request_id or "").strip()
+        if not request_id:
+            return "<refused: empty request_id>"
+        with state._ask_lock:
+            sid = state._inbound_ask_sid.pop(request_id, None)
+        if sid is None:
+            return (
+                f"<unknown request_id {request_id!r}; either already "
+                f"answered or never received>"
+            )
+        entry: SubagentEntry | None = agent._subagents.get(sid)
+        if entry is None or not entry.process.is_alive():
+            return (
+                f"<subagent {sid} for request {request_id!r} is "
+                f"no longer running>"
+            )
+        try:
+            protocol.send(
+                entry.conn,
+                "parent_answer",
+                request_id=request_id,
+                answer=answer or "",
+            )
+        except (BrokenPipeError, OSError) as e:
+            return f"<send failed to subagent {sid}: {e}>"
+        return f"replied to {sid} (req={request_id})"
+
+    return reply_to_subagent
+
+
 def make_terminate_subagent(
     state: "_ChildState",
     agent: "Agent",
