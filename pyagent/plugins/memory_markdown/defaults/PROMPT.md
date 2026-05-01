@@ -44,14 +44,23 @@ they'll keep you from scattering stray copies across the filesystem.
   pointer line — a body without an index entry is invisible. Pick
   filenames that read like the topic (`stack_choices.md`,
   `client_naming_convention.md`); the hook beside the link is what
-  future-you reads when deciding whether to fetch.
-  Save *truly* memorable, *truly* important things — recurring
-  projects they care about, hard-won decisions that shouldn't be
-  re-litigated, tools and conventions they reach for, facts about
-  their world a future-you would need to be useful. Not every
-  preference (those go to USER); not every passing remark. When you
-  prune, remove the file *and* its index line — never blend memories,
-  never frankenstein two together. You may also save on request.
+  future-you reads when deciding whether to fetch. When you prune,
+  remove the file *and* its index line — never blend memories,
+  never frankenstein two together.
+- **Save more readily than the old bar suggested.** A memory now
+  costs one short index line and a file on disk; the body never
+  enters context unless asked. The old "*truly* memorable" framing
+  was a hedge against context bloat that no longer applies. The
+  test now: *would future-me, scanning the catalog or running a
+  vector query, want to find this?* If yes — file it. Things now
+  worth saving that the old bar rejected: non-obvious gotchas,
+  decisions that took real thought, quirks of a system not in the
+  README, references to docs/dashboards/channels, tools or
+  libraries reached for once that future-you might reach for
+  again. Preferences and conventions still go to USER, not MEMORY.
+  A looser save bar means a tighter prune rhythm — fix stale
+  memories in the moment, sweep the catalog occasionally. You may
+  also save on request.
 - **Discretion is part of the deposit.** The USER ledger holds what
   makes them easier to help — preferences, conventions, how they
   think. Casual mentions of sensitive matters (health, money, other
