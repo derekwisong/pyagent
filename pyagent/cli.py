@@ -422,6 +422,25 @@ def _handle_model_command(
     return resolved
 
 
+def _prompt_message() -> ANSI:
+    """Build the multi-line prompt message: a thin horizontal divider
+    line above the `> ` input arrow.
+
+    Visually separates each turn so the input region is unmistakable
+    in tmux/terminal scrollback. Unlike a fixed-bottom TUI (which
+    would defeat tmux's `Ctrl-b PgUp`), this approach keeps the
+    append-only output model — the divider becomes a per-turn
+    bracket in scrolled history, marking where each prompt landed.
+
+    Recomputed at every prompt iteration so a terminal resize
+    between turns picks up the new width without restart.
+    """
+    width = shutil.get_terminal_size((80, 24)).columns
+    divider = "─" * max(8, width - 1)
+    # \x1b[2m = dim, \x1b[0m = reset
+    return ANSI(f"\x1b[2m{divider}\x1b[0m\n> ")
+
+
 _QUEUE_PREVIEW_MAX = 30
 
 
@@ -719,7 +738,7 @@ async def _repl_async(
         while True:
             try:
                 with patch_stdout(raw=True):
-                    line = await pt_session.prompt_async("> ")
+                    line = await pt_session.prompt_async(_prompt_message())
             except (EOFError, KeyboardInterrupt):
                 # Ctrl-D / Ctrl-C at the prompt — clean exit.
                 console.print()
