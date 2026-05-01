@@ -578,6 +578,18 @@ _DANGEROUS_PATTERNS: list[tuple[str, str]] = [
         "force push to main/master",
     ),
     (r"\bchmod\s+-R\s+[0-7]{3,4}\s+/(?:\s|$)", "recursive chmod on /"),
+    (
+        r"\bpip\d?\s+install\b[^|;&]*\s--break-system-packages\b",
+        "pip install bypassing PEP 668 (--break-system-packages)",
+    ),
+    (
+        r"\bpip\d?\s+install\b[^|;&]*\s--user\b",
+        "pip install --user (writes to ~/.local; use a project venv)",
+    ),
+    (
+        r"\bsudo\b[^|;&]*\bpip\d?\s+install\b",
+        "pip install under sudo (escalates to a shared interpreter)",
+    ),
 ]
 
 

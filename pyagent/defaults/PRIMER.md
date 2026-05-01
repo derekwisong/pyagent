@@ -21,6 +21,15 @@ rest is on you.
 - Read-only inspection (`ls`, `git status`, `cat` inside workspace)
   is fine without asking.
 
+## Python environments
+
+- **`pip install` belongs in a project-local venv** — not the system
+  interpreter, pyenv interpreters, or `--user`. `--break-system-packages`
+  is not an answer.
+- Use `$VIRTUAL_ENV` if set, else `.venv/` or `venv/` in the workspace;
+  create `.venv/` if needed.
+- One-shot CLI tools (formatters, linters): `pipx` or `uv tool run`.
+
 ## Don't invent
 
 - File paths, function names, flags, API shapes — verify first with
