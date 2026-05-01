@@ -44,6 +44,60 @@ def _validate_memory_filename(file: str) -> str | None:
     return None
 
 
+def _insert_index_bullet(
+    index_text: str, category: str, bullet: str
+) -> str:
+    """Insert `bullet` under `## <category>` in `index_text`.
+
+    Match category case-insensitively against existing H2 headings.
+    If the heading is absent, append a new `## <category>` section
+    at the end of the file. Strips the `(no memories yet)` seed
+    placeholder if present. Returns the new full text.
+    """
+    lines = [
+        ln for ln in index_text.splitlines()
+        if ln.strip() != "(no memories yet)"
+    ]
+
+    target_idx = None
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith("## "):
+            heading = stripped[3:].strip()
+            if heading.lower() == category.lower():
+                target_idx = i
+                break
+
+    if target_idx is not None:
+        # Find end of this section: next H2, or EOF.
+        insert_at = len(lines)
+        for j in range(target_idx + 1, len(lines)):
+            if lines[j].lstrip().startswith("## "):
+                insert_at = j
+                break
+        # Step back past trailing blanks so bullets cluster directly
+        # under the heading.
+        while (
+            insert_at > target_idx + 1
+            and lines[insert_at - 1].strip() == ""
+        ):
+            insert_at -= 1
+        lines.insert(insert_at, bullet)
+    else:
+        # New category goes at the end.
+        while lines and lines[-1].strip() == "":
+            lines.pop()
+        if lines:
+            lines.append("")
+        lines.append(f"## {category}")
+        lines.append(bullet)
+
+    text = "\n".join(lines)
+    if not text.endswith("\n"):
+        text += "\n"
+    return text
+
+
 def register(api):
     """Plugin entrypoint."""
 
@@ -145,8 +199,90 @@ def register(api):
         target.write_text(content)
         return f"Wrote {len(content)} bytes to {target}"
 
+    def add_memory(
+        category: str,
+        title: str,
+        filename: str,
+        hook: str,
+        content: str,
+    ) -> str:
+        """Add a new memory in one call — body file plus index entry.
+
+        Writes `memories/<filename>` with `content`, then surgically
+        inserts a bullet line under `## <category>` in MEMORY.md
+        (creating the heading if absent, case-insensitive match for
+        existing). Saves the round-trip cost of re-emitting the
+        full index every time you save a memory.
+
+        Use this for *new* memories. To update an existing body in
+        place, use `write_ledger("MEMORY", content, file=...)`. To
+        prune, edit MEMORY.md and delete the body file directly.
+
+        Args:
+            category: H2 section to file under (e.g. "Database",
+                "Style", "Gotchas"). Matched case-insensitively
+                against existing headings; new heading created at
+                the end of the index if no match.
+            title: Short topical name used as the link text.
+            filename: Bare filename under `memories/`, must end
+                in `.md`. Cannot collide with an existing file.
+            hook: One-line description shown after the title in
+                the index — what future-you reads to decide
+                whether to fetch. May be empty if the title alone
+                is enough.
+            content: Full body markdown for the new memory file.
+
+        Returns:
+            A confirmation string with both written paths, or an
+            error in `<...>` form.
+        """
+        if not category or not category.strip():
+            return "<category is empty>"
+        if not title or not title.strip():
+            return "<title is empty>"
+        err = _validate_memory_filename(filename)
+        if err:
+            return err
+        body_path = _memory_file_path(filename)
+        _seed_if_missing("MEMORY")
+        index_path = _ledger_path("MEMORY")
+        index_text = (
+            index_path.read_text() if index_path.exists() else ""
+        )
+        # Same disambiguation guidance whether the collision is on
+        # disk, in the index, or both: pick a different filename, or
+        # inspect the existing memory before deciding what to do.
+        if body_path.exists() or f"]({filename})" in index_text:
+            return (
+                f"<filename collision: memories/{filename} is "
+                "already taken; pick a more specific filename, "
+                f'or call read_ledger("MEMORY", file="{filename}") '
+                "to inspect what is already there>"
+            )
+
+        # Write the body first — if the index update fails, the
+        # body is at least findable via recall_memory and the agent
+        # can re-link.
+        body_path.parent.mkdir(parents=True, exist_ok=True)
+        body_path.write_text(content)
+
+        bullet = (
+            f"- [{title.strip()}]({filename})"
+            + (f" — {hook.strip()}" if hook and hook.strip() else "")
+        )
+        new_index = _insert_index_bullet(
+            index_text, category.strip(), bullet
+        )
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index_path.write_text(new_index)
+        return (
+            f"Wrote {len(content)} bytes to {body_path}; "
+            f"added index entry under '## {category.strip()}'."
+        )
+
     api.register_tool("read_ledger", read_ledger)
     api.register_tool("write_ledger", write_ledger)
+    api.register_tool("add_memory", add_memory)
 
     # ---- Prompt sections --------------------------------------------
     #

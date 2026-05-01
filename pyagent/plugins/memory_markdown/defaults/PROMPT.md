@@ -39,14 +39,17 @@ they'll keep you from scattering stray copies across the filesystem.
   MEMORY.md is an *index*: grouped headings of one-line pointers to
   bodies that live under `memories/`. The index is in your prompt;
   the bodies are not. To read a body: `read_ledger("MEMORY",
-  file="filename.md")`. To save one: `write_ledger("MEMORY",
-  content, file="filename.md")`, *then* update MEMORY.md to add the
-  pointer line — a body without an index entry is invisible. Pick
-  filenames that read like the topic (`stack_choices.md`,
-  `client_naming_convention.md`); the hook beside the link is what
-  future-you reads when deciding whether to fetch. When you prune,
-  remove the file *and* its index line — never blend memories,
-  never frankenstein two together.
+  file="filename.md")`. To save a new memory:
+  `add_memory(category, title, filename, hook, content)` — writes
+  the body and inserts the index line in one call so you don't
+  have to re-emit the whole index. (Use `write_ledger("MEMORY",
+  content, file=...)` for in-place updates to an existing body;
+  reach for direct MEMORY.md edits only when add_memory doesn't
+  fit.) Pick filenames that read like the topic
+  (`stack_choices.md`, `client_naming_convention.md`); the hook is
+  what future-you reads when deciding whether to fetch. When you
+  prune, remove the file *and* its index line — never blend
+  memories, never frankenstein two together.
 - **Save more readily than the old bar suggested.** A memory now
   costs one short index line and a file on disk; the body never
   enters context unless asked. The old "*truly* memorable" framing
