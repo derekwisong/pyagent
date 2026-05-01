@@ -95,14 +95,14 @@ def _print_tier_paths() -> None:
 def reset_cmd(name: str, assume_yes: bool) -> None:
     """Wipe a plugin's user data dir.
 
-    Removes <config-dir>/plugins/<name>/ entirely. The plugin's
+    Removes <data-dir>/plugins/<name>/ entirely. The plugin's
     on_session_start re-seeds defaults next time pyagent runs.
 
     Common case: `pyagent-plugins reset memory-markdown` to wipe
     USER and MEMORY ledgers (replaces the old --reset-user /
     --reset-memory CLI flags).
     """
-    target = paths.config_dir() / "plugins" / name
+    target = paths.data_dir() / "plugins" / name
     if not target.exists():
         click.echo(
             f"no plugin data at {target} — nothing to reset.",
