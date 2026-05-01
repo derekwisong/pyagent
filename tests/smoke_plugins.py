@@ -790,6 +790,148 @@ def test_memory_vector_recall() -> None:
         restore()
 
 
+def test_add_memory_tool() -> None:
+    """add_memory writes body + inserts the index line in one call.
+    Covers: new category creation, case-insensitive append to
+    existing, "(no memories yet)" placeholder strip, filename
+    collision rejection, empty hook, round trip with read_ledger."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        (cfg / "config.toml").write_text(
+            'built_in_plugins_enabled = ["memory-markdown"]\n'
+        )
+        loaded = plugins_mod.load(is_subagent=False)
+        _, add_memory = loaded.tools()["add_memory"]
+        _, read_ledger = loaded.tools()["read_ledger"]
+
+        # First add — creates the category, strips "(no memories yet)".
+        result = add_memory(
+            category="Database",
+            title="Postgres deadlock from FK locking",
+            filename="pg_deadlock.md",
+            hook="FK + concurrent update → SHARE-lock deadlock; retry with backoff",
+            content="# Postgres deadlock\n\nDeterministic update order or retry-with-backoff.\n",
+        )
+        assert "Wrote" in result and "Database" in result, result
+
+        index = read_ledger(name="MEMORY")
+        assert "## Database" in index, index
+        assert "(no memories yet)" not in index, index
+        assert "[Postgres deadlock from FK locking](pg_deadlock.md)" in index
+        assert "SHARE-lock deadlock" in index
+
+        body = read_ledger(name="MEMORY", file="pg_deadlock.md")
+        assert "retry-with-backoff" in body, body
+
+        # Second add — case-insensitive match to existing category;
+        # bullet appends under the same heading.
+        add_memory(
+            category="database",  # lowercase
+            title="Connection pool sizing",
+            filename="pool_sizing.md",
+            hook="rule of thumb: cpu_count * 2 + spindle_count",
+            content="# pool sizing\n\nrule of thumb...\n",
+        )
+        index2 = read_ledger(name="MEMORY")
+        # No duplicate "## Database" / "## database" headings.
+        db_headings = [
+            ln for ln in index2.splitlines()
+            if ln.lstrip().lower().startswith("## database")
+        ]
+        assert len(db_headings) == 1, db_headings
+        assert "pg_deadlock.md" in index2
+        assert "pool_sizing.md" in index2
+
+        # Filename collision: the on-disk body already exists.
+        err = add_memory(
+            category="Database",
+            title="duplicate try",
+            filename="pg_deadlock.md",
+            hook="should fail",
+            content="x",
+        )
+        assert err.startswith("<filename collision"), err
+        assert "pick a more specific filename" in err, err
+
+        # Empty hook is allowed; bullet just has no dash-and-text.
+        add_memory(
+            category="Style",
+            title="Naming",
+            filename="naming.md",
+            hook="",
+            content="# Naming\n\nsnake_case.\n",
+        )
+        index3 = read_ledger(name="MEMORY")
+        assert "[Naming](naming.md)" in index3, index3
+        # No "— " for empty hook.
+        for ln in index3.splitlines():
+            if "naming.md" in ln:
+                assert "—" not in ln, ln
+
+        # Filename validation flows through.
+        bad = add_memory(
+            category="X",
+            title="x",
+            filename="../escape.md",
+            hook="",
+            content="x",
+        )
+        assert bad.startswith("<"), bad
+
+        # Empty category rejected.
+        empty_cat = add_memory(
+            category="",
+            title="x",
+            filename="x.md",
+            hook="",
+            content="x",
+        )
+        assert empty_cat.startswith("<"), empty_cat
+
+        print("✓ add_memory: body + index in one call, no re-emit")
+    finally:
+        restore()
+
+
+def test_insert_index_bullet_unit() -> None:
+    """_insert_index_bullet covers the placement edge cases:
+    new section, existing section, multi-section, EOF append."""
+    from pyagent.plugins.memory_markdown import _insert_index_bullet
+
+    # Empty + placeholder → strip, append new section.
+    seed = "# Memory\n\n(no memories yet)\n"
+    out = _insert_index_bullet(seed, "Database", "- [a](a.md) — hook")
+    assert "(no memories yet)" not in out
+    assert "## Database\n- [a](a.md) — hook" in out
+
+    # Existing section, multiple sections, blank between → bullet
+    # joins the right cluster.
+    existing = (
+        "# Memory\n\n## Database\n- [foo](foo.md) — bar\n\n"
+        "## Style\n- [naming](naming.md)\n"
+    )
+    out = _insert_index_bullet(existing, "Database", "- [new](new.md)")
+    db_block = out.split("## Style")[0]
+    assert "- [new](new.md)" in db_block, out
+    assert "[naming](naming.md)" in out
+
+    # Case-insensitive heading match — no duplicate H2 inserted.
+    out2 = _insert_index_bullet(existing, "DATABASE", "- [up](up.md)")
+    assert "- [up](up.md)" in out2.split("## Style")[0]
+    assert out2.lower().count("## database") == 1, out2
+
+    # No matching heading → append at end.
+    out3 = _insert_index_bullet(existing, "Gotchas", "- [g](g.md)")
+    tail = out3.rstrip().splitlines()[-2:]
+    assert tail == ["## Gotchas", "- [g](g.md)"], tail
+
+    # Empty input → just heading + bullet.
+    out4 = _insert_index_bullet("", "Cat", "- [a](a.md)")
+    assert out4.startswith("## Cat\n- [a](a.md)"), out4
+
+    print("✓ _insert_index_bullet: placement edge cases")
+
+
 def test_graceful_degradation_when_memory_disabled() -> None:
     """With built_in_plugins_enabled=[], the agent has no ledger
     tools and no ledger prose, but its declared_tool_provenance
@@ -842,6 +984,8 @@ def main() -> None:
     test_bundled_memory_markdown_loads()
     test_memory_per_file_round_trip()
     test_memory_vector_recall()
+    test_add_memory_tool()
+    test_insert_index_bullet_unit()
     test_graceful_degradation_when_memory_disabled()
     print("\nALL CHECKS PASSED")
 
