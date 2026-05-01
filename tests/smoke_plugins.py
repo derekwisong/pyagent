@@ -780,12 +780,34 @@ def test_memory_vector_recall() -> None:
         empty = recall(query="")
         assert empty.startswith("<"), empty
 
+        # min_score: a very high threshold filters out everything
+        # and returns a helpful empty message that names the filter.
+        out_high = recall(query="what database do we use", min_score=0.99)
+        assert out_high.startswith("<no matches"), out_high
+        assert "min_score" in out_high, out_high
+
+        # category filter scopes results to one H2 section.
+        # Stack section contains stack.md; Style section contains naming.md.
+        cat_stack = recall(query="storage", category="Stack", k=5)
+        assert "stack.md" in cat_stack, cat_stack
+        assert "naming.md" not in cat_stack, cat_stack
+        # Header reflects the active filter.
+        assert "category='Stack'" in cat_stack, cat_stack
+
+        # category match is case-insensitive.
+        cat_lower = recall(query="storage", category="stack")
+        assert "stack.md" in cat_lower, cat_lower
+
+        # Unknown category returns the empty-with-hint message.
+        cat_none = recall(query="storage", category="DoesNotExist")
+        assert cat_none.startswith("<no matches"), cat_none
+
         # Subagent mode skips it.
         sub_loaded = plugins_mod.load(is_subagent=True)
         sub_names = [s.manifest.name for s in sub_loaded.states]
         assert "memory-vector" not in sub_names
 
-        print("✓ memory-vector recall: semantic ranking works end-to-end")
+        print("✓ memory-vector recall: ranking + min_score + category filters")
     finally:
         restore()
 
