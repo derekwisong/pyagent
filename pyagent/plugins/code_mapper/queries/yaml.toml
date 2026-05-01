@@ -1,0 +1,15 @@
+# code-mapper language config — YAML.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "yaml"
+description = "YAML documents — mapping keys captured as fields."
+extensions = [".yaml", ".yml"]
+
+# Same logic as json.toml: only the pair (block_mapping_pair) is the
+# parent anchor — block_mapping itself has no name to look up.
+definition_node_types = ["block_mapping_pair"]
+
+[captures]
+"definition.field" = "field"
