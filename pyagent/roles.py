@@ -442,8 +442,8 @@ def catalog() -> str:
         "`spawn_subagent` (alongside raw provider/model strings). Role "
         "definitions live as markdown files under "
         "`pyagent/roles/`, `<config-dir>/roles/`, or `.pyagent/roles/`, "
-        "and pin the model, default persona, and tool restrictions for "
-        "that role.",
+        "and pin the model and default persona (with an optional tool "
+        "allowlist) for that role.",
         "",
     ]
     for role in sorted(roles.values(), key=lambda r: r.name):
