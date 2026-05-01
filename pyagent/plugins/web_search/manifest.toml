@@ -1,0 +1,15 @@
+name = "web-search"
+version = "0.1.0"
+description = "DuckDuckGo-backed web search — list results and instant answers."
+api_version = "1"
+
+# Two tools:
+#   web_search          — list-style search; returns markdown results
+#                         (auto-offloaded by the agent when large).
+#   web_search_instant  — DDG instant-answer API; short string reply.
+[provides]
+tools = ["web_search", "web_search_instant"]
+
+# Stateless and read-only — safe to load in subagents.
+[load]
+in_subagents = true

@@ -10,6 +10,8 @@ dependencies = [
     "anthropic>=0.40",
     "beautifulsoup4>=4.12",
     "click>=8.1",
+    # DuckDuckGo HTML scraper used by the bundled `web-search` plugin.
+    "ddgs>=9",
     "docstring_parser>=0.16",
     # Powers the bundled memory-vector plugin's recall_memory tool.
     # Pulls in onnxruntime + tokenizers (~150MB on disk) plus a
