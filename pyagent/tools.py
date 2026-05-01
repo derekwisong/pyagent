@@ -35,10 +35,18 @@ _BG_BUF_DROP = 256 * 1024
 class _BackgroundProc:
     """Live state for one `run_background` shell subprocess.
 
-    The reader threads pump bytes into stdout_buf / stderr_buf under
-    `lock`; tools that read or wait take the same lock when peeking.
-    `dropped_*` tracks bytes evicted by the rolling cap so a subsequent
+    Both reader threads pump bytes into a single combined `output_buf`
+    under `lock`; tools that read or wait take the same lock when
+    peeking. A `[stderr]\\n` / `[stdout]\\n` marker is inserted on
+    stream transitions so the agent can tell sources apart even
+    though exact temporal interleaving across streams isn't preserved.
+    `dropped` counts bytes evicted by the rolling cap so a subsequent
     `read_output` can prepend `...truncated NN bytes...`.
+
+    Single-buffer design (vs. one buffer per stream): `since` is then
+    a single absolute byte offset into a single sequence. With
+    separate buffers, the same `since` applied to two independent
+    cursors silently dropped data on the slower stream.
     """
 
     handle: str
@@ -47,10 +55,9 @@ class _BackgroundProc:
     proc: subprocess.Popen
     start_time: float
     lock: threading.Lock = field(default_factory=threading.Lock)
-    stdout_buf: bytearray = field(default_factory=bytearray)
-    stderr_buf: bytearray = field(default_factory=bytearray)
-    dropped_stdout: int = 0
-    dropped_stderr: int = 0
+    output_buf: bytearray = field(default_factory=bytearray)
+    dropped: int = 0
+    last_source: str = ""  # "stdout" | "stderr" | "" (initial)
     last_write: float = 0.0
     threads: list[threading.Thread] = field(default_factory=list)
 
@@ -673,7 +680,7 @@ def _bg_handle() -> str:
 
 
 def _bg_reader(bg: _BackgroundProc, stream, which: str) -> None:
-    """Pump bytes from `stream` into the per-handle buffer.
+    """Pump bytes from `stream` into the combined output buffer.
 
     Holds the lock only across the buffer mutation so concurrent
     `read_output` / `wait_for` can keep observing while bytes flow.
@@ -681,6 +688,11 @@ def _bg_reader(bg: _BackgroundProc, stream, which: str) -> None:
     unbounded — agents rarely care about start-of-stream once the
     process has been running for a while, but they do need recent
     output to be intact.
+
+    On a stream transition (stdout→stderr or back), inserts a
+    `[stderr]\\n` / `[stdout]\\n` marker so the agent can still tell
+    sources apart in the combined log. Stdout-only processes (the
+    common case) emit no markers.
     """
     try:
         while True:
@@ -693,15 +705,24 @@ def _bg_reader(bg: _BackgroundProc, stream, which: str) -> None:
             if not chunk:
                 break
             with bg.lock:
-                buf = bg.stdout_buf if which == "stdout" else bg.stderr_buf
-                buf.extend(chunk)
-                if len(buf) > _BG_BUF_CAP:
-                    overflow = len(buf) - (_BG_BUF_CAP - _BG_BUF_DROP)
-                    del buf[:overflow]
-                    if which == "stdout":
-                        bg.dropped_stdout += overflow
-                    else:
-                        bg.dropped_stderr += overflow
+                # Insert a transition marker only when the source
+                # actually changes; the initial state (last_source="")
+                # treats stdout as the implicit default — no leading
+                # `[stdout]` marker on processes that never use stderr.
+                if which != bg.last_source and (
+                    bg.last_source != "" or which != "stdout"
+                ):
+                    if bg.output_buf and not bg.output_buf.endswith(b"\n"):
+                        bg.output_buf.append(0x0A)  # newline
+                    bg.output_buf.extend(f"[{which}]\n".encode())
+                bg.last_source = which
+                bg.output_buf.extend(chunk)
+                if len(bg.output_buf) > _BG_BUF_CAP:
+                    overflow = len(bg.output_buf) - (
+                        _BG_BUF_CAP - _BG_BUF_DROP
+                    )
+                    del bg.output_buf[:overflow]
+                    bg.dropped += overflow
                 bg.last_write = time.monotonic()
     except (ValueError, OSError):
         # Stream closed underneath us (proc died, fd reaped). The
@@ -830,15 +851,18 @@ def _decode_with_drop(buf: bytearray, since: int, dropped: int) -> tuple[str, in
 
 
 def read_output(handle: str, *, since: int = 0, max_chars: int = 4000) -> str:
-    """Read captured stdout+stderr from a background process.
+    """Read captured output from a background process.
 
     Returns whatever has been captured since byte offset `since`,
     capped at `max_chars`. Use the offset returned in the trailing
     `next_since:` line to tail-follow on subsequent calls without
-    re-reading bytes you've already seen. Stderr (when non-empty)
-    follows stdout under a `[stderr]` divider so the agent can tell
-    them apart — exact interleaving across streams is intentionally
-    not preserved.
+    re-reading bytes you've already seen.
+
+    stdout and stderr share one buffer; on a stream transition the
+    reader inserts a `[stderr]\\n` / `[stdout]\\n` marker so the agent
+    can tell sources apart. Exact temporal interleaving across
+    streams isn't preserved — but the byte-position cursor is
+    unambiguous.
 
     Args:
         handle: Handle returned by `run_background`.
@@ -870,44 +894,33 @@ def read_output(handle: str, *, since: int = 0, max_chars: int = 4000) -> str:
         return bg
 
     with bg.lock:
-        out_text, out_next = _decode_with_drop(
-            bg.stdout_buf, since, bg.dropped_stdout
-        )
-        err_text, err_next = _decode_with_drop(
-            bg.stderr_buf, since, bg.dropped_stderr
+        text, next_since = _decode_with_drop(
+            bg.output_buf, since, bg.dropped
         )
     rc = bg.proc.poll()
     status = "running" if rc is None else f"exited (rc={rc})"
 
-    body = out_text
-    if err_text.strip():
-        body = f"{out_text.rstrip()}\n[stderr]\n{err_text}"
-
     truncated_chars = 0
-    if len(body) > max_chars:
-        truncated_chars = len(body) - max_chars
-        body = body[:max_chars]
+    if len(text) > max_chars:
+        truncated_chars = len(text) - max_chars
+        text = text[:max_chars]
 
     header = f"{bg.handle} ({bg.name}) {status}"
-    footer_lines = [f"next_since: {max(out_next, err_next)}"]
+    footer_lines = [f"next_since: {next_since}"]
     if truncated_chars:
         footer_lines.append(
             f"...[{truncated_chars} more chars; raise max_chars "
             f"or call again with a higher since]"
         )
-    return f"{header}\n{body}\n" + "\n".join(footer_lines)
+    return f"{header}\n{text}\n" + "\n".join(footer_lines)
 
 
 def _combined_text(bg: _BackgroundProc) -> str:
-    """Snapshot the current combined output as text. Stderr is
-    appended after stdout — exact interleaving isn't preserved but
-    substring/regex matches against either land correctly."""
+    """Snapshot the current combined output as text. With the
+    single-buffer design, this is just the buffer decoded — stream
+    transitions are already marked inline by the reader threads."""
     with bg.lock:
-        out = bytes(bg.stdout_buf)
-        err = bytes(bg.stderr_buf)
-    return out.decode("utf-8", errors="replace") + err.decode(
-        "utf-8", errors="replace"
-    )
+        return bytes(bg.output_buf).decode("utf-8", errors="replace")
 
 
 def _tail(text: str, n: int = 400) -> str:

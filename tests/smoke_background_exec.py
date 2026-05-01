@@ -179,20 +179,77 @@ def _check_buffer_cap_truncation() -> None:
     res = agent_tools.wait_for(handle, until="exit", timeout_s=10.0)
     assert "rc=0" in res, res
     bg = agent_tools._ACTIVE_BG_PROCS[handle]
-    # The cap is 1MB; 1.5MB written should leave dropped_stdout > 0.
-    assert bg.dropped_stdout > 0, (
-        f"expected stdout drops, got dropped_stdout={bg.dropped_stdout}"
+    # The cap is 1MB; 1.5MB written should leave dropped > 0.
+    assert bg.dropped > 0, (
+        f"expected output drops, got dropped={bg.dropped}"
     )
     # And the buffer itself should be near (≤) the cap.
-    assert len(bg.stdout_buf) <= 1024 * 1024, (
-        f"buffer exceeded cap: {len(bg.stdout_buf)}"
+    assert len(bg.output_buf) <= 1024 * 1024, (
+        f"buffer exceeded cap: {len(bg.output_buf)}"
     )
     out = agent_tools.read_output(handle, since=0, max_chars=200)
     assert "...truncated" in out, out
+    # Post-truncation continuity: pulling next_since out of the first
+    # read and using it on the next call must not re-read the dropped
+    # prefix and must not silently skip any bytes available now. With
+    # an exited process the buffer is stable, so a second call with
+    # next_since should return an empty body and the same next_since.
+    next_since = int(re.search(r"next_since: (\d+)", out).group(1))
+    assert next_since > 0, out
+    second = agent_tools.read_output(
+        handle, since=next_since, max_chars=200
+    )
+    assert "...truncated" not in second, (
+        f"unexpected truncation notice on continuation: {second!r}"
+    )
+    second_next = int(re.search(r"next_since: (\d+)", second).group(1))
+    assert second_next == next_since, (
+        f"next_since regressed across post-truncation reads: "
+        f"first={next_since} second={second_next}"
+    )
     agent_tools.kill_process(handle)
     print(
-        f"  ok 1MB cap: dropped {bg.dropped_stdout} bytes, "
-        f"buf={len(bg.stdout_buf)}"
+        f"  ok 1MB cap: dropped {bg.dropped} bytes, "
+        f"buf={len(bg.output_buf)}, post-truncation continuity holds"
+    )
+
+
+def _check_dual_stream_read_output() -> None:
+    """A process that writes to BOTH stdout and stderr should not lose
+    bytes from either stream when the agent tail-follows via `since`.
+
+    Regression guard for the original two-buffer design where the same
+    `since` was applied independently to stdout_buf and stderr_buf —
+    if one stream had grown past the other's length, bytes on the
+    shorter stream were silently skipped on subsequent reads.
+    """
+    cmd = (
+        "echo OUT1; "
+        "echo ERR1 1>&2; "
+        "sleep 0.05; "
+        "echo OUT2; "
+        "echo ERR2 1>&2; "
+        "sleep 0.05; "
+        "echo OUT3; "
+        "echo ERR3 1>&2"
+    )
+    started = agent_tools.run_background(cmd)
+    handle = re.search(r"started (bg-[0-9a-f]+)", started).group(1)
+    agent_tools.wait_for(handle, until="exit", timeout_s=5.0)
+    full = agent_tools.read_output(handle, since=0, max_chars=4000)
+    # Every line landed in the combined log.
+    for marker in ("OUT1", "OUT2", "OUT3", "ERR1", "ERR2", "ERR3"):
+        assert marker in full, (
+            f"expected {marker} in combined output, got: {full!r}"
+        )
+    # `[stderr]` / `[stdout]` markers appear when the source switches —
+    # the exact count depends on read1 timing, but at least one of each
+    # must show up.
+    assert "[stderr]" in full, f"missing [stderr] marker: {full!r}"
+    agent_tools.kill_process(handle)
+    print(
+        "  ok dual-stream read_output: stdout+stderr both surfaced; "
+        "transition markers present"
     )
 
 
@@ -251,6 +308,7 @@ def main() -> None:
     _check_kill_active_flushes_both()
     _check_stale_handle_marker()
     _check_buffer_cap_truncation()
+    _check_dual_stream_read_output()
     _check_max_chars_truncation()
     _check_dangerous_pattern_refusal()
     _check_shutdown_background_grace()
