@@ -33,7 +33,7 @@ def register(api):
     plugin_dir = Path(__file__).parent
     seeds = plugin_dir / "defaults"
 
-    # Persistent ledger storage: <config-dir>/plugins/memory-markdown/.
+    # Persistent ledger storage: <data-dir>/plugins/memory-markdown/.
     # Lazy-created on first access.
     storage = api.user_data_dir
 

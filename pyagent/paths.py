@@ -8,10 +8,18 @@ Resolution priority for a given name (e.g. "SOUL.md"):
   3. <config_dir>/{name}, seeded from the package's bundled default
      on first run if `seed` was provided.
 
-The config dir is resolved via platformdirs:
-  Linux:   ~/.config/pyagent/
-  macOS:   ~/Library/Application Support/pyagent/
-  Windows: %APPDATA%\\pyagent\\
+Two XDG-flavored homes via platformdirs:
+  config_dir() — user-edited preferences (config.toml, persona files,
+                 roles, skills, plugin manifests).
+    Linux:   ~/.config/pyagent/
+    macOS:   ~/Library/Application Support/pyagent/
+    Windows: %APPDATA%\\pyagent\\
+  data_dir()   — agent-generated data (plugin ledgers, sessions,
+                 anything irreplaceable that the user doesn't
+                 hand-edit).
+    Linux:   ~/.local/share/pyagent/
+    macOS:   ~/Library/Application Support/pyagent/
+    Windows: %LOCALAPPDATA%\\pyagent\\
 """
 
 from __future__ import annotations
@@ -26,6 +34,10 @@ _PACKAGE_DEFAULTS = "pyagent.defaults"
 
 def config_dir() -> Path:
     return Path(platformdirs.user_config_dir("pyagent"))
+
+
+def data_dir() -> Path:
+    return Path(platformdirs.user_data_dir("pyagent"))
 
 
 def resolve(

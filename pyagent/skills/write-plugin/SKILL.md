@@ -114,7 +114,7 @@ config-dir resolution is allowed.
 ```python
 api.config_dir        # Path: <config-dir>
 api.workspace         # Path: cwd at agent startup
-api.user_data_dir     # Path: <config-dir>/plugins/<name>/  — lazy-created
+api.user_data_dir     # Path: <data-dir>/plugins/<name>/  — lazy-created
 api.plugin_config     # dict: this plugin's [plugins.<name>] table
 api.plugin_name       # str: this plugin's name
 ```
