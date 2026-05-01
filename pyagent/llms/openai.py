@@ -27,6 +27,7 @@ class OpenAIClient:
         api_key: str | None = None,
     ) -> None:
         self.model = model
+        self.provider_model = f"openai/{model}"
         self.max_tokens = max_tokens
         self._client = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY"))
 
@@ -100,6 +101,7 @@ class OpenAIClient:
                 "output": getattr(usage, "completion_tokens", 0) or 0,
                 "cache_creation": 0,
                 "cache_read": cache_read,
+                "model": self.provider_model,
             },
         }
 

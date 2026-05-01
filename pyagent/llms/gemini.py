@@ -39,6 +39,7 @@ class GeminiClient:
         api_key: str | None = None,
     ) -> None:
         self.model = model
+        self.provider_model = f"gemini/{model}"
         key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get(
             "GOOGLE_API_KEY"
         )
@@ -113,6 +114,7 @@ class GeminiClient:
                 "output": getattr(usage_meta, "candidates_token_count", 0) or 0,
                 "cache_creation": 0,
                 "cache_read": getattr(usage_meta, "cached_content_token_count", 0) or 0,
+                "model": self.provider_model,
             },
         }
 

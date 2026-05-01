@@ -99,11 +99,35 @@ def _check_hard_ceiling_still_fires() -> None:
     print("✓ hard ceiling still offloads oversize read_skill output")
 
 
+def _check_read_file_coerces_string_args() -> None:
+    """Models occasionally emit numeric tool args as strings even when
+    the JSON schema declares int. read_file must coerce to int (or
+    return an actionable error string) instead of crashing the turn —
+    surfaced live during the pyagent_self_audit bench run."""
+    from pyagent import permissions, tools
+
+    with tempfile.TemporaryDirectory(prefix="pyagent-smoke-coerce-") as t:
+        permissions.set_workspace(t)
+        target = Path(t) / "lines.txt"
+        target.write_text("a\nb\nc\nd\ne\n")
+        # String start coerces to int.
+        result = tools.read_file(str(target), start="2", end="4")
+        assert result == "b\nc\nd\n", repr(result)
+        # Non-int-coercible start returns an error marker, not a crash.
+        result = tools.read_file(str(target), start="oops")
+        assert result.startswith("<error: start must be an integer"), result
+        # Same for end.
+        result = tools.read_file(str(target), start=1, end="not-a-number")
+        assert result.startswith("<error: end must be an integer"), result
+    print("✓ read_file coerces string ints; rejects non-coercible cleanly")
+
+
 def main() -> None:
     _check_small_read_file_inline()
     _check_large_read_file_offloads()
     _check_read_skill_unaffected()
     _check_hard_ceiling_still_fires()
+    _check_read_file_coerces_string_args()
     print("\nALL CHECKS PASSED")
 
 

@@ -142,17 +142,25 @@ class _BenchState:
     halt: bool = False  # set when budget exceeded; finish current turn then stop
 
 
-def _maybe_warn_opus(model: str, budget: float, no_budget: bool) -> None:
-    if no_budget:
-        return
-    name = pricing.model_name(model)
-    if name == "claude-opus-4-7" and abs(budget - 0.50) < 1e-9:
-        click.echo(
-            "[bench] note: well_mako is sized for Sonnet; Opus runs "
-            "typically halt mid-scenario at the $0.50 default. "
-            "Pass --budget 3.00 for a full run.",
-            err=True,
-        )
+# Default per-run budget by model. Sized so a typical scenario can
+# complete without halting at the budget cap, sized DOWN for cheap
+# models so a runaway Haiku run doesn't quietly cost more than the
+# user expected. Override at the CLI with --budget X (or --no-budget).
+_DEFAULT_BUDGET_BY_BARE_MODEL: dict[str, float] = {
+    "claude-haiku-4-5-20251001": 0.20,
+    "claude-sonnet-4-6": 0.50,
+    "claude-opus-4-7": 3.00,
+    "gpt-4o": 0.50,
+    "gpt-4o-mini": 0.10,
+    "gemini-2.5-flash": 0.10,
+}
+_BUDGET_FALLBACK_USD = 0.50
+
+
+def _default_budget_for(model: str) -> float:
+    """Pick a reasonable per-run budget for the resolved model."""
+    bare = pricing.model_name(model)
+    return _DEFAULT_BUDGET_BY_BARE_MODEL.get(bare, _BUDGET_FALLBACK_USD)
 
 
 def _build_agent_config(model: str, session_id: str) -> dict[str, Any]:
@@ -339,9 +347,12 @@ def list_cmd() -> None:
 @click.option(
     "--budget",
     type=float,
-    default=0.50,
-    show_default=True,
-    help="Halt after the first turn whose cumulative cost crosses this USD cap.",
+    default=None,
+    help=(
+        "Halt after the first turn whose cumulative cost crosses this "
+        "USD cap. Default scales by model: $0.20 Haiku, $0.50 Sonnet, "
+        "$3.00 Opus, $0.50 fallback."
+    ),
 )
 @click.option(
     "--no-budget",
@@ -357,19 +368,20 @@ def list_cmd() -> None:
 def run_cmd(
     scenario: str,
     model: str | None,
-    budget: float,
+    budget: float | None,
     no_budget: bool,
     out: Path | None,
 ) -> None:
     """Run a scenario and print a token / cost / tool report.
 
     Spawns a real agent subprocess against a real LLM. Costs real
-    money. The default $0.50 budget halts a runaway scenario before
-    it gets out of hand.
+    money. A per-model default budget halts a runaway scenario before
+    it gets out of hand; override with `--budget X` or `--no-budget`.
     """
     sc = _load_scenario(scenario)
     resolved_model = _resolve_bench_model(model)
-    _maybe_warn_opus(resolved_model, budget, no_budget)
+    if budget is None:
+        budget = _default_budget_for(resolved_model)
     cap = None if no_budget else budget
 
     # Mint the session up front so we can print + report the id even
