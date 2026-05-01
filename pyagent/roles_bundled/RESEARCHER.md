@@ -1,5 +1,4 @@
 +++
-tools = ["read_file", "grep", "list_directory", "fetch_url", "html_to_md", "html_select", "read_skill"]
 meta_tools = false
 description = "Investigates a question end-to-end: fetches sources, cross-references them, returns synthesized findings with citations."
 +++

@@ -1,7 +1,6 @@
 +++
-tools = ["read_file", "write_file", "edit_file", "list_directory", "grep", "read_skill"]
 meta_tools = false
-description = "Captures, organizes, and edits notes and documentation. Read/write file access; no execute authority."
+description = "Captures, organizes, and edits notes and documentation."
 +++
 
 # Role: Scribe
