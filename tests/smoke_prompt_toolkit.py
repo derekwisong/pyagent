@@ -81,6 +81,21 @@ def main() -> None:
         assert b">" in out, f"no prompt rendered:\n{out!r}"
         print("✓ ready, prompt rendered under PTY")
 
+        # Issue /queue while idle — confirms the new async REPL
+        # routes the slash command through `_handle_queue_command`
+        # locally (no IPC round-trip) and prints "queue empty".
+        os.write(fd, b"/queue\r")
+        slash_out = _read_until(fd, b"queue empty", timeout_s=5.0)
+        assert b"queue empty" in slash_out, (
+            f"/queue did not produce expected output:\n{slash_out!r}"
+        )
+        print("✓ /queue routed locally, printed 'queue empty'")
+
+        # Brief pause so /queue's redraw settles before we send EOF;
+        # otherwise prompt_toolkit can swallow the Ctrl-D inside the
+        # in-flight repaint.
+        time.sleep(0.5)
+
         # Send EOF (Ctrl-D, byte 0x04) — prompt_toolkit should turn
         # this into EOFError, which the main loop catches and exits.
         os.write(fd, b"\x04")

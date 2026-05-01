@@ -94,6 +94,29 @@ to reflect the new model. A bad spec leaves the existing client in
 place and prints a warning. Subagents are not affected — each child
 keeps the model it was spawned with.
 
+### Talking to a busy agent
+
+The input field stays alive while the agent works. Anything you type
+while a turn is running queues up; each submitted line gets a `>>`
+echo, and the status footer surfaces queue depth (`queued: 2 (next:
+"now run the tests")`). When the turn finishes, the head of the queue
+becomes the next user prompt automatically.
+
+```
+> /queue              # show queued entries
+> /queue clear        # flush the queue without sending anything
+> /queue pop          # drop the most recent typed entry (likely a typo)
+```
+
+`/tasks` prints the agent's current checklist (also reflected in the
+footer as `3/7 · "writing migration"`). The model maintains it via
+`add_task` / `update_task` for genuine multi-step work.
+
+Press **Esc** while the agent is busy to cancel the in-flight turn —
+this also discards any queued input (queued lines tied to the
+cancelled turn are usually stale). Esc is a no-op when the agent is
+idle.
+
 ## Design
 
 ### The agent loop

@@ -1,15 +1,20 @@
+import asyncio
+import collections
+import io
 import logging
 import multiprocessing
 import re
 import shutil
-import sys
 from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any
 
 import click
 from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.traceback import install as install_traceback
@@ -21,7 +26,6 @@ from pyagent import paths
 from pyagent import permissions
 from pyagent import protocol
 from pyagent import roles
-from pyagent.cancel import CancelWatcher
 from pyagent.session import Session
 
 logger = logging.getLogger(__name__)
@@ -100,9 +104,9 @@ def _on_tool_result(
 # from before the footer landed — same `thinking…` text — so users
 # who don't use subagents see no UI churn.
 #
-# State is per-CLI-process (one dict, mutated in place by event-stream
-# handlers in `_drive_turn`). It carries across turns so a subagent
-# spawned in turn N is still tracked at turn N+1.
+# State is per-CLI-process (one dict, mutated in place by the
+# asyncio pipe-reader callback in `_repl_async`). It carries across
+# turns so a subagent spawned in turn N is still tracked at turn N+1.
 
 _SPAWN_INFO_RE = re.compile(
     r"spawned subagent (?P<name>\S+) \(id=(?P<sid>\S+), depth=\d+\)"
@@ -347,43 +351,6 @@ def _resume_callback(
     ctx.exit()
 
 
-def _prompt_permission(
-    target: str, agent_id: str | None = None
-) -> tuple[bool, bool]:
-    """Run the y/n/a prompt for an out-of-workspace path. Returns
-    (decision, always). When `agent_id` is set, the request came from
-    a subagent — name it in the prompt so the human knows which agent
-    they're authorizing."""
-    who = (
-        f"Subagent {agent_id!r}"
-        if agent_id
-        else "Agent"
-    )
-    sys.stderr.write(
-        f"\n{who} is requesting access OUTSIDE the workspace:\n"
-        f"  workspace: {permissions.workspace()}\n"
-        f"  target:    {target}\n"
-    )
-    while True:
-        sys.stderr.write(
-            "Allow? [y]es / [n]o / [a]lways (this path and below): "
-        )
-        sys.stderr.flush()
-        line = sys.stdin.readline()
-        if not line:  # EOF
-            return False, False
-        answer = line.strip().lower()
-        if answer in ("y", "yes"):
-            return True, False
-        if answer in ("n", "no"):
-            return False, False
-        if answer in ("a", "always"):
-            return True, True
-        sys.stderr.write(
-            f"  unrecognized: {answer!r} — please answer y, n, or a\n"
-        )
-
-
 _TASK_STATUS_GLYPH = {
     "pending": "○",
     "in_progress": "▶",
@@ -450,116 +417,359 @@ def _handle_model_command(
     return resolved
 
 
-def _drive_turn(
-    parent_conn: Connection,
-    watcher: CancelWatcher,
-    pause_io: Any,
-    resume_io: Any,
-    status: Any,
-    agents: dict[str, dict[str, str]],
-    model: str = "",
-) -> str:
-    """Pump events from the child until the current turn finishes.
+_QUEUE_PREVIEW_MAX = 30
 
-    Returns one of: "complete", "interrupted", "error", "fatal".
 
-    `status` is the rich Status (the spinner) — we update its message
-    on every event so the footer reflects current activity. `agents`
-    is the per-agent state dict, mutated in place across turns.
+def _queue_segment(queue: "collections.deque[str]") -> str:
+    """Render the footer's queue segment (' · queued: …') or empty.
+
+    Mirrors the design from issue #42:
+      - 0 entries → empty (segment drops out)
+      - 1 entry  → ` · queued: "<head>"`
+      - N>1      → ` · queued: N (next: "<head>")`
+    Head is truncated to ~30 chars so the footer stays one line on
+    typical terminals.
     """
-    while True:
-        # Poll so we can periodically check the local cancel_event for
-        # Esc forwarding. 100ms is short enough that an Esc feels
-        # responsive without burning CPU between events.
-        if not parent_conn.poll(0.1):
-            if watcher.cancel_event.is_set():
-                try:
-                    protocol.send(parent_conn, "cancel")
-                except (BrokenPipeError, OSError):
-                    return "fatal"
-                watcher.reset()
-            continue
+    n = len(queue)
+    if n == 0:
+        return ""
+    head = queue[0]
+    if len(head) > _QUEUE_PREVIEW_MAX:
+        head = head[: _QUEUE_PREVIEW_MAX - 1] + "…"
+    if n == 1:
+        return f' · queued: "{head}"'
+    return f' · queued: {n} (next: "{head}")'
+
+
+def _render_status_ansi(
+    agents: dict,
+    model: str,
+    queue: "collections.deque[str]",
+    perm_pending: str | None,
+) -> str:
+    """Render the bottom_toolbar content as ANSI-encoded bytes.
+
+    prompt_toolkit accepts an `ANSI("...")` formatted text — we
+    re-render rich markup through a non-attached Console so the
+    existing `_render_status` styling carries over without duplication
+    and a separate styling vocabulary. Queue depth and a pending
+    permission notice get appended to the same line.
+    """
+    base = _render_status(agents, model)
+    queued = _queue_segment(queue)
+    perm = (
+        f" · awaiting permission ({perm_pending}) — type y/n/a"
+        if perm_pending
+        else ""
+    )
+    # rich-markup → ANSI: render through a throwaway Console with
+    # force_terminal so styles emit even when stdout isn't a tty.
+    buf = io.StringIO()
+    Console(
+        file=buf,
+        force_terminal=True,
+        color_system="truecolor",
+        width=shutil.get_terminal_size((120, 24)).columns,
+    ).print(base + queued + perm, end="")
+    return buf.getvalue()
+
+
+def _print_event(event: dict) -> None:
+    """Render a single inbound event to the console.
+
+    Splits per-event-type handling out of the old `_drive_turn` so
+    the asyncio reader (which is invoked by `loop.add_reader` on the
+    pipe fd) can dispatch one event per call. Only handles things
+    that produce visible output — state mutations (agents_state,
+    queue draining, etc.) live in the caller.
+    """
+    kind = event.get("type")
+    agent_id = event.get("agent_id")
+    if kind == "assistant_text":
+        _on_text(event["text"], agent_id=agent_id)
+    elif kind == "tool_call_started":
+        _on_tool_call(event["name"], event["args"], agent_id=agent_id)
+    elif kind == "tool_result":
+        _on_tool_result(event["name"], event["content"], agent_id=agent_id)
+    elif kind == "info":
+        label = _agent_label(agent_id)
+        console.print(f"{label}[dim]{event['message']}[/dim]")
+    elif kind == "ready":
+        label = _agent_label(agent_id)
+        console.print(f"{label}[dim]ready[/dim]")
+    elif kind == "agent_error":
+        if agent_id is not None:
+            console.print(
+                f"{_agent_label(agent_id)}[red]Error:[/red] "
+                f"{event['kind']}: {event['message']}"
+            )
+        elif event.get("kind") == "KeyboardInterrupt":
+            console.print("[dim]interrupted[/dim]")
+        else:
+            console.print(
+                f"[red]Error:[/red] {event['kind']}: {event['message']}"
+            )
+
+
+def _handle_queue_command(
+    line: str, queue: "collections.deque[str]"
+) -> None:
+    """Implement /queue, /queue clear, /queue pop.
+
+    The queue is the user's typed-but-undelivered input — entries
+    accumulated while the agent was busy that haven't been pulled
+    off as the next user_prompt yet.
+    """
+    parts = line.split()
+    sub = parts[1] if len(parts) > 1 else ""
+    if sub == "":
+        if not queue:
+            console.print("[dim]queue empty[/dim]")
+            return
+        for i, entry in enumerate(queue, 1):
+            preview = entry if len(entry) <= 80 else entry[:77] + "..."
+            console.print(f"[dim]  {i}. {preview}[/dim]")
+        return
+    if sub == "clear":
+        n = len(queue)
+        queue.clear()
+        console.print(f"[dim]cleared {n} queued entries[/dim]")
+        return
+    if sub == "pop":
+        if not queue:
+            console.print("[dim]queue empty[/dim]")
+            return
+        dropped = queue.pop()
+        preview = dropped if len(dropped) <= 60 else dropped[:57] + "..."
+        console.print(f"[dim]popped: {preview!r}[/dim]")
+        return
+    console.print(
+        f"[red]unknown queue command {sub!r}; "
+        f"use /queue, /queue clear, /queue pop[/red]"
+    )
+
+
+async def _repl_async(
+    parent_conn: Connection,
+    model: str,
+    agents_state: dict[str, dict[str, str]],
+    input_history: InMemoryHistory,
+) -> str:
+    """Async REPL: persistent input field, queued typing during turns,
+    cancel via Esc, footer redrawn live in prompt_toolkit's bottom
+    toolbar. Returns one of: "eof", "fatal", "interrupt".
+
+    The previous synchronous `_drive_turn` polling loop is replaced
+    with `loop.add_reader` on the pipe's fileno — every inbound event
+    triggers `on_pipe` exactly once, no busy-wait. Slash commands and
+    queue draining run on the same asyncio loop as the prompt, so
+    there's no thread synchronization to reason about.
+    """
+    queue: collections.deque[str] = collections.deque()
+    state: dict[str, Any] = {
+        "model": model,
+        "turn_busy": False,
+        # When set, the next submitted line is interpreted as a
+        # y/n/a answer to a pending permission_request rather than
+        # a user_prompt. Value is the pending request's payload
+        # (we hold it until we have the answer).
+        "perm_pending": None,
+        "fatal": False,
+        "interrupted": False,
+    }
+
+    loop = asyncio.get_running_loop()
+
+    def send_or_die(event_type: str, **payload: Any) -> bool:
         try:
-            event = parent_conn.recv()
-        except (EOFError, OSError):
-            return "fatal"
-        _update_agents_state(agents, event)
-        try:
-            status.update(_render_status(agents, model))
-        except Exception:
-            # Status rendering errors must never break the event loop.
-            logger.exception("status update failed")
-        kind = event.get("type")
-        agent_id = event.get("agent_id")
-        if kind == "assistant_text":
-            _on_text(event["text"], agent_id=agent_id)
-        elif kind == "tool_call_started":
-            _on_tool_call(event["name"], event["args"], agent_id=agent_id)
-        elif kind == "tool_result":
-            _on_tool_result(event["name"], event["content"], agent_id=agent_id)
-        elif kind == "permission_request":
-            pause_io()
+            protocol.send(parent_conn, event_type, **payload)
+            return True
+        except (BrokenPipeError, OSError):
+            console.print("[red]agent subprocess died[/red]")
+            state["fatal"] = True
+            pt_session.app.exit(result="")
+            return False
+
+    def drain_queue_one() -> None:
+        """Pop one queued line and send it as the next user_prompt.
+
+        Called when a turn finishes and the queue isn't empty. Only
+        one drain per turn — the next turn ends, we drain again.
+        Subagent async replies (already injected by the agent on its
+        next turn boundary via `pending_async_replies`) are NOT in
+        this queue; they ride a separate path.
+        """
+        if not queue:
+            return
+        next_line = queue.popleft()
+        if not send_or_die("user_prompt", prompt=next_line):
+            return
+        agents_state.setdefault("root", {"status": "thinking"})["status"] = (
+            "thinking"
+        )
+        state["turn_busy"] = True
+
+    def on_pipe() -> None:
+        """asyncio reader callback for `parent_conn`.
+
+        Drains every event currently buffered (the OS-level pipe
+        readiness fires once even if multiple events arrived; calling
+        recv() inside `if poll(0)` keeps us from blocking on a slow
+        sender).
+        """
+        while True:
+            if not parent_conn.poll(0):
+                break
             try:
-                decision, always = _prompt_permission(
-                    event["target"], agent_id=agent_id
-                )
-            finally:
-                resume_io()
-            try:
-                protocol.send(
-                    parent_conn,
-                    "permission_response",
-                    decision=decision,
-                    always=always,
-                    agent_id=agent_id,
-                )
-            except (BrokenPipeError, OSError):
-                return "fatal"
-        elif kind == "info":
-            label = _agent_label(agent_id)
-            console.print(f"{label}[dim]{event['message']}[/dim]")
-        elif kind == "usage":
-            # Token-counter event. State already updated by
-            # _update_agents_state and reflected in the footer; no
-            # additional rendering needed here.
-            pass
-        elif kind == "checklist":
-            # State already updated by _update_agents_state; the footer
-            # picked up the new summary via status.update above. No
-            # inline render — checklist activity is intentionally
-            # quiet, surfaced only via the footer and `/tasks`.
-            pass
-        elif kind == "ready":
-            # Sub-agent became ready — purely informational here, the
-            # spawning agent's reply queue handles the synchronous
-            # spawn handshake.
-            label = _agent_label(agent_id)
-            console.print(f"{label}[dim]ready[/dim]")
-        elif kind == "turn_complete":
-            # Subagent's turn-completes are routed away from the CLI
-            # event stream by the parent agent's IO thread, but if one
-            # ever gets here, treat it as a sibling of complete.
-            if agent_id is None:
-                return "complete"
-        elif kind == "agent_error":
-            if agent_id is not None:
-                # Subagent error — surface but keep the root turn going.
+                event = parent_conn.recv()
+            except (EOFError, OSError):
+                state["fatal"] = True
+                pt_session.app.exit(result="")
+                return
+            _update_agents_state(agents_state, event)
+            kind = event.get("type")
+            agent_id = event.get("agent_id")
+            if kind == "permission_request":
+                # Pause turn-busy "thinking" UX, ask user inline. The
+                # main prompt is repurposed: the next submission is
+                # the y/n/a answer.
+                state["perm_pending"] = {
+                    "target": event["target"],
+                    "agent_id": agent_id,
+                }
                 console.print(
-                    f"{_agent_label(agent_id)}[red]Error:[/red] "
-                    f"{event['kind']}: {event['message']}"
+                    f"\n{_agent_label(agent_id)}"
+                    f"[yellow]access requested OUTSIDE workspace:[/yellow]\n"
+                    f"  workspace: {permissions.workspace()}\n"
+                    f"  target:    {event['target']}\n"
+                    f"[yellow]answer at the prompt: y / n / a[/yellow]"
+                )
+            elif kind == "turn_complete" and agent_id is None:
+                state["turn_busy"] = False
+                drain_queue_one()
+            elif kind == "agent_error":
+                _print_event(event)
+                if agent_id is None:
+                    if event.get("fatal"):
+                        state["fatal"] = True
+                        pt_session.app.exit(result="")
+                        return
+                    # Non-fatal root error: turn is over, queue
+                    # freezes (per issue #42 semantics — surface
+                    # the error, let the user decide whether to
+                    # keep going).
+                    state["turn_busy"] = False
+            elif kind in ("usage", "checklist"):
+                # State already updated; no inline render. Footer
+                # picks it up on the next bottom_toolbar refresh.
+                pass
+            else:
+                _print_event(event)
+            # Trigger a footer redraw.
+            pt_session.app.invalidate()
+
+    def bottom_toolbar() -> ANSI:
+        return ANSI(
+            _render_status_ansi(
+                agents_state,
+                state["model"],
+                queue,
+                state["perm_pending"]["target"] if state["perm_pending"] else None,
+            )
+        )
+
+    bindings = KeyBindings()
+
+    @bindings.add("escape", eager=True)
+    def _esc(event: Any) -> None:
+        # Esc means "cancel the in-flight turn AND clear queue" when
+        # busy. When idle, no-op (don't interfere with line editing).
+        if not state["turn_busy"]:
+            return
+        send_or_die("cancel")
+        if queue:
+            queue.clear()
+        # Also clear any pending permission state — the agent will
+        # tear down whatever was in flight.
+        state["perm_pending"] = None
+        pt_session.app.invalidate()
+
+    pt_session: PromptSession = PromptSession(
+        history=input_history,
+        bottom_toolbar=bottom_toolbar,
+        refresh_interval=0.5,
+        key_bindings=bindings,
+    )
+
+    loop.add_reader(parent_conn.fileno(), on_pipe)
+    try:
+        while True:
+            try:
+                with patch_stdout(raw=True):
+                    line = await pt_session.prompt_async("> ")
+            except (EOFError, KeyboardInterrupt):
+                # Ctrl-D / Ctrl-C at the prompt — clean exit.
+                console.print()
+                return "eof"
+            if state["fatal"]:
+                return "fatal"
+            stripped = (line or "").strip()
+            if not stripped:
+                continue
+            # Permission-pending mode: route the answer back over
+            # the pipe instead of treating the line as a prompt.
+            if state["perm_pending"] is not None:
+                answer = stripped.lower()
+                if answer in ("y", "yes", "n", "no", "a", "always"):
+                    decision = answer in ("y", "yes", "a", "always")
+                    always = answer in ("a", "always")
+                    target = state["perm_pending"]["target"]
+                    pending_agent_id = state["perm_pending"]["agent_id"]
+                    state["perm_pending"] = None
+                    if always:
+                        permissions.pre_approve(target)
+                    if not send_or_die(
+                        "permission_response",
+                        decision=decision,
+                        always=always,
+                        agent_id=pending_agent_id,
+                    ):
+                        return "fatal"
+                else:
+                    console.print(
+                        f"[red]unrecognized: {answer!r} — please answer "
+                        f"y, n, or a[/red]"
+                    )
+                continue
+            # Slash commands (always processed locally, never queued).
+            if stripped.startswith("/queue"):
+                _handle_queue_command(stripped, queue)
+                continue
+            if stripped.startswith("/model"):
+                state["model"] = _handle_model_command(
+                    parent_conn, stripped, state["model"]
                 )
                 continue
-            if event.get("kind") == "KeyboardInterrupt":
-                console.print("[dim]interrupted[/dim]")
-                ret = "interrupted"
+            if stripped == "/tasks":
+                _print_tasks(agents_state)
+                continue
+            # Either dispatch to the agent (idle) or queue (busy).
+            if state["turn_busy"]:
+                queue.append(line)
+                preview = line if len(line) <= 60 else line[:57] + "..."
+                console.print(f"[dim grey42]>> queued: {preview}[/dim grey42]")
             else:
-                console.print(
-                    f"[red]Error:[/red] {event['kind']}: {event['message']}"
-                )
-                ret = "error"
-            return "fatal" if event.get("fatal") else ret
-        else:
-            logger.warning("cli: unknown event type %r", kind)
+                if not send_or_die("user_prompt", prompt=line):
+                    return "fatal"
+                agents_state.setdefault(
+                    "root", {"status": "thinking"}
+                )["status"] = "thinking"
+                state["turn_busy"] = True
+    finally:
+        try:
+            loop.remove_reader(parent_conn.fileno())
+        except (ValueError, OSError):
+            pass
 
 
 @click.command(
@@ -800,17 +1010,6 @@ def main(
         # lets the parent's recv() see EOF promptly when the child dies.
         child_conn.close()
 
-        thinking = console.status("[dim]thinking…[/dim]", spinner="dots")
-        watcher = CancelWatcher()
-
-        def _pause_io() -> None:
-            thinking.stop()
-            watcher.stop()
-
-        def _resume_io() -> None:
-            watcher.start()
-            thinking.start()
-
         console.print(f"[dim]session: {session.id}[/dim]")
         console.print(f"[dim]model:   {model}[/dim]")
         if prior:
@@ -844,57 +1043,23 @@ def main(
         # _update_agents_state.
         agents_state["root"] = {"status": "thinking"}
 
-        # PromptSession lazily — by the time we get here, stdin is the
-        # tty the user is typing into, so prompt_toolkit's no-tty
-        # warning doesn't fire.
-        input_session = PromptSession(history=input_history)
-
-        while True:
-            try:
-                # prompt_toolkit returns terminal modes to their pre-call
-                # state on every prompt() return — by the time the
-                # CancelWatcher (cbreak) and rich status spinner start
-                # below, prompt_toolkit has fully released the tty.
-                prompt = input_session.prompt("> ")
-            except (EOFError, KeyboardInterrupt):
-                console.print()
-                break
-            stripped = prompt.strip()
-            if not stripped:
-                continue
-            if stripped.startswith("/model"):
-                model = _handle_model_command(parent_conn, stripped, model)
-                continue
-            if stripped == "/tasks":
-                _print_tasks(agents_state)
-                continue
-            try:
-                protocol.send(parent_conn, "user_prompt", prompt=prompt)
-            except (BrokenPipeError, OSError):
-                console.print("[red]agent subprocess died[/red]")
-                break
-            watcher.reset()
-            # Root is thinking again at the start of each turn.
-            agents_state["root"]["status"] = "thinking"
-            thinking.update(_render_status(agents_state, model))
-            thinking.start()
-            watcher.start()
-            try:
-                outcome = _drive_turn(
-                    parent_conn,
-                    watcher,
-                    pause_io=_pause_io,
-                    resume_io=_resume_io,
-                    status=thinking,
-                    agents=agents_state,
-                    model=model,
-                )
-            finally:
-                watcher.stop()
-                thinking.stop()
-            if outcome == "fatal":
-                console.print("[red]agent subprocess exited unexpectedly[/red]")
-                break
+        # All REPL loop state lives in `_repl_async`. Returns one of
+        # "eof" (clean Ctrl-D / Ctrl-C at the prompt), "fatal"
+        # (agent subprocess died mid-session), or "interrupt" (KI
+        # arrived outside the prompt). asyncio.run owns its own
+        # signal handling for SIGINT — Ctrl-C delivered to the CLI
+        # process raises KeyboardInterrupt out of `prompt_async`,
+        # caught inside the coroutine.
+        outcome = asyncio.run(
+            _repl_async(
+                parent_conn,
+                model,
+                agents_state,
+                input_history,
+            )
+        )
+        if outcome == "fatal":
+            console.print("[red]agent subprocess exited unexpectedly[/red]")
     except KeyboardInterrupt:
         # User Ctrl+C'd somewhere outside the input prompt's own
         # except (e.g. mid-turn while a tool was running, or during
