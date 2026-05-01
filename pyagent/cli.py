@@ -15,6 +15,7 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.traceback import install as install_traceback
@@ -422,6 +423,25 @@ def _handle_model_command(
     return resolved
 
 
+def _prompt_message() -> ANSI:
+    """Build the multi-line prompt message: a thin horizontal divider
+    line above the `> ` input arrow.
+
+    Visually separates each turn so the input region is unmistakable
+    in tmux/terminal scrollback. Unlike a fixed-bottom TUI (which
+    would defeat tmux's `Ctrl-b PgUp`), this approach keeps the
+    append-only output model — the divider becomes a per-turn
+    bracket in scrolled history, marking where each prompt landed.
+
+    Recomputed at every prompt iteration so a terminal resize
+    between turns picks up the new width without restart.
+    """
+    width = shutil.get_terminal_size((80, 24)).columns
+    divider = "─" * max(8, width - 1)
+    # \x1b[2m = dim, \x1b[0m = reset
+    return ANSI(f"\x1b[2m{divider}\x1b[0m\n> ")
+
+
 _QUEUE_PREVIEW_MAX = 30
 
 
@@ -707,11 +727,22 @@ async def _repl_async(
         state["perm_pending"] = None
         pt_session.app.invalidate()
 
+    # prompt_toolkit's default `class:bottom-toolbar` style sets a
+    # bright background that competes with the embedded ANSI colors
+    # in `_render_status_ansi`. Drop the bg + fg overrides so the
+    # toolbar inherits the terminal's default background and our
+    # rich-emitted color codes do all the talking.
+    pt_style = Style.from_dict({
+        "bottom-toolbar": "noreverse bg:default fg:default",
+        "bottom-toolbar.text": "noreverse bg:default fg:default",
+    })
+
     pt_session: PromptSession = PromptSession(
         history=input_history,
         bottom_toolbar=bottom_toolbar,
         refresh_interval=0.5,
         key_bindings=bindings,
+        style=pt_style,
     )
 
     loop.add_reader(parent_conn.fileno(), on_pipe)
@@ -719,7 +750,7 @@ async def _repl_async(
         while True:
             try:
                 with patch_stdout(raw=True):
-                    line = await pt_session.prompt_async("> ")
+                    line = await pt_session.prompt_async(_prompt_message())
             except (EOFError, KeyboardInterrupt):
                 # Ctrl-D / Ctrl-C at the prompt — clean exit.
                 console.print()
@@ -1051,10 +1082,12 @@ def main(
             logger.warning("cli: unexpected pre-ready event %r", kind)
 
         logger.info("soul=%s tools=%s primer=%s", soul, tools_md, primer)
-        # Per-agent state shared across turns. Root starts here;
-        # subagents are added/removed as info events flow through
-        # _update_agents_state.
-        agents_state["root"] = {"status": "thinking"}
+        # Per-agent state shared across turns. Root starts in `ready`
+        # (the agent has bootstrapped and is waiting for input); the
+        # submit branch in `_repl_async` flips it to `thinking` when
+        # the user actually fires a turn. Subagents are added/removed
+        # as info events flow through `_update_agents_state`.
+        agents_state["root"] = {"status": "ready"}
 
         # All REPL loop state lives in `_repl_async`. Returns one of
         # "eof" (clean Ctrl-D / Ctrl-C at the prompt), "fatal"
