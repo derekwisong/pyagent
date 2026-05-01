@@ -128,6 +128,26 @@ def main() -> None:
     )
     print("✓ unknown event ignored")
 
+    # Idle root: terminal `ready` and `error` statuses drop the `…`
+    # so the always-on bottom_toolbar doesn't say "thinking…" while
+    # the agent is just waiting for input.
+    idle = {"root": {"status": "ready"}}
+    out = render_plain(_render_status(idle))
+    assert out == "ready", repr(out)
+    print(f"✓ idle (ready): {out!r}")
+
+    err = {"root": {"status": "error"}}
+    out = render_plain(_render_status(err))
+    assert out == "error", repr(out)
+    print(f"✓ idle (error): {out!r}")
+
+    # Active states still show the `…`.
+    busy = {"root": {"status": "thinking"}}
+    assert render_plain(_render_status(busy)) == "thinking…"
+    busy = {"root": {"status": "· execute"}}
+    assert render_plain(_render_status(busy)) == "· execute…"
+    print("✓ active states keep '…'")
+
     print("\nALL CHECKS PASSED")
 
 
