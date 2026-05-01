@@ -648,12 +648,75 @@ def test_bundled_memory_markdown_loads() -> None:
         section_names = {s.name for s in loaded.sections()}
         assert "memory-guidance" in section_names
         assert "user-ledger" in section_names
+        assert "memory-index" in section_names
 
         # Subagent mode skips it (in_subagents=false).
         sub_loaded = plugins_mod.load(is_subagent=True)
         sub_names = [s.manifest.name for s in sub_loaded.states]
         assert "memory-markdown" not in sub_names
         print("✓ bundled memory-markdown loads in root, skipped in subagent")
+    finally:
+        restore()
+
+
+def test_memory_per_file_round_trip() -> None:
+    """write_ledger("MEMORY", content, file=...) creates
+    memories/<file>; read_ledger("MEMORY", file=...) returns it.
+    Validates filename rejection and USER+file refusal too."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        (cfg / "config.toml").write_text(
+            'built_in_plugins_enabled = ["memory-markdown"]\n'
+        )
+        loaded = plugins_mod.load(is_subagent=False)
+        _, read_ledger = loaded.tools()["read_ledger"]
+        _, write_ledger = loaded.tools()["write_ledger"]
+
+        # Round trip.
+        result = write_ledger(
+            name="MEMORY",
+            content="# stack choices\nWe use Postgres.\n",
+            file="stack_choices.md",
+        )
+        assert "Wrote" in result, result
+        body = read_ledger(name="MEMORY", file="stack_choices.md")
+        assert "We use Postgres" in body, body
+
+        # The file landed under memories/.
+        memories_dir = cfg / "plugins" / "memory-markdown" / "memories"
+        assert (memories_dir / "stack_choices.md").exists()
+
+        # Missing memory returns a clear error string.
+        missing = read_ledger(name="MEMORY", file="not_there.md")
+        assert missing.startswith("<memory not found"), missing
+
+        # USER + file is rejected.
+        err_user_read = read_ledger(name="USER", file="x.md")
+        assert "single-file ledger" in err_user_read, err_user_read
+        err_user_write = write_ledger(
+            name="USER", content="x", file="x.md"
+        )
+        assert "single-file ledger" in err_user_write, err_user_write
+
+        # Path traversal rejected.
+        for bad in ("../escape.md", "sub/dir.md", "..", ".hidden.md"):
+            r = read_ledger(name="MEMORY", file=bad)
+            assert r.startswith("<"), (bad, r)
+
+        # Non-.md rejected.
+        no_ext = read_ledger(name="MEMORY", file="no_ext")
+        assert "must end with .md" in no_ext, no_ext
+
+        # Empty filename rejected.
+        empty = read_ledger(name="MEMORY", file="")
+        assert empty.startswith("<"), empty
+
+        # Reading MEMORY without file returns the index (the seeded
+        # template, since we haven't overwritten it).
+        index = read_ledger(name="MEMORY")
+        assert "Index" in index or "memory" in index.lower(), index
+
+        print("✓ memory per-file round trip + validation")
     finally:
         restore()
 
@@ -708,6 +771,7 @@ def main() -> None:
     test_immutable_returns()
     test_builtin_tool_takes_precedence_in_agent()
     test_bundled_memory_markdown_loads()
+    test_memory_per_file_round_trip()
     test_graceful_degradation_when_memory_disabled()
     print("\nALL CHECKS PASSED")
 

@@ -10,7 +10,7 @@ api_version = "1"
 # pyagent can name the plugin that provided it.
 [provides]
 tools = ["read_ledger", "write_ledger"]
-prompt_sections = ["memory-guidance", "user-ledger"]
+prompt_sections = ["memory-guidance", "user-ledger", "memory-index"]
 
 # Spawn-tree behavior. Default true: the plugin loads in every agent
 # process, including subagents. memory-markdown does full-overwrite

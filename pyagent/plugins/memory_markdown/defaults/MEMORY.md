@@ -1,12 +1,16 @@
 # Memory
 
-Long-term notes worth carrying across sessions. Each entry stands on
-its own; prune by removing whole entries rather than blending them.
+Index of long-term notes worth carrying across sessions. Each entry
+is a one-line pointer to a file in `memories/`. This index is
+auto-loaded into every system prompt; bodies are fetched on demand
+with `read_ledger("MEMORY", file="…")`.
 
-Shape that works well:
+Group by topic with H2 headings. Keep each pointer under ~150
+characters so the index stays quick to scan.
 
-  ## <short title — what this is about>
-  <one or two sentences: the fact, preference, or decision and why
-  it matters. Italic date at the end if useful.>
+Shape:
+
+  ## <topic group>
+  - [Short title](filename.md) — one-line hook explaining when to load this
 
 (no memories yet)
