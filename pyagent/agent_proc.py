@@ -46,6 +46,12 @@ from pyagent import skills as skills_mod
 from pyagent import subagent as subagent_mod
 from pyagent import tools as agent_tools
 from pyagent.agent import Agent
+from pyagent.checklist import (
+    Checklist,
+    make_add_task,
+    make_list_tasks,
+    make_update_task,
+)
 from pyagent.llms import get_client
 from pyagent.prompts import SystemPromptBuilder
 from pyagent.session import Session
@@ -393,6 +399,7 @@ def _register_tools(
     base_config: dict[str, Any] | None = None,
     allow_meta: bool = False,
     allowlist: list[str] | None = None,
+    checklist: Checklist | None = None,
 ) -> None:
     """Register the default tool set on `agent`.
 
@@ -442,6 +449,14 @@ def _register_tools(
         auto_offload=False,
         evict_after_use=True,
     )
+    if checklist is not None:
+        # Checklist tools share state with the CLI footer via a
+        # per-mutation `checklist` event. Roles can scope these out via
+        # the allowlist (e.g. a one-shot validator subagent shouldn't
+        # be maintaining a task list).
+        _add("add_task", make_add_task(checklist), auto_offload=False)
+        _add("update_task", make_update_task(checklist), auto_offload=False)
+        _add("list_tasks", make_list_tasks(checklist), auto_offload=False)
     if allow_meta:
         assert state is not None and parent_session is not None and base_config is not None
         _add(
@@ -562,6 +577,24 @@ def _bootstrap(
     # status (sync vs async mode) when routing turn_complete events.
     state.agent = agent
 
+    # Checklist tools live on the root agent only — a per-session
+    # construct, not per-agent. Subagents that try to track their
+    # own work would compete with the root's list for the user's
+    # one footer slot, and subagent runs are typically too short to
+    # warrant a checklist anyway.
+    if not is_subagent:
+        checklist = Checklist(
+            session.dir / "checklist.json",
+            on_change=lambda tasks: state.send("checklist", tasks=tasks),
+        )
+        # Replay the persisted snapshot to the CLI on resume so the
+        # footer reflects prior state immediately, before the model
+        # touches the list.
+        if checklist.tasks:
+            state.send("checklist", tasks=checklist.list())
+    else:
+        checklist = None
+
     # Meta-tools registered when the role allows further spawning.
     # Recursion is bounded by `max_depth` in config (the spawn tool
     # refuses if `agent.depth + 1 > max_depth`). Roles with
@@ -575,6 +608,7 @@ def _bootstrap(
         base_config=config,
         allow_meta=allow_meta,
         allowlist=allowlist,
+        checklist=checklist,
     )
 
     # Plugin introspection tool, available to the agent for self-
