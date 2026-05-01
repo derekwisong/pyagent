@@ -167,6 +167,33 @@ def _agents_tokens(agents: dict) -> tuple[int, int, int, int]:
     return in_tot, out_tot, cw_tot, cr_tot
 
 
+_CHECKLIST_TITLE_MAX = 40
+
+
+def _checklist_segment(agents: dict) -> str:
+    """Return the footer's checklist segment ('· N/M · "title"') or empty.
+
+    Reads the most recent checklist snapshot stashed under
+    `agents["root"]["checklist"]` by `_update_agents_state`. Drops out
+    cleanly when there's no list, or when every task is done — the
+    point of the segment is *progress on something live*, not a
+    monument to past work.
+    """
+    cl = agents.get("root", {}).get("checklist")
+    if not cl:
+        return ""
+    total = cl.get("total", 0)
+    completed = cl.get("completed", 0)
+    if total <= 0 or completed >= total:
+        return ""
+    title = cl.get("current_title", "") or ""
+    if len(title) > _CHECKLIST_TITLE_MAX:
+        title = title[: _CHECKLIST_TITLE_MAX - 1] + "…"
+    if title:
+        return f" · {completed}/{total} · {title}"
+    return f" · {completed}/{total}"
+
+
 def _render_status(agents: dict, model: str = "") -> str:
     """Return the rich-markup string for the status footer.
 
@@ -178,18 +205,22 @@ def _render_status(agents: dict, model: str = "") -> str:
     drawing pipes. Order is insertion order (root first, then
     subagents in spawn order) which gives a stable left-to-right read.
     Token/cost suffix is the aggregate across the whole tree.
+
+    Both renderings get a checklist segment appended when the root
+    agent has a non-empty, not-yet-finished task list.
     """
     in_tot, out_tot, cw_tot, cr_tot = _agents_tokens(agents)
     suffix = _format_usage_suffix(in_tot, out_tot, model, cw_tot, cr_tot)
+    checklist = _checklist_segment(agents)
     if len(agents) <= 1:
         status = agents.get("root", {}).get("status", "thinking")
-        return f"[dim]{status}…{suffix}[/dim]"
+        return f"[dim]{status}…{checklist}{suffix}[/dim]"
     parts = []
     for key, info in agents.items():
         label = "root" if key == "root" else key
         parts.append(f"{label}([cyan]{info['status']}[/cyan])")
     body = " [/dim][dim]│[/dim] [dim]".join(parts)
-    return f"[dim]{body}{suffix}[/dim]"
+    return f"[dim]{body}{checklist}{suffix}[/dim]"
 
 
 def _update_agents_state(
@@ -232,6 +263,35 @@ def _update_agents_state(
         if m:
             agents.pop(m.group("sid"), None)
             return
+    if kind == "checklist":
+        # Always lands on root: the checklist is a per-session
+        # construct, not per-agent. (Subagents don't get their own
+        # list — see pyagent/checklist.py.) Compute the footer
+        # summary here so _render_status doesn't have to re-walk
+        # the task list on every redraw.
+        tasks = event.get("tasks") or []
+        slot = agents.setdefault("root", {"status": "thinking"})
+        if not tasks:
+            slot.pop("checklist", None)
+            slot["checklist_tasks"] = []
+            return
+        total = sum(1 for t in tasks if t.get("status") != "cancelled")
+        completed = sum(1 for t in tasks if t.get("status") == "completed")
+        current = next(
+            (t for t in tasks if t.get("status") == "in_progress"), None
+        ) or next(
+            (t for t in tasks if t.get("status") == "pending"), None
+        )
+        slot["checklist"] = {
+            "completed": completed,
+            "total": total,
+            "current_title": current.get("title", "") if current else "",
+        }
+        # Stash the full list so /tasks can render it without an IPC
+        # round-trip. Cheap (≤ ~20 entries) and avoids an additional
+        # request/response event type.
+        slot["checklist_tasks"] = tasks
+        return
     if kind == "usage":
         slot = agents.setdefault(key, {"status": "idle"})
         # Use .get(k, 0) + … so old two-key dicts in long-running state
@@ -310,6 +370,32 @@ def _prompt_permission(
         sys.stderr.write(
             f"  unrecognized: {answer!r} — please answer y, n, or a\n"
         )
+
+
+_TASK_STATUS_GLYPH = {
+    "pending": "○",
+    "in_progress": "▶",
+    "completed": "✓",
+    "cancelled": "✗",
+}
+
+
+def _print_tasks(agents: dict) -> None:
+    """Print the full checklist inline. Bound to the `/tasks` slash
+    command. Reads the latest snapshot stashed by the `checklist`
+    event; no IPC round-trip needed."""
+    tasks = agents.get("root", {}).get("checklist_tasks") or []
+    if not tasks:
+        console.print("[dim]no tasks[/dim]")
+        return
+    for t in tasks:
+        glyph = _TASK_STATUS_GLYPH.get(t.get("status", ""), "·")
+        title = t.get("title", "")
+        note = t.get("note", "")
+        line = f"[dim]  {glyph} {title}[/dim]"
+        if note:
+            line += f"  [dim grey42]— {note}[/dim grey42]"
+        console.print(line)
 
 
 def _handle_model_command(
@@ -424,6 +510,12 @@ def _drive_turn(
             # Token-counter event. State already updated by
             # _update_agents_state and reflected in the footer; no
             # additional rendering needed here.
+            pass
+        elif kind == "checklist":
+            # State already updated by _update_agents_state; the footer
+            # picked up the new summary via status.update above. No
+            # inline render — checklist activity is intentionally
+            # quiet, surfaced only via the footer and `/tasks`.
             pass
         elif kind == "ready":
             # Sub-agent became ready — purely informational here, the
@@ -750,6 +842,9 @@ def main(
                 continue
             if stripped.startswith("/model"):
                 model = _handle_model_command(parent_conn, stripped, model)
+                continue
+            if stripped == "/tasks":
+                _print_tasks(agents_state)
                 continue
             try:
                 protocol.send(parent_conn, "user_prompt", prompt=prompt)

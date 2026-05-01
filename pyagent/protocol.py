@@ -62,6 +62,12 @@ agent → CLI
         accumulates these per-agent in its `agents_state` dict and
         renders the running total (and a USD cost estimate when
         the model is in the pricing table) in the status footer.
+  - checklist {tasks: list[dict]}
+        Snapshot of the agent's current task list. Emitted after
+        every add_task / update_task call. `tasks` is a list of
+        `{id, title, status, note}` dicts in insertion order. The
+        CLI uses it to render a progress segment in the status footer
+        and to print full state on `/tasks`.
   - turn_complete {final_text: str}
         The child finished a `user_prompt` (no errors). `final_text`
         is the aggregated assistant text returned by `agent.run` and

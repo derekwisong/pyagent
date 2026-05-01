@@ -88,6 +88,32 @@ thing started.
   default `True` is right for news / blogs / articles where chrome
   dwarfs the body.
 
+## Tracking multi-step work
+
+For genuine multi-step jobs — three or more distinct subtasks, or
+work that spans several tool batches — maintain a checklist with
+`add_task` / `update_task` / `list_tasks`. The user sees current
+progress in the status footer (`3/7 · "writing migration"`), so the
+list is also a status indicator, not just an internal note.
+
+- **Skip the checklist for one-shot work.** Single edit, single
+  question, quick lookup → no list. Indiscriminate use is worse
+  than none — it adds noise without any of the focus benefit.
+- **Plan up front when the shape is clear.** `add_task` for each
+  step before starting, then drive each one to `in_progress` →
+  `completed` as you go.
+- **Exactly one task `in_progress` at a time.** Move the previous
+  one to `completed` (or `cancelled`) before starting the next.
+  Two "in_progress" at once means you aren't tracking either.
+- **Mark `completed` immediately when done — don't batch.** The
+  user's footer lags otherwise, and you lose the self-monitoring
+  benefit on the next turn.
+- **`cancelled` (with a `note`) when you abandon a step.** Don't
+  silently leave it `pending`; the user reading the list later
+  should be able to tell what happened.
+- **Titles are short imperative phrases.** "write migration",
+  "run tests", "update README" — they appear in a one-line footer.
+
 ## Errors
 
 Predictable failures come back as data, not exceptions: a marker
