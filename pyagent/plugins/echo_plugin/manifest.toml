@@ -1,0 +1,15 @@
+name = "echo-plugin"
+version = "0.1.0"
+description = "Test/demo provider — echoes the most recent user message back."
+api_version = "1"
+
+# Exercises the plugin provider surface (api.register_provider). When
+# loaded, `--model echo-plugin/<anything>` resolves through the plugin
+# router instead of the built-in `pyagent/echo` stub. Useful for
+# smoke-testing the plugin → llm-router wiring without spending tokens.
+[provides]
+providers = ["echo-plugin"]
+
+# Stateless — safe in subagents.
+[load]
+in_subagents = true

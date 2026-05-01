@@ -616,6 +616,17 @@ def _bootstrap(
     is_subagent = bool(config.get("is_subagent"))
     state.self_agent_id = config["session_id"] if is_subagent else None
 
+    # Plugin loading. is_subagent is True for spawned subagents — the
+    # plugins module honors `[load] in_subagents = false` to skip
+    # plugins that aren't parallel-safe.
+    #
+    # Must run BEFORE `get_client`: plugins can register LLM providers
+    # (via `api.register_provider`) that the loader publishes to
+    # `pyagent.llms`. Loading first means `--model <plugin-provider>/foo`
+    # resolves at bootstrap; if we called get_client first the plugin
+    # providers wouldn't be visible yet.
+    loaded_plugins = plugins_mod.load(is_subagent=is_subagent)
+
     client = get_client(config["model"])
 
     # role_meta_tools defaults True so non-role spawns and root agents
@@ -627,11 +638,6 @@ def _bootstrap(
     # Leaf subagents skip the role catalog — showing roles they can't
     # spawn is misleading prose.
     catalog_for_roles = roles_mod.catalog if allow_meta else ""
-
-    # Plugin loading. is_subagent is True for spawned subagents — the
-    # plugins module honors `[load] in_subagents = false` to skip
-    # plugins that aren't parallel-safe.
-    loaded_plugins = plugins_mod.load(is_subagent=is_subagent)
 
     if is_subagent:
         session = Session(

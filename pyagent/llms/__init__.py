@@ -1,8 +1,14 @@
 """LLM provider clients and the interface they share.
 
-Adding a provider: append one entry to `PROVIDERS`. The same registry
-drives `get_client()` dispatch and env-var auto-detection — there is no
-second place to update.
+Adding a *built-in* provider: append one entry to `PROVIDERS`. The
+same registry drives `get_client()` dispatch and env-var
+auto-detection — there is no second place to update.
+
+Plugins can also contribute providers via `PluginAPI.register_provider`
+(see `pyagent.plugins`). The plugin loader publishes them here through
+`set_plugin_providers` so `get_client("<plugin-provider>/<model>")`
+resolves alongside built-ins. Plugin providers are deliberately
+excluded from `auto_detect_provider` — they're opt-in via `--model`.
 """
 
 from __future__ import annotations
@@ -98,11 +104,32 @@ PROVIDERS: list[ProviderSpec] = [
 ]
 
 
+# Plugin-registered providers. Populated by `set_plugin_providers`,
+# which the plugin loader calls at the end of `plugins.load()`. Kept as
+# module state (rather than a parameter on every call site) because
+# `get_client` / `resolve_model` are scattered through the codebase
+# and threading a registry argument through all of them would be
+# invasive for a feature only a few callers need to think about.
+_PLUGIN_PROVIDERS: dict[str, ProviderSpec] = {}
+
+
+def set_plugin_providers(specs: dict[str, ProviderSpec]) -> None:
+    """Replace the plugin-registered provider table.
+
+    Called by `pyagent.plugins.load()` after plugins finish their
+    `register()` pass. Subagent processes call this independently with
+    their own (possibly narrower) plugin set, so cross-process state
+    is naturally isolated.
+    """
+    _PLUGIN_PROVIDERS.clear()
+    _PLUGIN_PROVIDERS.update(specs)
+
+
 def _by_name(name: str) -> ProviderSpec | None:
     for p in PROVIDERS:
         if p.name == name:
             return p
-    return None
+    return _PLUGIN_PROVIDERS.get(name)
 
 
 def get_client(model: str) -> "LLMClient":
@@ -114,14 +141,18 @@ def get_client(model: str) -> "LLMClient":
         get_client("openai/gpt-4o")
         get_client("gemini/gemini-2.5-flash")
         get_client("pyagent/echo")                  # local stub, no API call
+        get_client("echo-plugin/echo")              # plugin-registered
 
     Raises:
-        ValueError: If the provider is unknown.
+        ValueError: If the provider is unknown. Built-in and
+            plugin-registered names are listed in the error message.
     """
     provider, _, name = model.partition("/")
     spec = _by_name(provider)
     if spec is None:
-        known = ", ".join(p.name for p in PROVIDERS)
+        builtins = [p.name for p in PROVIDERS]
+        plugin_names = sorted(_PLUGIN_PROVIDERS)
+        known = ", ".join(builtins + plugin_names)
         raise ValueError(f"Unknown provider {provider!r} (expected: {known})")
     kwargs = {"model": name} if name else {}
     return spec.factory(**kwargs)

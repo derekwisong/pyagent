@@ -69,6 +69,7 @@ class Manifest:
     api_version: str
     provides_tools: tuple[str, ...]
     provides_prompt_sections: tuple[str, ...]
+    provides_providers: tuple[str, ...]
     requires_python: str
     requires_env: tuple[str, ...]
     requires_binaries: tuple[str, ...]
@@ -110,6 +111,18 @@ class _RegisteredSection:
     plugin_name: str
 
 
+@dataclass(frozen=True)
+class _RegisteredProvider:
+    """One plugin-contributed LLM provider, ready to be turned into a
+    `pyagent.llms.ProviderSpec` once load() completes."""
+
+    name: str
+    factory: Callable[..., Any]
+    default_model: str
+    env_vars: tuple[str, ...]
+    plugin_name: str
+
+
 @dataclass
 class _PluginState:
     """Per-plugin registration state. Mutated only during register()."""
@@ -117,6 +130,7 @@ class _PluginState:
     manifest: Manifest
     tools: dict[str, Callable[..., Any]] = field(default_factory=dict)
     sections: list[_RegisteredSection] = field(default_factory=list)
+    providers: dict[str, _RegisteredProvider] = field(default_factory=dict)
     on_start_hooks: list[Callable] = field(default_factory=list)
     on_end_hooks: list[Callable] = field(default_factory=list)
     after_response_hooks: list[Callable] = field(default_factory=list)
@@ -184,6 +198,57 @@ class PluginAPI:
                 f"tool {name!r} during this register() call"
             )
         self._state.tools[name] = fn
+
+    def register_provider(
+        self,
+        name: str,
+        factory: Callable[..., Any],
+        *,
+        default_model: str = "",
+        env_vars: tuple[str, ...] = (),
+    ) -> None:
+        """Register an LLM provider exposed as `<name>/<model>` for `--model`.
+
+        `factory` matches the built-in `pyagent.llms.ProviderSpec.factory`
+        signature: takes an optional `model=` kwarg, returns an object
+        implementing the `LLMClient` protocol. Heavy SDK imports
+        belong inside the factory so unused providers don't pay the
+        import cost.
+
+        `default_model` is the concrete model string the factory
+        receives when the user passes just `<name>` with no `/<model>`
+        suffix. `env_vars` is informational at this level — plugins
+        should still gate their own loading on env presence via the
+        manifest's `[requires] env`.
+
+        Conflicts with built-in providers raise immediately so the
+        problem surfaces at plugin load time rather than at the next
+        `--model` invocation.
+        """
+        self._check_open("register_provider")
+        if name in self._state.providers:
+            raise ValueError(
+                f"plugin {self._state.manifest.name!r} already registered "
+                f"provider {name!r} during this register() call"
+            )
+        # Deferred import: pyagent.llms imports nothing from plugins,
+        # but plugins shouldn't pull in llms at module-import time —
+        # this keeps the dependency one-way and load-order tolerant.
+        from pyagent import llms as _llms
+
+        for core in _llms.PROVIDERS:
+            if core.name == name:
+                raise ValueError(
+                    f"plugin {self._state.manifest.name!r}: provider "
+                    f"name {name!r} conflicts with built-in provider"
+                )
+        self._state.providers[name] = _RegisteredProvider(
+            name=name,
+            factory=factory,
+            default_model=default_model,
+            env_vars=tuple(env_vars),
+            plugin_name=self._state.manifest.name,
+        )
 
     def register_prompt_section(
         self,
@@ -307,6 +372,9 @@ def _parse_manifest(manifest_path: Path) -> Manifest | None:
         ),
         provides_prompt_sections=tuple(
             str(s) for s in (provides.get("prompt_sections") or [])
+        ),
+        provides_providers=tuple(
+            str(p) for p in (provides.get("providers") or [])
         ),
         requires_python=str(requires.get("python") or ""),
         requires_env=tuple(
@@ -599,12 +667,16 @@ def _validate_provides(state: _PluginState) -> str | None:
     actual_tools = set(state.tools)
     declared_sections = set(state.manifest.provides_prompt_sections)
     actual_sections = {s.name for s in state.sections}
+    declared_providers = set(state.manifest.provides_providers)
+    actual_providers = set(state.providers)
 
     problems: list[str] = []
     missing_tools = declared_tools - actual_tools
     extra_tools = actual_tools - declared_tools
     missing_sections = declared_sections - actual_sections
     extra_sections = actual_sections - declared_sections
+    missing_providers = declared_providers - actual_providers
+    extra_providers = actual_providers - declared_providers
     if missing_tools:
         problems.append(
             f"tools declared but not registered: {sorted(missing_tools)}"
@@ -622,6 +694,16 @@ def _validate_provides(state: _PluginState) -> str | None:
         problems.append(
             f"prompt_sections registered but not declared: "
             f"{sorted(extra_sections)}"
+        )
+    if missing_providers:
+        problems.append(
+            f"providers declared but not registered: "
+            f"{sorted(missing_providers)}"
+        )
+    if extra_providers:
+        problems.append(
+            f"providers registered but not declared: "
+            f"{sorted(extra_providers)}"
         )
     return "; ".join(problems) if problems else None
 
@@ -646,6 +728,9 @@ class LoadedPlugins:
     # exposed mutably; consumers use tools() / sections().
     _resolved_tools: dict[str, tuple[str, Callable]] = field(default_factory=dict)
     _resolved_sections: list[_RegisteredSection] = field(default_factory=list)
+    _resolved_providers: dict[str, _RegisteredProvider] = field(
+        default_factory=dict
+    )
 
     def tools(self) -> Mapping[str, tuple[str, Callable]]:
         """Effective tool name → (plugin_name, fn) after conflict
@@ -659,13 +744,19 @@ class LoadedPlugins:
         Returns an immutable tuple."""
         return tuple(self._resolved_sections)
 
+    def providers(self) -> Mapping[str, _RegisteredProvider]:
+        """Effective provider name → registration record after conflict
+        resolution. First plugin to register wins."""
+        return MappingProxyType(self._resolved_providers)
+
     def _resolve_conflicts(self) -> None:
         """Walk plugin states in load order; first registration wins
-        for tools and prompt sections. Later duplicates emit a warn
-        log and are excluded from the effective registries.
+        for tools, prompt sections, and providers. Later duplicates
+        emit a warn log and are excluded from the effective registries.
         """
         seen_tools: set[str] = set()
         seen_sections: set[str] = set()
+        seen_providers: set[str] = set()
         for state in self.states:
             for tool_name, fn in state.tools.items():
                 if tool_name in seen_tools:
@@ -692,6 +783,17 @@ class LoadedPlugins:
                     continue
                 seen_sections.add(section.name)
                 self._resolved_sections.append(section)
+            for prov_name, prov in state.providers.items():
+                if prov_name in seen_providers:
+                    logger.warning(
+                        "provider %r already registered by an earlier "
+                        "plugin; %s's registration skipped",
+                        prov_name,
+                        state.manifest.name,
+                    )
+                    continue
+                seen_providers.add(prov_name)
+                self._resolved_providers[prov_name] = prov
 
     def call_on_session_start(
         self,
@@ -836,6 +938,25 @@ def load(*, is_subagent: bool = False) -> LoadedPlugins:
             loaded.shadowed[record.manifest.name] = record.shadowed_by
 
     loaded._resolve_conflicts()
+
+    # Publish plugin-registered providers to the LLM router so
+    # `get_client("<plugin-provider>/<model>")` resolves them. The
+    # router is the source of truth at call sites; the loader is the
+    # only writer. Subagents call `load()` independently, so each
+    # process ends up with its own narrowed view of plugin providers.
+    from pyagent import llms as _llms
+
+    _llms.set_plugin_providers(
+        {
+            name: _llms.ProviderSpec(
+                name=name,
+                env_vars=tuple(p.env_vars),
+                default_model=p.default_model,
+                factory=p.factory,
+            )
+            for name, p in loaded._resolved_providers.items()
+        }
+    )
     return loaded
 
 
