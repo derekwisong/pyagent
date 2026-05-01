@@ -76,24 +76,30 @@ def _write_plugin(
 
 
 def _isolated_config_dir() -> tuple[Path, callable]:
-    """Point pyagent.paths.config_dir() at a temp dir for the test.
+    """Point pyagent.paths.config_dir() and paths.data_dir() at a temp
+    dir for the test.
 
     Pre-seeds the temp config.toml with `built_in_plugins_enabled = []`
     so the bundled memory-markdown plugin doesn't appear in test
     fixtures by default. Tests that want bundled plugins enabled can
     overwrite the config file.
 
-    Returns the dir and a restore function.
+    Returns the dir and a restore function. (One temp dir backs both
+    config and data — tests don't care about the split, and a shared
+    fixture keeps cleanup trivial.)
     """
     tmp_cfg = Path(tempfile.mkdtemp(prefix="pyagent-plugin-cfg-"))
     (tmp_cfg / "config.toml").write_text(
         "built_in_plugins_enabled = []\n"
     )
-    original = paths.config_dir
+    original_config = paths.config_dir
+    original_data = paths.data_dir
     paths.config_dir = lambda: tmp_cfg  # type: ignore[assignment]
+    paths.data_dir = lambda: tmp_cfg  # type: ignore[assignment]
 
     def restore() -> None:
-        paths.config_dir = original  # type: ignore[assignment]
+        paths.config_dir = original_config  # type: ignore[assignment]
+        paths.data_dir = original_data  # type: ignore[assignment]
         shutil.rmtree(tmp_cfg, ignore_errors=True)
 
     return tmp_cfg, restore

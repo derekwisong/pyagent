@@ -157,7 +157,7 @@ total.**
 | --- | --- |
 | `api.config_dir` | `<config-dir>` (Path) |
 | `api.workspace` | cwd at agent startup |
-| `api.user_data_dir` | `<config-dir>/plugins/<name>/`, lazy-created |
+| `api.user_data_dir` | `<data-dir>/plugins/<name>/`, lazy-created |
 | `api.plugin_config` | this plugin's `[plugins.<name>]` table |
 | `api.plugin_name` | this plugin's name |
 

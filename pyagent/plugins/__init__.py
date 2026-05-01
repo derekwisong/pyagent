@@ -149,7 +149,7 @@ class PluginAPI:
 
     @property
     def user_data_dir(self) -> Path:
-        d = paths.config_dir() / "plugins" / self._state.manifest.name
+        d = paths.data_dir() / "plugins" / self._state.manifest.name
         d.mkdir(parents=True, exist_ok=True)
         return d
 
