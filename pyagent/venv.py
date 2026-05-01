@@ -90,24 +90,15 @@ def discover(workspace: Path) -> Path | None:
     return None
 
 
-def ensure(workspace: Path) -> tuple[Path, bool]:
-    """Discover an existing venv or create `<workspace>/.venv`.
+def _create(target: Path) -> Path:
+    """Create a venv at exactly `target` using `sys.executable`.
 
-    Returns `(venv_path, created)` where `created` is True iff a new
-    venv was just created (so the caller can surface a one-line
-    notice). The new venv uses `sys.executable`, matching the
-    interpreter the CLI is running under.
-
-    Raises `RuntimeError` if creation fails — caller decides how to
-    surface (likely as a tool-result error marker).
+    Internal helper. Raises `RuntimeError` on failure; the caller
+    decides how to surface that (likely as a tool-result marker).
+    Returns the resolved path on success.
     """
-    existing = discover(workspace)
-    if existing is not None:
-        return existing, False
-
-    target = workspace / ".venv"
     logger.info(
-        "creating workspace venv at %s using %s", target, sys.executable
+        "creating venv at %s using %s", target, sys.executable
     )
     try:
         # `--without-pip` would be faster but then we have to
@@ -134,7 +125,46 @@ def ensure(workspace: Path) -> tuple[Path, bool]:
             f"venv creation reported success but {target} doesn't "
             f"look like a venv afterward"
         )
-    return target.resolve(), True
+    return target.resolve()
+
+
+def ensure(workspace: Path) -> tuple[Path, bool]:
+    """Discover an existing venv or create `<workspace>/.venv`.
+
+    Returns `(venv_path, created)` where `created` is True iff a new
+    venv was just created (so the caller can surface a one-line
+    notice). The new venv uses `sys.executable`, matching the
+    interpreter the CLI is running under.
+
+    Raises `RuntimeError` if creation fails — caller decides how to
+    surface (likely as a tool-result error marker).
+    """
+    existing = discover(workspace)
+    if existing is not None:
+        return existing, False
+    return _create(workspace / ".venv"), True
+
+
+def ensure_at(target: Path) -> tuple[Path, bool]:
+    """Return an existing venv at `target`, or create one there.
+
+    Used when the caller wants to address a specific venv (not the
+    default workspace `.venv/`) — e.g. an explicit `pip_install`
+    invocation that names a separate `.venv-test/` to keep test
+    deps out of the main runtime env. Mirrors `ensure` but skips
+    the workspace-wide discovery — the caller has named the venv.
+
+    Returns `(venv_path, created)`. Raises `RuntimeError` on
+    creation failure.
+    """
+    if is_venv(target):
+        return target.resolve(), False
+    if target.exists() and not target.is_dir():
+        raise RuntimeError(
+            f"{target} exists and is not a directory; refuse to "
+            f"create a venv on top of it"
+        )
+    return _create(target), True
 
 
 def describe(workspace: Path) -> str:

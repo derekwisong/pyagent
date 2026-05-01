@@ -1339,21 +1339,28 @@ def make_pip_install(workspace: Path):
     """
     from pyagent import venv as venv_mod
 
-    def pip_install(spec: str) -> str:
-        """Install a pip package into the workspace's `.venv/`.
+    def pip_install(spec: str, venv: str = "") -> str:
+        """Install a pip package into the workspace venv.
 
-        On first call, auto-creates `<workspace>/.venv/` using the
-        same Python interpreter the agent is running under. The same
-        venv is shared across this agent and any subagents that
-        spawn — they all install into and execute against the
-        workspace venv (or, more precisely: subagents `ask_parent`
-        and the root does the install on their behalf).
+        On first call against a venv path, auto-creates that venv
+        using the same Python interpreter the agent is running
+        under. The default workspace `.venv/` is shared across
+        this agent and any subagents (subagents `ask_parent` and
+        the root does the install on their behalf, so concurrent
+        installs serialize naturally).
 
         Args:
             spec: A pip-style package spec — `requests`,
                 `requests==2.31.0`, `git+https://...`, or even a
                 requirements file path. Whatever you'd pass to
                 `pip install`.
+            venv: Optional override for the target venv. Empty
+                (the default) installs into the workspace's
+                auto-discovered or auto-created `.venv/`. A
+                relative path is resolved against the workspace
+                (e.g. `".venv-test"` to keep test deps separate
+                from the main runtime venv); an absolute path is
+                used as-is. The venv is auto-created if missing.
 
         Returns:
             On success: a short summary including which venv was
@@ -1364,8 +1371,15 @@ def make_pip_install(workspace: Path):
         if not spec:
             return "<refused: empty package spec>"
 
+        venv_arg = (venv or "").strip()
         try:
-            venv_path, created = venv_mod.ensure(workspace)
+            if venv_arg:
+                target = Path(venv_arg)
+                if not target.is_absolute():
+                    target = workspace / target
+                venv_path, created = venv_mod.ensure_at(target)
+            else:
+                venv_path, created = venv_mod.ensure(workspace)
         except RuntimeError as e:
             return f"<venv setup failed: {e}>"
 

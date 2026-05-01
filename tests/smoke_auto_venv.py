@@ -153,6 +153,36 @@ def main() -> None:
                 assert ".venv" in proc.stdout, proc.stdout
                 print(f"✓ six landed inside the venv: {proc.stdout.strip()}")
 
+        # 6b. pip_install honors the optional `venv` argument:
+        # relative path resolved against workspace, absolute path
+        # used as-is, both auto-created when missing.
+        if "--offline" in sys.argv or not _network_ok():
+            print("⊘ pip_install custom-venv test skipped (offline)")
+        else:
+            with tempfile.TemporaryDirectory() as tmp:
+                ws = Path(tmp)
+                tool = agent_tools.make_pip_install(ws)
+
+                # Relative path: lands inside workspace
+                result = tool("six", venv=".venv-test")
+                assert "installed" in result.lower(), result
+                rel_target = (ws / ".venv-test").resolve()
+                assert str(rel_target) in result, result
+                assert venv_mod.is_venv(rel_target), rel_target
+                assert not (ws / ".venv").exists(), (
+                    "default .venv should NOT have been created when "
+                    "an explicit venv arg was given"
+                )
+                print(f"✓ pip_install(venv='.venv-test') → {rel_target.name}/")
+
+                # Absolute path: explicit, outside the workspace
+                with tempfile.TemporaryDirectory() as tmp2:
+                    abs_target = Path(tmp2) / "tools-venv"
+                    result = tool("six", venv=str(abs_target))
+                    assert "installed" in result.lower(), result
+                    assert venv_mod.is_venv(abs_target), abs_target
+                    print(f"✓ pip_install(venv=<abs>) → {abs_target}")
+
         # 7a. empty spec rejected
         with tempfile.TemporaryDirectory() as tmp:
             ws = Path(tmp)

@@ -38,6 +38,12 @@ rest is on you.
 - The footer's `venv:` line tells you which venv is active. After
   any `pip_install`, you can `execute` `<venv>/bin/python -m ...`
   or `<venv>/bin/<tool>` to run installed code.
+- **Want a sidecar venv?** `pip_install(spec, venv=".venv-test")`
+  installs into a separate venv (auto-created on first call)
+  without touching the main one. Useful for test deps, tool
+  installs, or trying a package without committing it to the
+  primary runtime env. Relative paths resolve against the
+  workspace; absolute paths are honored as-is.
 - **One-shot CLI tools** (formatters, linters): `pipx` or `uv tool
   run` are still fine for things you don't want bundled into the
   workspace venv.
