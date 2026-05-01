@@ -12,5 +12,4 @@ definition_node_types = []
 [captures]
 "definition.class_selector" = "class_selector"
 "definition.id_selector" = "id_selector"
-"definition.tag_selector" = "tag_selector"
 "definition.at_rule" = "at_rule"
