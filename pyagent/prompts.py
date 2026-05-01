@@ -160,6 +160,11 @@ class SystemPromptBuilder:
         shell_path = os.environ.get("SHELL") or os.environ.get("COMSPEC") or ""
         shell = Path(shell_path).name if shell_path else "unknown"
         os_label = f"{platform.system()} {platform.release()}".strip() or "unknown"
+        # Re-discovered each turn so a venv created mid-session shows up
+        # without restart. Lazy import dodges the prompts → venv → ...
+        # cycle and keeps the import surface narrow.
+        from pyagent import venv as venv_mod
+        venv_line = venv_mod.describe(Path(os.getcwd()))
         return (
             "## Environment\n"
             f"- cwd: {os.getcwd()}\n"
@@ -167,6 +172,7 @@ class SystemPromptBuilder:
             f"- os: {os_label}\n"
             f"- shell: {shell}\n"
             f"- python: {platform.python_version()}\n"
+            f"- venv: {venv_line}\n"
             "\n"
             "## Where your persona lives\n"
             "Your SOUL, TOOLS, and PRIMER are loaded from the paths "

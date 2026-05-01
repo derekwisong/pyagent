@@ -1312,3 +1312,113 @@ def fetch_url(
     )
     preview = "\n".join(header_lines) + "\n\n" + md_inline
     return Attachment(content=body, preview=preview, suffix=suffix)
+
+
+# Workspace pip install -------------------------------------------
+#
+# Routes installs through the workspace's `.venv/`, auto-creating it
+# on first call. Registered ONLY on the root agent — subagents that
+# want to install ask their parent via `ask_parent("install ...")`,
+# which the root's LLM then translates into a `pip_install` call.
+# This is the "parent-as-broker" pattern that #46 enables on top of
+# #47, replacing the flock-serialization approach the issue
+# originally proposed.
+
+# Hard timeout for a single pip install. Long enough for fastembed-
+# class downloads on a slow connection; short enough that a hung
+# install can't wedge the agent forever.
+_PIP_INSTALL_TIMEOUT_S = 600
+
+
+def make_pip_install(workspace: Path):
+    """Build the `pip_install` tool, closing over the workspace path.
+
+    The factory is the seam that lets `_register_tools` decide
+    whether to expose this on the root agent vs. wire it through
+    `ask_parent` for subagents — see `agent_proc._register_tools`.
+    """
+    from pyagent import venv as venv_mod
+
+    def pip_install(spec: str) -> str:
+        """Install a pip package into the workspace's `.venv/`.
+
+        On first call, auto-creates `<workspace>/.venv/` using the
+        same Python interpreter the agent is running under. The same
+        venv is shared across this agent and any subagents that
+        spawn — they all install into and execute against the
+        workspace venv (or, more precisely: subagents `ask_parent`
+        and the root does the install on their behalf).
+
+        Args:
+            spec: A pip-style package spec — `requests`,
+                `requests==2.31.0`, `git+https://...`, or even a
+                requirements file path. Whatever you'd pass to
+                `pip install`.
+
+        Returns:
+            On success: a short summary including which venv was
+            used and what pip reported. On failure: a `<...>`
+            error marker with pip's stderr trimmed.
+        """
+        spec = (spec or "").strip()
+        if not spec:
+            return "<refused: empty package spec>"
+
+        try:
+            venv_path, created = venv_mod.ensure(workspace)
+        except RuntimeError as e:
+            return f"<venv setup failed: {e}>"
+
+        notice = ""
+        if created:
+            notice = f"created venv at {venv_path}\n"
+
+        pip_bin = venv_mod.pip_path(venv_path)
+        if not pip_bin.exists():
+            return (
+                f"<venv at {venv_path} has no pip executable at "
+                f"{pip_bin}; venv may be corrupt — delete and retry>"
+            )
+
+        # `--quiet` keeps the success path's output bounded; on
+        # failure pip still emits the error. `--disable-pip-version-check`
+        # silences a chatty notice that wastes context.
+        cmd = [
+            str(pip_bin),
+            "install",
+            "--quiet",
+            "--disable-pip-version-check",
+            spec,
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=_PIP_INSTALL_TIMEOUT_S,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return (
+                f"<pip install {spec!r} timed out after "
+                f"{_PIP_INSTALL_TIMEOUT_S}s>"
+            )
+        except FileNotFoundError as e:
+            return f"<pip install failed: {e}>"
+
+        if proc.returncode == 0:
+            return (
+                f"{notice}installed {spec} into {venv_path}"
+                + (f"\n{proc.stdout.strip()}" if proc.stdout.strip() else "")
+            )
+        # Failure — surface stderr, capped so a verbose pip error
+        # doesn't blow the conversation.
+        err = (proc.stderr or proc.stdout or "").strip()
+        if len(err) > 2000:
+            err = err[:2000] + "\n…[truncated]"
+        return (
+            f"<pip install {spec!r} failed (rc={proc.returncode}):\n"
+            f"{err}>"
+        )
+
+    return pip_install

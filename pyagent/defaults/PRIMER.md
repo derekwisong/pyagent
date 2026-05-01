@@ -23,12 +23,24 @@ rest is on you.
 
 ## Python environments
 
-- **`pip install` belongs in a project-local venv** — not the system
-  interpreter, pyenv interpreters, or `--user`. `--break-system-packages`
-  is not an answer.
-- Use `$VIRTUAL_ENV` if set, else `.venv/` or `venv/` in the workspace;
-  create `.venv/` if needed.
-- One-shot CLI tools (formatters, linters): `pipx` or `uv tool run`.
+- **Use `pip_install` for any pip install.** It routes the install
+  through the workspace's `.venv/`, auto-creating it on first call.
+  Don't reach for raw `pip` via `execute` — the shell guard refuses
+  most pollution patterns anyway, and `pip_install` is the
+  positive answer (the env footer's `venv:` line shows where it
+  lands).
+- **Subagents don't have `pip_install`.** Ask the parent:
+  `ask_parent("install requests==2.31.0")`. The parent runs the
+  install in the shared workspace venv and replies; your blocked
+  call returns when it's done. This avoids concurrent installs
+  racing on the same venv — every install funnels through the
+  root agent's single-threaded turn loop.
+- The footer's `venv:` line tells you which venv is active. After
+  any `pip_install`, you can `execute` `<venv>/bin/python -m ...`
+  or `<venv>/bin/<tool>` to run installed code.
+- **One-shot CLI tools** (formatters, linters): `pipx` or `uv tool
+  run` are still fine for things you don't want bundled into the
+  workspace venv.
 
 ## Don't invent
 
