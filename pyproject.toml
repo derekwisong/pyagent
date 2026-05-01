@@ -18,6 +18,8 @@ dependencies = [
     "platformdirs>=4",
     "requests>=2.31",
     "rich>=13",
+    "tree-sitter>=0.25",
+    "tree-sitter-language-pack>=0.10",
 ]
 
 [project.scripts]
@@ -45,6 +47,8 @@ pyagent = [
     "plugins/**/*.md",
     "plugins/**/*.toml",
     "plugins/**/*.json",
+    "plugins/**/*.scm",
+    "plugins/**/EXTENDING.md",
     # Bench scenarios.
     "bench/scenarios/*.toml",
     # Bundled role library — one .md per role, parsed at runtime.
