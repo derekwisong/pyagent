@@ -415,6 +415,7 @@ def _register_tools(
     _add("edit_file", agent_tools.edit_file)
     _add("list_directory", agent_tools.list_directory)
     _add("grep", agent_tools.grep)
+    _add("glob", agent_tools.glob, auto_offload=False)
     _add("execute", agent_tools.execute)
     _add("fetch_url", agent_tools.fetch_url)
     # read_ledger / write_ledger are now provided by the bundled
