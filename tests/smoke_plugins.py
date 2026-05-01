@@ -721,6 +721,75 @@ def test_memory_per_file_round_trip() -> None:
         restore()
 
 
+def test_memory_vector_recall() -> None:
+    """End-to-end: plant memories in memory-markdown's data dir,
+    enable both bundled plugins, and confirm recall_memory finds
+    the semantically-matching file. Skipped if fastembed isn't
+    installed."""
+    try:
+        import fastembed  # noqa: F401
+    except ImportError:
+        print("⊘ fastembed not installed; skipping memory-vector test")
+        return
+
+    cfg, restore = _isolated_config_dir()
+    try:
+        (cfg / "config.toml").write_text(
+            'built_in_plugins_enabled = '
+            '["memory-markdown", "memory-vector"]\n'
+        )
+        # Plant memories directly on disk under memory-markdown's
+        # storage (paths.data_dir() is monkeypatched to cfg).
+        mm_storage = cfg / "plugins" / "memory-markdown"
+        memories_dir = mm_storage / "memories"
+        memories_dir.mkdir(parents=True, exist_ok=True)
+        (mm_storage / "MEMORY.md").write_text(
+            "# Memory\n\n## Stack\n"
+            "- [Stack choices](stack.md) — what database we picked\n"
+            "## Style\n"
+            "- [Naming](naming.md) — variable and class casing\n"
+        )
+        (memories_dir / "stack.md").write_text(
+            "# Stack\n\nWe use Postgres for primary storage. "
+            "Redis for caches.\n"
+        )
+        (memories_dir / "naming.md").write_text(
+            "# Naming\n\nVariables: snake_case. Classes: PascalCase. "
+            "Constants: UPPER_SNAKE.\n"
+        )
+
+        loaded = plugins_mod.load(is_subagent=False)
+        names = [s.manifest.name for s in loaded.states]
+        assert "memory-vector" in names, (
+            f"expected memory-vector to load: states={names}"
+        )
+        assert "recall_memory" in loaded.tools()
+
+        _, recall = loaded.tools()["recall_memory"]
+
+        # A database-flavored query should rank stack.md above naming.md.
+        result = recall(query="what database do we use", k=2)
+        assert "stack.md" in result, result
+        # The first hit (top of ranked output) should be stack.md.
+        first_hit_line = next(
+            ln for ln in result.splitlines() if "memories/" in ln
+        )
+        assert "stack.md" in first_hit_line, first_hit_line
+
+        # An empty query returns a clear error.
+        empty = recall(query="")
+        assert empty.startswith("<"), empty
+
+        # Subagent mode skips it.
+        sub_loaded = plugins_mod.load(is_subagent=True)
+        sub_names = [s.manifest.name for s in sub_loaded.states]
+        assert "memory-vector" not in sub_names
+
+        print("✓ memory-vector recall: semantic ranking works end-to-end")
+    finally:
+        restore()
+
+
 def test_graceful_degradation_when_memory_disabled() -> None:
     """With built_in_plugins_enabled=[], the agent has no ledger
     tools and no ledger prose, but its declared_tool_provenance
@@ -772,6 +841,7 @@ def main() -> None:
     test_builtin_tool_takes_precedence_in_agent()
     test_bundled_memory_markdown_loads()
     test_memory_per_file_round_trip()
+    test_memory_vector_recall()
     test_graceful_degradation_when_memory_disabled()
     print("\nALL CHECKS PASSED")
 

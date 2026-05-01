@@ -22,6 +22,13 @@ dependencies = [
     "tree-sitter-language-pack>=0.10",
 ]
 
+[project.optional-dependencies]
+# Enables the bundled `memory-vector` plugin. fastembed pulls in
+# onnxruntime + tokenizers (~150MB on disk) plus a one-time ~130MB
+# embedding-model download on first use. Skip if you don't need
+# semantic memory recall.
+vector = ["fastembed>=0.4"]
+
 [project.scripts]
 pyagent = "pyagent.cli:main"
 pyagent-config = "pyagent.config_cli:main"
