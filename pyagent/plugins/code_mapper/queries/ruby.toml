@@ -1,0 +1,21 @@
+# code-mapper language config — Ruby.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "ruby"
+description = "Ruby source files."
+extensions = [".rb"]
+
+definition_node_types = [
+    "class",
+    "singleton_class",
+    "module",
+    "method",
+    "singleton_method",
+]
+
+[captures]
+"definition.class" = "class"
+"definition.module" = "module"
+"definition.method" = "method"

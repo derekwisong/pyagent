@@ -1,0 +1,16 @@
+# code-mapper language config — Bash.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "bash"
+description = "Bash / shell scripts."
+extensions = [".sh", ".bash"]
+
+definition_node_types = [
+    "function_definition",
+]
+
+[captures]
+"definition.function" = "function"
+"definition.variable" = "variable"

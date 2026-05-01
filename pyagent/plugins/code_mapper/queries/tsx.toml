@@ -1,0 +1,27 @@
+# code-mapper language config — TSX (TypeScript + JSX).
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "tsx"
+description = "TypeScript JSX (React) source files."
+extensions = [".tsx"]
+
+definition_node_types = [
+    "class_declaration",
+    "abstract_class_declaration",
+    "interface_declaration",
+    "enum_declaration",
+    "module",
+    "function_declaration",
+    "method_definition",
+]
+
+[captures]
+"definition.class" = "class"
+"definition.interface" = "interface"
+"definition.enum" = "enum"
+"definition.module" = "module"
+"definition.type" = "type"
+"definition.function" = "function"
+"definition.method" = "method"
