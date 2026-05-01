@@ -686,6 +686,10 @@ def main(
     proc.start()
 
     interrupted = False
+    # Hoisted so the exit summary can read totals even if we bail
+    # before the main loop populates this (e.g. during the ready
+    # handshake).
+    agents_state: dict[str, dict[str, str]] = {}
     try:
         # Parent doesn't need the child's end of the pipe; closing it
         # lets the parent's recv() see EOF promptly when the child dies.
@@ -733,9 +737,7 @@ def main(
         # Per-agent state shared across turns. Root starts here;
         # subagents are added/removed as info events flow through
         # _update_agents_state.
-        agents_state: dict[str, dict[str, str]] = {
-            "root": {"status": "thinking"},
-        }
+        agents_state["root"] = {"status": "thinking"}
 
         while True:
             try:
@@ -810,6 +812,12 @@ def main(
 
     if session.exists():
         console.print(f"[dim]to resume: pyagent --resume {session.id}[/dim]")
+        in_tot, out_tot, cw_tot, cr_tot = _agents_tokens(agents_state)
+        usage_suffix = _format_usage_suffix(
+            in_tot, out_tot, model, cw_tot, cr_tot
+        )
+        if usage_suffix:
+            console.print(f"[dim]usage:{usage_suffix}[/dim]")
 
 
 if __name__ == "__main__":
