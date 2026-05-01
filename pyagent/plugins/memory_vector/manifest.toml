@@ -9,13 +9,13 @@ prompt_sections = ["memory-vector-guidance"]
 
 # Single tool. Loosely coupled to memory-markdown — reads from its
 # data dir at runtime; doesn't import its code. If memory-markdown
-# isn't installed/enabled, recall_memory just returns "no memories
-# indexed yet".
+# isn't enabled, recall_memory just returns "no memories indexed
+# yet".
 #
-# Optional runtime dependency: fastembed (see pyproject
-# [project.optional-dependencies] vector). If fastembed is missing
-# the plugin logs a warning and skips registration; the agent
-# continues without semantic recall.
+# Runtime dependency: fastembed (declared as a hard dep in
+# pyproject.toml). The plugin still guards the import defensively
+# so a broken environment fails clearly instead of crashing the
+# agent loop.
 
 [load]
 in_subagents = false

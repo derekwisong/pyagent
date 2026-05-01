@@ -11,6 +11,11 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "click>=8.1",
     "docstring_parser>=0.16",
+    # Powers the bundled memory-vector plugin's recall_memory tool.
+    # Pulls in onnxruntime + tokenizers (~150MB on disk) plus a
+    # one-time ~130MB embedding-model download on first non-empty
+    # recall.
+    "fastembed>=0.4",
     "google-genai>=0.8",
     "markdownify>=0.11",
     "openai>=1.50",
@@ -21,13 +26,6 @@ dependencies = [
     "tree-sitter>=0.25",
     "tree-sitter-language-pack>=0.10",
 ]
-
-[project.optional-dependencies]
-# Enables the bundled `memory-vector` plugin. fastembed pulls in
-# onnxruntime + tokenizers (~150MB on disk) plus a one-time ~130MB
-# embedding-model download on first use. Skip if you don't need
-# semantic memory recall.
-vector = ["fastembed>=0.4"]
 
 [project.scripts]
 pyagent = "pyagent.cli:main"

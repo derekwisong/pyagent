@@ -51,15 +51,14 @@ def register(api):
         import fastembed  # noqa: F401
         import numpy as np  # noqa: F401
     except ImportError as exc:
+        # fastembed is a hard dep in pyproject.toml — if it's missing
+        # the install is broken. Log clearly and skip registration so
+        # the loader fails the plugin loud rather than crashing.
         api.log(
             "warning",
-            f"memory-vector: missing dependency ({exc.name}); "
-            "install with `pip install 'pyagent[vector]'`. "
-            "Plugin disabled.",
+            f"memory-vector: required dependency missing ({exc.name}); "
+            "reinstall pyagent. Plugin disabled.",
         )
-        # register() returns without registering recall_memory; the
-        # plugin loader sees the [provides] mismatch and skips the
-        # plugin loud.
         return
 
     storage = api.user_data_dir
