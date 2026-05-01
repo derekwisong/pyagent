@@ -27,6 +27,7 @@ class EchoClient:
 
     def __init__(self, model: str = "echo") -> None:
         self.model = model
+        self.provider_model = f"pyagent/{model}"
 
     def respond(
         self,
@@ -46,7 +47,13 @@ class EchoClient:
         return {
             "text": text,
             "tool_calls": [],
-            "usage": {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0},
+            "usage": {
+                "input": 0,
+                "output": 0,
+                "cache_creation": 0,
+                "cache_read": 0,
+                "model": self.provider_model,
+            },
         }
 
 
@@ -85,6 +92,7 @@ class LoremClient:
 
     def __init__(self, model: str = "loremipsum") -> None:
         self.model = model
+        self.provider_model = f"pyagent/{model}"
 
     def respond(
         self,
@@ -102,5 +110,11 @@ class LoremClient:
         return {
             "text": "\n\n".join(paragraphs),
             "tool_calls": [],
-            "usage": {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0},
+            "usage": {
+                "input": 0,
+                "output": 0,
+                "cache_creation": 0,
+                "cache_read": 0,
+                "model": self.provider_model,
+            },
         }

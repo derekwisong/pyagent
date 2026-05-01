@@ -77,6 +77,20 @@ def read_file(
         failures (missing path, permission denied, etc.) come back as a
         leading `<...>` marker string.
     """
+    # Models occasionally emit numeric tool args as strings ("50" instead
+    # of 50) even when the JSON schema declares int. Coerce defensively
+    # so the tool returns an actionable error instead of crashing the
+    # turn — surfaced live during the pyagent_self_audit bench run.
+    try:
+        start = int(start)
+    except (TypeError, ValueError):
+        return f"<error: start must be an integer, got {start!r}>"
+    if end is not None:
+        try:
+            end = int(end)
+        except (TypeError, ValueError):
+            return f"<error: end must be an integer or null, got {end!r}>"
+
     p = Path(path)
     if not permissions.require_access(p):
         return _denied(path)

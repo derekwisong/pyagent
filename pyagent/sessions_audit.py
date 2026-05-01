@@ -155,6 +155,15 @@ def audit_session(
     last_assistant_idx = 0
     pre_15_turns = 0
     totals = {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0}
+    # Per-turn cost runs through the turn's RECORDED model (added to
+    # usage by the LLM clients in the bench-followups PR), falling back
+    # to the function arg for older sessions. Aggregating per-turn
+    # costs (vs. multiplying summed tokens by one model's rates) is the
+    # only way to stay correct across a session that spanned multiple
+    # models — e.g. the user switched via /model partway through.
+    per_turn_costs_sum = 0.0
+    any_cost_priced = False
+    recorded_models: list[str] = []
 
     for entry in entries:
         if not isinstance(entry, dict):
@@ -173,14 +182,21 @@ def audit_session(
             output_t = int(usage.get("output", 0) or 0)
             cache_w = int(usage.get("cache_creation", 0) or 0)
             cache_r = int(usage.get("cache_read", 0) or 0)
+            recorded = usage.get("model")
+            turn_model = recorded or model
+            if recorded:
+                recorded_models.append(recorded)
             totals["input"] += input_t
             totals["output"] += output_t
             totals["cache_creation"] += cache_w
             totals["cache_read"] += cache_r
             last_assistant_idx += 1
             cost = pricing.estimate_cost_usd(
-                model, input_t, output_t, cache_w, cache_r
+                turn_model, input_t, output_t, cache_w, cache_r
             )
+            if cost is not None:
+                per_turn_costs_sum += cost
+                any_cost_priced = True
             per_turn.append(
                 TurnRow(
                     turn_idx=last_assistant_idx,
@@ -250,17 +266,29 @@ def audit_session(
             if ref_count == 0:
                 orphans.append(f.name)
 
-    total_cost_usd = pricing.estimate_cost_usd(
-        model,
-        totals["input"],
-        totals["output"],
-        totals["cache_creation"],
-        totals["cache_read"],
-    )
+    # Aggregate cost = sum of per-turn costs (correct across mixed
+    # models). Falls back to summing-then-pricing only when no turn
+    # had a priceable model.
+    if any_cost_priced:
+        total_cost_usd: float | None = per_turn_costs_sum
+    else:
+        total_cost_usd = pricing.estimate_cost_usd(
+            model,
+            totals["input"],
+            totals["output"],
+            totals["cache_creation"],
+            totals["cache_read"],
+        )
+
+    # Header model: prefer the most recent turn's recorded model (the
+    # session's "current" identity) so a session whose only
+    # caller-supplied model was a fallback still surfaces what actually
+    # ran. Drop back to the function arg if no turn recorded one.
+    header_model = recorded_models[-1] if recorded_models else model
 
     return AuditReport(
         session_id=session_id,
-        model=model,
+        model=header_model,
         turn_count=last_assistant_idx,
         total_tokens=totals,
         total_cost_usd=total_cost_usd,

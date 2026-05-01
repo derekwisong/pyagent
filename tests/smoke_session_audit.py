@@ -302,6 +302,87 @@ def _check_lower_bound_warning_is_specific() -> None:
         print("✓ lower-bound warning names X of Y assistant turns")
 
 
+def _check_per_turn_model_pricing() -> None:
+    """When per-turn `usage["model"]` is recorded, the audit prices each
+    turn against THAT model and aggregates per-turn costs (so a session
+    that spanned two models prices correctly), and the report header
+    reflects the most recent recorded model — not the caller's
+    fallback."""
+    with tempfile.TemporaryDirectory() as td:
+        session_dir = Path(td) / "mixed-model-session"
+        (session_dir / "attachments").mkdir(parents=True)
+        # Two assistant turns with different models recorded inline.
+        # Sonnet input rate is $3/MT; Haiku is $1/MT. Same token counts,
+        # different costs — the audit should bill each turn correctly.
+        entries = [
+            {"role": "user", "content": "first"},
+            {
+                "role": "assistant",
+                "text": "ok",
+                "tool_calls": [],
+                "usage": {
+                    "input": 1000,
+                    "output": 0,
+                    "cache_creation": 0,
+                    "cache_read": 0,
+                    "model": "anthropic/claude-sonnet-4-6",
+                },
+            },
+            {"role": "user", "content": "second"},
+            {
+                "role": "assistant",
+                "text": "ok",
+                "tool_calls": [],
+                "usage": {
+                    "input": 1000,
+                    "output": 0,
+                    "cache_creation": 0,
+                    "cache_read": 0,
+                    "model": "anthropic/claude-haiku-4-5-20251001",
+                },
+            },
+        ]
+        with (session_dir / "conversation.jsonl").open("w") as f:
+            for e in entries:
+                f.write(json.dumps(e) + "\n")
+        # Pass a wrong fallback model — recorded models must take
+        # precedence over the function arg.
+        report = audit_session(session_dir, model="openai/gpt-4o")
+
+        # Sonnet 1000 input @ $3/MT = $0.003; Haiku 1000 @ $1/MT = $0.001.
+        # Total = $0.004. NOT what gpt-4o (the fallback, $2.5/MT) would
+        # produce on summed 2000 tokens ($0.005), and NOT what either
+        # Anthropic model alone would produce on the sum.
+        assert report.total_cost_usd is not None
+        assert abs(report.total_cost_usd - 0.004) < 1e-9, report.total_cost_usd
+        # Per-turn rows reflect per-turn pricing.
+        assert abs(report.per_turn[0].cost_usd - 0.003) < 1e-9
+        assert abs(report.per_turn[1].cost_usd - 0.001) < 1e-9
+        # Header model = most recent recorded, not the function arg.
+        assert (
+            report.model == "anthropic/claude-haiku-4-5-20251001"
+        ), report.model
+    print(
+        "✓ per-turn model pricing: $0.004 across mixed Sonnet+Haiku turns"
+    )
+
+
+def _check_audit_falls_back_when_no_model_recorded() -> None:
+    """Old sessions (pre-bench-followups) lack `usage["model"]`; audit
+    falls back to the caller-supplied model and the header reflects it."""
+    with tempfile.TemporaryDirectory() as td:
+        session_dir = _write_synthetic_session(Path(td))
+        # Synthetic session predates the model field — none of its
+        # turns set `usage["model"]`.
+        report = audit_session(
+            session_dir, model="anthropic/claude-sonnet-4-6"
+        )
+        assert report.model == "anthropic/claude-sonnet-4-6", report.model
+        assert report.total_cost_usd is not None
+        assert report.total_cost_usd > 0
+    print("✓ audit falls back to caller's --model when no turn recorded one")
+
+
 def _check_path_traversal_refused() -> None:
     """`sessions_cli._resolve_session_dir` must refuse a session_id whose
     resolved path escapes the sessions root, so a typo or hostile input
@@ -345,6 +426,8 @@ def main() -> None:
     _check_section_filtering()
     _check_displayed_total_gates_to_anthropic()
     _check_lower_bound_warning_is_specific()
+    _check_per_turn_model_pricing()
+    _check_audit_falls_back_when_no_model_recorded()
     _check_path_traversal_refused()
     print("\nALL CHECKS PASSED")
 

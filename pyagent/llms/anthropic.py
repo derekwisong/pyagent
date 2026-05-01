@@ -22,6 +22,10 @@ class AnthropicClient:
         cache: bool = True,
     ) -> None:
         self.model = model
+        # Full provider/model identifier persisted in each turn's usage
+        # dict so the audit can price per-turn correctly without the
+        # caller having to remember which model the session used.
+        self.provider_model = f"anthropic/{model}"
         self.max_tokens = max_tokens
         self.cache = cache
         api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
@@ -114,6 +118,7 @@ class AnthropicClient:
                 "output": getattr(usage, "output_tokens", 0) or 0,
                 "cache_creation": getattr(usage, "cache_creation_input_tokens", 0) or 0,
                 "cache_read": getattr(usage, "cache_read_input_tokens", 0) or 0,
+                "model": self.provider_model,
             },
         }
 
