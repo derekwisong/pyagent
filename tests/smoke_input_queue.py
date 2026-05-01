@@ -24,9 +24,11 @@ from rich.console import Console
 
 import pyagent.cli as cli_mod
 from pyagent.cli import (
+    _SPINNER_FRAMES,
     _handle_queue_command,
     _queue_segment,
     _render_status_ansi,
+    _spinner_segment,
 )
 
 
@@ -133,6 +135,20 @@ def main() -> None:
     out = _strip_ansi(_render_status_ansi(agents, "", q, "/etc/passwd"))
     assert "awaiting permission" in out and "/etc/passwd" in out, out
     print(f"✓ ansi with permission pending: {out!r}")
+
+    # 8. Spinner: empty when idle, contains a Braille frame when busy.
+    assert _spinner_segment(False) == "", repr(_spinner_segment(False))
+    print("✓ spinner hidden at idle")
+
+    busy_seg = _spinner_segment(True)
+    assert busy_seg, "spinner segment should be non-empty when busy"
+    # Strip ANSI then check the visible char is one of the Braille frames.
+    visible = _strip_ansi(busy_seg).strip()
+    assert visible in _SPINNER_FRAMES, (
+        f"unexpected spinner glyph {visible!r}; "
+        f"expected one of {_SPINNER_FRAMES!r}"
+    )
+    print(f"✓ spinner busy frame: {visible!r}")
 
     print("\nALL CHECKS PASSED")
 

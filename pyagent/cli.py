@@ -5,6 +5,7 @@ import logging
 import multiprocessing
 import re
 import shutil
+import time
 from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any
@@ -466,6 +467,29 @@ def _queue_segment(queue: "collections.deque[str]") -> str:
     return f' · queued: {n} (next: "{head}")'
 
 
+# Braille spinner — 10 frames, indistinguishable in 0-width-glyph
+# fonts but reads as a smooth rotating dot in any modern terminal.
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_SPINNER_FPS = 10  # ticks per second; chosen to feel "alive" without
+                   # being distracting. The bottom_toolbar's
+                   # refresh_interval needs to be ≤ 1/_SPINNER_FPS to
+                   # actually render every frame.
+
+
+def _spinner_segment(busy: bool) -> str:
+    """ANSI-encoded spinner prefix when `busy`, empty string otherwise.
+
+    Animation is driven by `time.monotonic()` rather than a frame
+    counter so the spinner stays smooth across redraws even if
+    prompt_toolkit's refresh interval drifts. Hidden when idle so
+    the footer doesn't pretend the agent is doing work.
+    """
+    if not busy:
+        return ""
+    idx = int(time.monotonic() * _SPINNER_FPS) % len(_SPINNER_FRAMES)
+    return f"\x1b[2m{_SPINNER_FRAMES[idx]}\x1b[0m "
+
+
 def _render_status_ansi(
     agents: dict,
     model: str,
@@ -702,8 +726,11 @@ async def _repl_async(
             pt_session.app.invalidate()
 
     def bottom_toolbar() -> ANSI:
+        # Spinner gates on `turn_busy` — visible only while the
+        # agent is actively working; stays out of the way at idle.
+        spinner = _spinner_segment(state["turn_busy"])
         return ANSI(
-            _render_status_ansi(
+            spinner + _render_status_ansi(
                 agents_state,
                 state["model"],
                 queue,
@@ -740,7 +767,10 @@ async def _repl_async(
     pt_session: PromptSession = PromptSession(
         history=input_history,
         bottom_toolbar=bottom_toolbar,
-        refresh_interval=0.5,
+        # 0.1s tick so the spinner runs at its full 10 fps; lower
+        # would burn CPU on idle redraws, higher would make the
+        # spinner look choppy.
+        refresh_interval=0.1,
         key_bindings=bindings,
         style=pt_style,
     )
