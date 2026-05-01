@@ -1,5 +1,6 @@
 """Built-in tools for the agent."""
 
+import fnmatch
 import os
 import re
 import signal
@@ -331,6 +332,130 @@ def grep(pattern: str, path: str) -> list[str]:
             if regex.search(line):
                 results.append(f"{f}:{i}:{line}")
     return results
+
+
+# Default exclusion globs for `glob`. Mirrors the
+# shutil.ignore_patterns set bench_cli uses when seeding workspaces
+# (see pyagent/bench_cli.py) so users see the same rules across pyagent.
+# We deliberately don't parse `.gitignore` — that's scope creep; ad-hoc
+# overrides should pass an explicit `root` and a tighter pattern.
+_GLOB_DEFAULT_EXCLUDES: tuple[str, ...] = (
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    "*.pyc",
+    ".pytest_cache",
+    ".mypy_cache",
+    "dist",
+    "build",
+    "*.egg-info",
+)
+
+
+def _is_excluded(rel_parts: tuple[str, ...]) -> bool:
+    """Return True if any path component matches a default exclusion."""
+    for part in rel_parts:
+        for pat in _GLOB_DEFAULT_EXCLUDES:
+            if fnmatch.fnmatch(part, pat):
+                return True
+    return False
+
+
+def glob(
+    pattern: "str | list[str]",
+    *,
+    root: str = ".",
+    limit: int = 200,
+) -> list[str]:
+    """Find files by name pattern under `root`.
+
+    Reach for this whenever you'd otherwise call `execute("find ...")`
+    to discover files by name — it's faster, billed as read-only
+    metadata, and dodges the shell-quoting failure modes of `find`.
+    `grep` covers content search; `list_directory` covers a single
+    level; `glob` is the recursive name-match peer.
+
+    Patterns use Python `pathlib`-style semantics: `**/*.py` matches
+    every `.py` file at any depth, `src/*.ts` matches one level deep
+    under `src/`, etc. Output paths are relative to `root` so they can
+    be fed straight back into `read_file` / `grep`.
+
+    Default exclusions skip `.git`, `.venv`, `venv`, `node_modules`,
+    `__pycache__`, `*.pyc`, `.pytest_cache`, `.mypy_cache`, `dist`,
+    `build`, `*.egg-info` — same set bench_cli uses when seeding
+    workspaces. Pass a more specific `root` if you need to look inside
+    one of those (e.g. `root="node_modules/some-pkg"`).
+
+    Args:
+        pattern: Glob pattern to match, or a list of patterns. Lists
+            save a round trip when you want both source and stub
+            extensions (`["**/*.py", "**/*.pyi"]`); their results are
+            merged and de-duplicated.
+        root: Directory to search under. Defaults to `.`.
+        limit: Maximum number of paths to return. Defaults to 200.
+            When the cap fires, the result includes a trailing
+            `<truncated: NNN total matches; tighten the pattern>`
+            marker so you know to narrow.
+
+    Returns:
+        Sorted list of relative paths (relative to `root`). Predictable
+        failures (root missing, root not a directory, root outside the
+        workspace) come back as a single-element list with a leading
+        `<...>` marker.
+    """
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        return [f"<error: limit must be an integer, got {limit!r}>"]
+    if limit <= 0:
+        return [f"<error: limit must be positive, got {limit}>"]
+
+    if isinstance(pattern, str):
+        patterns = [pattern]
+    elif isinstance(pattern, list):
+        patterns = [str(p) for p in pattern]
+    else:
+        return [f"<error: pattern must be str or list[str], got {type(pattern).__name__}>"]
+    if not patterns:
+        return ["<error: pattern list is empty>"]
+
+    if not permissions.require_access(root):
+        return [_denied(root)]
+
+    root_path = Path(root)
+    if not root_path.exists():
+        return [f"<path not found: {root}>"]
+    if not root_path.is_dir():
+        return [f"<not a directory: {root}>"]
+
+    matches: set[Path] = set()
+    for pat in patterns:
+        try:
+            for hit in root_path.glob(pat):
+                if not hit.is_file():
+                    continue
+                try:
+                    rel = hit.relative_to(root_path)
+                except ValueError:
+                    # Pattern escaped the root via "..", skip.
+                    continue
+                if _is_excluded(rel.parts):
+                    continue
+                matches.add(rel)
+        except (NotImplementedError, ValueError) as e:
+            return [f"<error: invalid pattern {pat!r}: {e}>"]
+
+    sorted_rel = sorted(str(p) for p in matches)
+    total = len(sorted_rel)
+    if total > limit:
+        capped = sorted_rel[:limit]
+        capped.append(
+            f"<truncated: {total} total matches; tighten the pattern>"
+        )
+        return capped
+    return sorted_rel
 
 
 # Patterns that should never run unattended. This is a speed bump

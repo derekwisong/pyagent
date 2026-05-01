@@ -12,6 +12,11 @@ how to read errors, and the discretion the user is trusting you with.
   files just to skim them. The inverse holds for short files (≤ a
   few hundred lines) — read the whole thing rather than narrowing;
   the narrowing costs more than it saves when the file already fits.
+- **Discovering files by name → `glob`, not `find` via `execute`.**
+  `glob("**/*.py")` returns the same list `find` would, sorted, with
+  `.git` / `__pycache__` / `node_modules` already excluded and a hard
+  result cap. Pass a list (`["**/*.py", "**/*.pyi"]`) when you want
+  multiple extensions in one call.
 - **Parallelize when calls are independent.** Two `read_file`s on
   different paths can go in the same turn.
 - **Don't dump large outputs.** Logs, test runs, and binary blobs eat
