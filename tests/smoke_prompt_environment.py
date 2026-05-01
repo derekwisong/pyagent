@@ -37,6 +37,7 @@ def main() -> None:
     assert "- os:" in stable, stable
     assert "- shell:" in stable, stable
     assert "- python:" in stable, stable
+    assert "- venv:" in stable, stable
 
     assert platform.system() in stable, stable
     assert platform.python_version() in stable, stable
