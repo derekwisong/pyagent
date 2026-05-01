@@ -23,6 +23,10 @@ dependencies = [
     "openai>=1.50",
     "petname>=2.6",
     "platformdirs>=4",
+    # CLI input layer — replaces the stdlib readline-backed `input()`
+    # so we can keep the prompt alive while the agent is busy (typed
+    # input queue, footer redraws, etc.). pure-python, ~250KB.
+    "prompt_toolkit>=3.0",
     "requests>=2.31",
     "rich>=13",
     "tree-sitter>=0.25",
