@@ -219,7 +219,12 @@ def _render_status(agents: dict, model: str = "") -> str:
     checklist = _checklist_segment(agents)
     if len(agents) <= 1:
         status = agents.get("root", {}).get("status", "thinking")
-        return f"[dim]{status}…{checklist}{suffix}[/dim]"
+        # `…` indicates active work — drop it for terminal states
+        # (`ready`, `error`) so the always-on bottom_toolbar doesn't
+        # lie about what the agent is doing while it sits idle
+        # waiting for the next user input.
+        trailing = "" if status in ("ready", "error") else "…"
+        return f"[dim]{status}{trailing}{checklist}{suffix}[/dim]"
     parts = []
     for key, info in agents.items():
         label = "root" if key == "root" else key
@@ -647,6 +652,14 @@ async def _repl_async(
             elif kind == "turn_complete" and agent_id is None:
                 state["turn_busy"] = False
                 drain_queue_one()
+                # If we didn't drain into a new turn, the agent is
+                # idle. Reset root status so the always-on footer
+                # stops claiming "thinking…" while we wait for the
+                # next user input.
+                if not state["turn_busy"]:
+                    agents_state.setdefault(
+                        "root", {"status": "ready"}
+                    )["status"] = "ready"
             elif kind == "agent_error":
                 _print_event(event)
                 if agent_id is None:
