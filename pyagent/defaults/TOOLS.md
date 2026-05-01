@@ -33,6 +33,40 @@ how to read errors, and the discretion the user is trusting you with.
   into the conversation forever. `append=True` creates the file
   if missing, so the first chunk can use it too.
 
+## Long-running shell
+
+`execute` has a hard 60s timeout — fine for git, scripts, builds that
+finish in seconds, and one-shot HTTP. For dev servers, file watchers,
+long builds, or anything you want to *check on* later, switch to the
+background quartet.
+
+- **Start with `run_background(command, name="...")`.** Returns a
+  `bg-XXXXXXXX` handle. Pass `name="dev-server"` (or similar) so the
+  status reports name something the agent can recognize, not just a
+  hex id.
+- **`read_output(handle, since=N, max_chars=4000)`** to peek. The
+  first read uses `since=0`; subsequent reads pass the previous
+  call's `next_since:` value to tail-follow without re-reading bytes
+  you've already seen. Stderr (when non-empty) appears under a
+  `[stderr]` divider.
+- **`wait_for(handle, until="...", timeout_s=...)`** when you need to
+  block on a condition before continuing. `until` accepts:
+  - `"exit"` — process finished (returns the rc).
+  - `"output_contains:STRING"` / `"output_matches:REGEX"` — the
+    output mentions a startup banner, a port number, an error, etc.
+  - `"silence:Ns"` — N seconds with no new output. Good for "the
+    build settled" without picking an exact ready-string.
+- **`kill_process(handle)`** to stop a process you started. Idempotent;
+  a stale handle returns the standard `<error: handle ... is not
+  active>` marker. The agent's normal teardown flushes any leftover
+  background processes (SIGTERM with a 2s grace, then SIGKILL), and
+  Esc / cancel kills foreground + background together.
+
+Buffers cap at 1MB per stream; overflow drops the oldest 256KB and
+prepends `...truncated NN bytes...` on the next read. Don't keep a
+chatty `tail -f` running indefinitely if you only need to confirm a
+thing started.
+
 ## Web pages and HTML
 
 - **Don't write your own HTML scrub.** `fetch_url` saves the raw page

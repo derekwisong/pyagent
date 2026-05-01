@@ -127,10 +127,12 @@ def test_register_tools_allowlist() -> None:
 
     a2 = Agent(client=EchoClient())
     agent_proc._register_tools(a2, allow_meta=False, allowlist=None)
-    # Default set: read/write file, list, grep, execute, fetch_url,
-    # read/write ledger, read_skill (no meta).
+    # Default set: read/write/edit file, list, grep, glob, execute,
+    # run_background, read_output, wait_for, kill_process, fetch_url,
+    # read_skill (no meta).
     assert "execute" in a2.tools and "spawn_subagent" not in a2.tools
-    assert len(a2.tools) == 9, sorted(a2.tools)
+    assert "run_background" in a2.tools and "kill_process" in a2.tools
+    assert len(a2.tools) == 13, sorted(a2.tools)
     print("✓ _register_tools allowlist=None → full default set, no meta")
 
 
