@@ -424,19 +424,26 @@ def _handle_model_command(
     return resolved
 
 
-def _prompt_message() -> ANSI:
-    """Build the multi-line prompt message: a thin horizontal divider
-    line above the `> ` input arrow.
+def _prompt_message(busy: bool) -> ANSI:
+    """Build the prompt message — a thin horizontal divider above the
+    `> ` input arrow when idle, just `> ` while a turn is in flight.
 
-    Visually separates each turn so the input region is unmistakable
-    in tmux/terminal scrollback. Unlike a fixed-bottom TUI (which
-    would defeat tmux's `Ctrl-b PgUp`), this approach keeps the
-    append-only output model — the divider becomes a per-turn
-    bracket in scrolled history, marking where each prompt landed.
+    The divider marks a turn boundary: it should only appear once
+    the agent has finished responding and is genuinely waiting for
+    the next input. Drawing it the moment the user hits Enter (i.e.
+    *before* the agent has produced any output) is confusing — the
+    user sees a fresh boundary line, then text streams in *above*
+    it, making the divider feel out of order.
 
-    Recomputed at every prompt iteration so a terminal resize
-    between turns picks up the new width without restart.
+    Suppressing the divider while busy delays the boundary until
+    `turn_complete` flips `turn_busy` back to False; the prompt then
+    invalidates and the divider drops in cleanly above the arrow.
+
+    Recomputed at every redraw so a terminal resize between turns
+    picks up the new width without restart.
     """
+    if busy:
+        return ANSI("> ")
     width = shutil.get_terminal_size((80, 24)).columns
     divider = "─" * max(8, width - 1)
     # \x1b[2m = dim, \x1b[0m = reset
@@ -767,14 +774,15 @@ async def _repl_async(
         state["perm_pending"] = None
         pt_session.app.invalidate()
 
-    # prompt_toolkit's default `class:bottom-toolbar` style sets a
-    # bright background that competes with the embedded ANSI colors
-    # in `_render_status_ansi`. Drop the bg + fg overrides so the
-    # toolbar inherits the terminal's default background and our
-    # rich-emitted color codes do all the talking.
+    # prompt_toolkit's default `class:bottom-toolbar` style is
+    # `reverse`, which produces a bright bar that fights the dim
+    # ANSI colors emitted by `_render_status_ansi`. Use a near-black
+    # gray instead — just enough lift off the terminal background to
+    # register as a separate band, dim enough that the rich-emitted
+    # text remains the dominant ink.
     pt_style = Style.from_dict({
-        "bottom-toolbar": "noreverse bg:default fg:default",
-        "bottom-toolbar.text": "noreverse bg:default fg:default",
+        "bottom-toolbar": "noreverse bg:#1c1c1c fg:default",
+        "bottom-toolbar.text": "noreverse bg:#1c1c1c fg:default",
     })
 
     pt_session: PromptSession = PromptSession(
@@ -793,7 +801,13 @@ async def _repl_async(
         while True:
             try:
                 with patch_stdout(raw=True):
-                    line = await pt_session.prompt_async(_prompt_message())
+                    # Pass the message as a callable so prompt_toolkit
+                    # re-evaluates it on every redraw — the divider
+                    # only renders once `turn_busy` flips back to
+                    # False, so it can't appear above incoming output.
+                    line = await pt_session.prompt_async(
+                        lambda: _prompt_message(state["turn_busy"])
+                    )
             except (EOFError, KeyboardInterrupt):
                 # Ctrl-D / Ctrl-C at the prompt — clean exit.
                 console.print()
