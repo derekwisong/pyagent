@@ -15,6 +15,7 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.traceback import install as install_traceback
@@ -726,11 +727,22 @@ async def _repl_async(
         state["perm_pending"] = None
         pt_session.app.invalidate()
 
+    # prompt_toolkit's default `class:bottom-toolbar` style sets a
+    # bright background that competes with the embedded ANSI colors
+    # in `_render_status_ansi`. Drop the bg + fg overrides so the
+    # toolbar inherits the terminal's default background and our
+    # rich-emitted color codes do all the talking.
+    pt_style = Style.from_dict({
+        "bottom-toolbar": "noreverse bg:default fg:default",
+        "bottom-toolbar.text": "noreverse bg:default fg:default",
+    })
+
     pt_session: PromptSession = PromptSession(
         history=input_history,
         bottom_toolbar=bottom_toolbar,
         refresh_interval=0.5,
         key_bindings=bindings,
+        style=pt_style,
     )
 
     loop.add_reader(parent_conn.fileno(), on_pipe)
@@ -1070,10 +1082,12 @@ def main(
             logger.warning("cli: unexpected pre-ready event %r", kind)
 
         logger.info("soul=%s tools=%s primer=%s", soul, tools_md, primer)
-        # Per-agent state shared across turns. Root starts here;
-        # subagents are added/removed as info events flow through
-        # _update_agents_state.
-        agents_state["root"] = {"status": "thinking"}
+        # Per-agent state shared across turns. Root starts in `ready`
+        # (the agent has bootstrapped and is waiting for input); the
+        # submit branch in `_repl_async` flips it to `thinking` when
+        # the user actually fires a turn. Subagents are added/removed
+        # as info events flow through `_update_agents_state`.
+        agents_state["root"] = {"status": "ready"}
 
         # All REPL loop state lives in `_repl_async`. Returns one of
         # "eof" (clean Ctrl-D / Ctrl-C at the prompt), "fatal"
