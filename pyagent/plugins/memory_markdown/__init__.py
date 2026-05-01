@@ -126,12 +126,19 @@ def register(api):
     # ---- Tools ------------------------------------------------------
 
     def read_ledger(name: str, file: str | None = None) -> str:
-        """Read one of the agent's ledgers, or a specific memory file.
+        """Read a ledger or a specific memory file.
 
         Ledgers are the agent's persistent notebooks. `USER` is a
         single-file ledger (notes about the person being helped).
         `MEMORY` is an index + per-memory files: MEMORY.md is the
-        catalog, each memory is its own file under `memories/`.
+        catalog (auto-loaded into your prompt), each memory is its
+        own file under `memories/` (loaded only on demand).
+
+        Primary use: fetching a *known* memory body once you've
+        identified it — by scanning the index in your prompt or via
+        `recall_memory(query)` if it's available. Reading the MEMORY.md
+        index directly is rarely needed since it's already in the
+        prompt.
 
         Args:
             name: Ledger to read. One of: "USER", "MEMORY".
@@ -166,13 +173,21 @@ def register(api):
     def write_ledger(
         name: str, content: str, file: str | None = None
     ) -> str:
-        """Overwrite a ledger or a specific memory file.
+        """Overwrite a ledger or a specific memory file (in-place
+        edits and consolidation).
+
+        For *new* memories, prefer `add_memory(...)` — it writes
+        the body and updates the index in one call. write_ledger is
+        for editing what's already there: revising a body, pruning
+        an entry, merging fragmentary memories, moving one to a
+        different category, or sweeping the catalog. It's also how
+        you write USER, which is a single-file ledger and has no
+        add_memory equivalent.
 
         For USER, omit `file` — USER is a single-file ledger.
-        For MEMORY, omit `file` to overwrite the MEMORY.md index;
-        pass `file="foo.md"` to write `memories/foo.md`. After
-        creating a new memory file, also update MEMORY.md to add a
-        pointer in the index — agents see only the index by default.
+        For MEMORY, omit `file` to overwrite the MEMORY.md index
+        directly (e.g. when reorganizing); pass `file="foo.md"` to
+        overwrite `memories/foo.md`.
 
         Args:
             name: Ledger to write. One of: "USER", "MEMORY".
