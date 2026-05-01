@@ -1,0 +1,18 @@
+name = "claude-code-cli"
+version = "0.1.0"
+description = "Pipe a prompt into Anthropic's Claude Code CLI (`claude -p`)."
+api_version = "1"
+
+[provides]
+tools = ["claude_code_cli"]
+
+# Plugin self-disables when `claude` isn't on PATH — the load step
+# logs an info-level skip and the tool is never advertised. This is
+# the right gate for an external-binary plugin: silent on machines
+# without claude installed, fully wired up when it's there.
+[requires]
+binaries = ["claude"]
+
+# Stateless wrapper around an external CLI — safe in subagents.
+[load]
+in_subagents = true

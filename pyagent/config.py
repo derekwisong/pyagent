@@ -57,6 +57,7 @@ DEFAULTS: dict[str, Any] = {
         "html-tools",
         "code-mapper",
         "web-search",
+        "claude-code-cli",
     ],
     "subagents": {
         "max_depth": 3,
