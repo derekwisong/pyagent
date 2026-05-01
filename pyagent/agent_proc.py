@@ -417,6 +417,14 @@ def _register_tools(
     _add("grep", agent_tools.grep)
     _add("glob", agent_tools.glob, auto_offload=False)
     _add("execute", agent_tools.execute)
+    # Long-running shell. `read_output` can return a lot of bytes —
+    # let auto_offload move oversized reads to attachments. The other
+    # three return short status strings; offloading them just adds
+    # noise to the conversation.
+    _add("run_background", agent_tools.run_background, auto_offload=False)
+    _add("read_output", agent_tools.read_output)
+    _add("wait_for", agent_tools.wait_for, auto_offload=False)
+    _add("kill_process", agent_tools.kill_process, auto_offload=False)
     _add("fetch_url", agent_tools.fetch_url)
     # read_ledger / write_ledger are now provided by the bundled
     # memory-markdown plugin (see pyagent/plugins/memory_markdown/).
@@ -824,6 +832,18 @@ def child_main(config: dict[str, Any], conn: Connection) -> None:
             prompt=event["prompt"],
             persist=event.get("persist", True),
         )
+
+    # Tear down background shell processes started by run_background
+    # so a clean exit doesn't leave the user's dev server / watcher
+    # lingering. SIGTERM with a 2s grace, then SIGKILL.
+    try:
+        signalled = agent_tools.shutdown_background(grace_s=2.0)
+        if signalled:
+            logger.info(
+                "shutdown: signalled %d background process(es)", signalled
+            )
+    except Exception:
+        logger.exception("shutdown: error tearing down background procs")
 
     # Tear down subagents first, then fire on_session_end. End-hooks
     # might write to disk or call APIs; they shouldn't race with

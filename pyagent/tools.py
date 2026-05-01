@@ -3,9 +3,12 @@
 import fnmatch
 import os
 import re
+import secrets
 import signal
 import subprocess
 import threading
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import requests
@@ -20,6 +23,48 @@ from pyagent.session import Attachment
 _ACTIVE_EXEC_PROCS: list[subprocess.Popen] = []
 _ACTIVE_EXEC_LOCK = threading.Lock()
 
+# Per-stream rolling cap for background-process output. When either
+# stdout or stderr crosses this size, the oldest 256KB are dropped and
+# a `...truncated NN bytes...` notice rides the next read so the agent
+# knows the tail is incomplete.
+_BG_BUF_CAP = 1024 * 1024
+_BG_BUF_DROP = 256 * 1024
+
+
+@dataclass
+class _BackgroundProc:
+    """Live state for one `run_background` shell subprocess.
+
+    Both reader threads pump bytes into a single combined `output_buf`
+    under `lock`; tools that read or wait take the same lock when
+    peeking. A `[stderr]\\n` / `[stdout]\\n` marker is inserted on
+    stream transitions so the agent can tell sources apart even
+    though exact temporal interleaving across streams isn't preserved.
+    `dropped` counts bytes evicted by the rolling cap so a subsequent
+    `read_output` can prepend `...truncated NN bytes...`.
+
+    Single-buffer design (vs. one buffer per stream): `since` is then
+    a single absolute byte offset into a single sequence. With
+    separate buffers, the same `since` applied to two independent
+    cursors silently dropped data on the slower stream.
+    """
+
+    handle: str
+    name: str
+    command: str
+    proc: subprocess.Popen
+    start_time: float
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    output_buf: bytearray = field(default_factory=bytearray)
+    dropped: int = 0
+    last_source: str = ""  # "stdout" | "stderr" | "" (initial)
+    last_write: float = 0.0
+    threads: list[threading.Thread] = field(default_factory=list)
+
+
+_ACTIVE_BG_PROCS: dict[str, _BackgroundProc] = {}
+_ACTIVE_BG_LOCK = threading.Lock()
+
 
 def kill_active() -> int:
     """SIGKILL every in-flight execute() shell subprocess group.
@@ -29,6 +74,10 @@ def kill_active() -> int:
     sees the proc exit and returns whatever output was buffered, so
     the tool reports a normal-looking result (exit_code: -9) and the
     agent loop reaches its next safe-point cancel check immediately.
+
+    Also flushes every entry in `_ACTIVE_BG_PROCS` — background procs
+    started by `run_background` share the same fate: a single Esc
+    should leave nothing lingering.
 
     Returns the number of process groups signalled.
     """
@@ -41,7 +90,51 @@ def kill_active() -> int:
             except ProcessLookupError:
                 # Already exited between the lock and the kill.
                 pass
+    with _ACTIVE_BG_LOCK:
+        bg_entries = list(_ACTIVE_BG_PROCS.values())
+    for bg in bg_entries:
+        try:
+            os.killpg(bg.proc.pid, signal.SIGKILL)
+            killed += 1
+        except ProcessLookupError:
+            pass
     return killed
+
+
+def shutdown_background(grace_s: float = 2.0) -> int:
+    """Clean-shutdown path for background procs.
+
+    Sends SIGTERM to every active background-proc group, waits up to
+    `grace_s` seconds total for them to exit, then SIGKILLs whatever
+    remains. Called by the agent process's normal teardown so a
+    `pyagent` exit doesn't leave the user's dev server lingering.
+
+    Returns the number of process groups signalled (term + kill).
+    """
+    with _ACTIVE_BG_LOCK:
+        bg_entries = list(_ACTIVE_BG_PROCS.values())
+    if not bg_entries:
+        return 0
+    signalled = 0
+    for bg in bg_entries:
+        try:
+            os.killpg(bg.proc.pid, signal.SIGTERM)
+            signalled += 1
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + max(grace_s, 0.0)
+    while time.monotonic() < deadline:
+        if all(bg.proc.poll() is not None for bg in bg_entries):
+            return signalled
+        time.sleep(0.05)
+    for bg in bg_entries:
+        if bg.proc.poll() is None:
+            try:
+                os.killpg(bg.proc.pid, signal.SIGKILL)
+                signalled += 1
+            except ProcessLookupError:
+                pass
+    return signalled
 
 
 def _denied(path: str) -> str:
@@ -567,6 +660,482 @@ def execute(command: str) -> str:
         f"exit_code: {returncode}\n"
         f"stdout:\n{stdout}"
         f"stderr:\n{stderr}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Background shell processes — run_background / read_output / wait_for /
+# kill_process. Lifecycle:
+#   run_background   spawns + registers a handle, returns the handle id.
+#   read_output      decodes the captured bytes since an offset.
+#   wait_for         blocks (with timeout) until exit / output match /
+#                    silence settles.
+#   kill_process     SIGKILLs the group and removes the handle.
+# kill_active() (above) flushes BOTH foreground and background sets so
+# the cancel pathway leaves a clean slate.
+
+
+def _bg_handle() -> str:
+    return f"bg-{secrets.token_hex(4)}"
+
+
+def _bg_reader(bg: _BackgroundProc, stream, which: str) -> None:
+    """Pump bytes from `stream` into the combined output buffer.
+
+    Holds the lock only across the buffer mutation so concurrent
+    `read_output` / `wait_for` can keep observing while bytes flow.
+    The 1MB rolling cap drops the oldest 256KB instead of growing
+    unbounded — agents rarely care about start-of-stream once the
+    process has been running for a while, but they do need recent
+    output to be intact.
+
+    On a stream transition (stdout→stderr or back), inserts a
+    `[stderr]\\n` / `[stdout]\\n` marker so the agent can still tell
+    sources apart in the combined log. Stdout-only processes (the
+    common case) emit no markers.
+    """
+    try:
+        while True:
+            # `read1` returns whatever is currently buffered up to the
+            # cap — `read(4096)` would block until 4096 bytes (or EOF),
+            # which interacts badly with line-buffered tools that emit
+            # short bursts and then sleep. Tail-follow needs the
+            # bytes-out-now semantics.
+            chunk = stream.read1(4096)
+            if not chunk:
+                break
+            with bg.lock:
+                # Insert a transition marker only when the source
+                # actually changes; the initial state (last_source="")
+                # treats stdout as the implicit default — no leading
+                # `[stdout]` marker on processes that never use stderr.
+                if which != bg.last_source and (
+                    bg.last_source != "" or which != "stdout"
+                ):
+                    if bg.output_buf and not bg.output_buf.endswith(b"\n"):
+                        bg.output_buf.append(0x0A)  # newline
+                    bg.output_buf.extend(f"[{which}]\n".encode())
+                bg.last_source = which
+                bg.output_buf.extend(chunk)
+                if len(bg.output_buf) > _BG_BUF_CAP:
+                    overflow = len(bg.output_buf) - (
+                        _BG_BUF_CAP - _BG_BUF_DROP
+                    )
+                    del bg.output_buf[:overflow]
+                    bg.dropped += overflow
+                bg.last_write = time.monotonic()
+    except (ValueError, OSError):
+        # Stream closed underneath us (proc died, fd reaped). The
+        # main reader exits — wait_for / read_output handle the
+        # post-mortem state via proc.poll().
+        pass
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+
+def _coerce_handle(handle: str) -> "_BackgroundProc | str":
+    """Look up a handle, returning either the entry or a `<...>` marker.
+
+    Stale-handle responses follow the project's predictable-failure
+    convention so the agent can pattern-match them just like a missing
+    file or a permission denial.
+    """
+    if not isinstance(handle, str) or not handle:
+        return f"<error: handle must be a non-empty string, got {handle!r}>"
+    with _ACTIVE_BG_LOCK:
+        bg = _ACTIVE_BG_PROCS.get(handle)
+    if bg is None:
+        return f"<error: handle {handle} is not active in this session>"
+    return bg
+
+
+def run_background(command: str, *, name: str | None = None) -> str:
+    """Start a long-running shell command without blocking the turn.
+
+    Use this for dev servers, file watchers, builds, test watchers, or
+    anything you'd kick off and check on later. The handle returned
+    here is what `read_output`, `wait_for`, and `kill_process` operate
+    against. Foreground `execute` is still the right tool for short
+    one-shot commands — keep using it for git, scripts, tests that
+    finish in seconds, and HTTP one-offs.
+
+    Same dangerous-pattern blocklist as `execute` (recursive rm at
+    root, fork bombs, piping curl|sh, force push to main, etc.). The
+    process runs in its own session so a later `kill_process` (or Esc
+    via `kill_active`) takes the whole tree.
+
+    Args:
+        command: Shell command to run.
+        name: Optional human-readable label (shows up in error markers
+            and the wait_for status report). Defaults to None.
+
+    Returns:
+        A short confirmation line including the handle (`bg-XXXXXXXX`)
+        and pid, or a `<refused: ...>` marker if the command matches a
+        blocked pattern.
+    """
+    blocked = _safety_check(command)
+    if blocked:
+        return (
+            f"<refused: matches dangerous pattern ({blocked}); "
+            f"ask the human to run it manually if intended>"
+        )
+    proc = subprocess.Popen(
+        command,
+        shell=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    handle = _bg_handle()
+    label = name or handle
+    bg = _BackgroundProc(
+        handle=handle,
+        name=label,
+        command=command,
+        proc=proc,
+        start_time=time.monotonic(),
+        last_write=time.monotonic(),
+    )
+    t_out = threading.Thread(
+        target=_bg_reader,
+        args=(bg, proc.stdout, "stdout"),
+        name=f"bg-{handle}-out",
+        daemon=True,
+    )
+    t_err = threading.Thread(
+        target=_bg_reader,
+        args=(bg, proc.stderr, "stderr"),
+        name=f"bg-{handle}-err",
+        daemon=True,
+    )
+    bg.threads = [t_out, t_err]
+    t_out.start()
+    t_err.start()
+    with _ACTIVE_BG_LOCK:
+        _ACTIVE_BG_PROCS[handle] = bg
+    return (
+        f"started {handle} (pid {proc.pid}, name={label}): {command}\n"
+        f"use read_output({handle!r}) / wait_for({handle!r}) / "
+        f"kill_process({handle!r})"
+    )
+
+
+def _decode_with_drop(buf: bytearray, since: int, dropped: int) -> tuple[str, int]:
+    """Decode `buf[since:]` to text, prepending a drop-notice if any
+    bytes have been evicted by the rolling cap.
+
+    `since` is an absolute byte offset (counts every byte ever written
+    to the stream, including ones the cap has since dropped). The
+    buffer's index 0 corresponds to absolute byte `dropped`. We clamp
+    the read forward when `since < dropped` and emit a
+    `...truncated NN bytes...` notice so the agent knows it lost a
+    prefix.
+
+    Returns (text, total_seen) — `total_seen` is the absolute byte
+    count for the next call to pass as `since` for tail-follow.
+    """
+    total_seen = dropped + len(buf)
+    start = max(0, since - dropped)
+    chunk = bytes(buf[start:])
+    text = chunk.decode("utf-8", errors="replace")
+    notice = ""
+    if dropped > 0 and since < dropped:
+        skipped = dropped - since
+        notice = f"...truncated {skipped} bytes...\n"
+    return notice + text, total_seen
+
+
+def read_output(handle: str, *, since: int = 0, max_chars: int = 4000) -> str:
+    """Read captured output from a background process.
+
+    Returns whatever has been captured since byte offset `since`,
+    capped at `max_chars`. Use the offset returned in the trailing
+    `next_since:` line to tail-follow on subsequent calls without
+    re-reading bytes you've already seen.
+
+    stdout and stderr share one buffer; on a stream transition the
+    reader inserts a `[stderr]\\n` / `[stdout]\\n` marker so the agent
+    can tell sources apart. Exact temporal interleaving across
+    streams isn't preserved — but the byte-position cursor is
+    unambiguous.
+
+    Args:
+        handle: Handle returned by `run_background`.
+        since: Byte offset to start reading from. Defaults to 0 (the
+            start of the buffer, accounting for any rolling-cap drops).
+        max_chars: Hard cap on the inline output. Defaults to 4000.
+            Truncation appends a `...[N more chars; raise max_chars
+            or read again with since=...]` marker.
+
+    Returns:
+        Multi-line block: a header naming the handle and process
+        status, the captured output, and a `next_since:` line for
+        tail-follow. Stale handles and bad arguments come back as
+        `<...>` markers.
+    """
+    try:
+        since = int(since)
+    except (TypeError, ValueError):
+        return f"<error: since must be an integer, got {since!r}>"
+    try:
+        max_chars = int(max_chars)
+    except (TypeError, ValueError):
+        return f"<error: max_chars must be an integer, got {max_chars!r}>"
+    if max_chars <= 0:
+        return f"<error: max_chars must be positive, got {max_chars}>"
+
+    bg = _coerce_handle(handle)
+    if isinstance(bg, str):
+        return bg
+
+    with bg.lock:
+        text, next_since = _decode_with_drop(
+            bg.output_buf, since, bg.dropped
+        )
+    rc = bg.proc.poll()
+    status = "running" if rc is None else f"exited (rc={rc})"
+
+    truncated_chars = 0
+    if len(text) > max_chars:
+        truncated_chars = len(text) - max_chars
+        text = text[:max_chars]
+
+    header = f"{bg.handle} ({bg.name}) {status}"
+    footer_lines = [f"next_since: {next_since}"]
+    if truncated_chars:
+        footer_lines.append(
+            f"...[{truncated_chars} more chars; raise max_chars "
+            f"or call again with a higher since]"
+        )
+    return f"{header}\n{text}\n" + "\n".join(footer_lines)
+
+
+def _combined_text(bg: _BackgroundProc) -> str:
+    """Snapshot the current combined output as text. With the
+    single-buffer design, this is just the buffer decoded — stream
+    transitions are already marked inline by the reader threads."""
+    with bg.lock:
+        return bytes(bg.output_buf).decode("utf-8", errors="replace")
+
+
+def _tail(text: str, n: int = 400) -> str:
+    if len(text) <= n:
+        return text
+    return "..." + text[-n:]
+
+
+def wait_for(
+    handle: str,
+    *,
+    timeout_s: float = 30,
+    until: str = "exit",
+) -> str:
+    """Block (with timeout) until a background process meets a condition.
+
+    `until` syntax:
+      - `"exit"` — wait for the process to exit; returns the exit code.
+      - `"output_contains:STRING"` — return when STRING appears in
+        combined stdout+stderr.
+      - `"output_matches:REGEX"` — same, but `re.search` against the
+        combined output.
+      - `"silence:Ns"` — return once N seconds have passed with no new
+        bytes written. Useful for "the build settled."
+
+    All conditions respect `timeout_s`; exceeding it returns
+    `<timed out: ...>` with a tail of the captured output.
+
+    Args:
+        handle: Handle returned by `run_background`.
+        timeout_s: Maximum seconds to block. Defaults to 30.
+        until: Condition expression (see syntax above). Defaults to
+            `"exit"`.
+
+    Returns:
+        Short status report (`matched`, `exited`, etc.) plus a tail of
+        the captured output. Stale handles and bad arguments come back
+        as `<...>` markers.
+    """
+    try:
+        timeout_s = float(timeout_s)
+    except (TypeError, ValueError):
+        return f"<error: timeout_s must be a number, got {timeout_s!r}>"
+    if not isinstance(until, str) or not until:
+        return f"<error: until must be a non-empty string, got {until!r}>"
+
+    bg = _coerce_handle(handle)
+    if isinstance(bg, str):
+        return bg
+
+    deadline = time.monotonic() + max(timeout_s, 0.0)
+    poll_interval = 0.05
+
+    if until == "exit":
+        try:
+            rc = bg.proc.wait(timeout=max(timeout_s, 0.0))
+        except subprocess.TimeoutExpired:
+            tail = _tail(_combined_text(bg))
+            return (
+                f"<timed out: {bg.handle} ({bg.name}) still running after "
+                f"{timeout_s}s; tail:\n{tail}>"
+            )
+        tail = _tail(_combined_text(bg))
+        return (
+            f"exited {bg.handle} ({bg.name}) rc={rc}\ntail:\n{tail}"
+        )
+
+    if until.startswith("output_contains:"):
+        needle = until[len("output_contains:"):]
+        if not needle:
+            return "<error: output_contains needs a non-empty substring>"
+        while time.monotonic() < deadline:
+            if needle in _combined_text(bg):
+                tail = _tail(_combined_text(bg))
+                return (
+                    f"matched {bg.handle} ({bg.name}) on substring "
+                    f"{needle!r}\ntail:\n{tail}"
+                )
+            if bg.proc.poll() is not None:
+                # Process exited before we matched. Check one more time
+                # in case the final bytes landed under the lock.
+                if needle in _combined_text(bg):
+                    tail = _tail(_combined_text(bg))
+                    return (
+                        f"matched {bg.handle} ({bg.name}) on substring "
+                        f"{needle!r} (after exit)\ntail:\n{tail}"
+                    )
+                tail = _tail(_combined_text(bg))
+                return (
+                    f"<exited before match: {bg.handle} ({bg.name}) "
+                    f"exited rc={bg.proc.returncode} without producing "
+                    f"{needle!r}; tail:\n{tail}>"
+                )
+            time.sleep(poll_interval)
+        tail = _tail(_combined_text(bg))
+        return (
+            f"<timed out: {bg.handle} ({bg.name}) did not produce "
+            f"{needle!r} within {timeout_s}s; tail:\n{tail}>"
+        )
+
+    if until.startswith("output_matches:"):
+        pattern = until[len("output_matches:"):]
+        if not pattern:
+            return "<error: output_matches needs a non-empty regex>"
+        try:
+            regex = re.compile(pattern)
+        except re.error as e:
+            return f"<error: invalid regex {pattern!r}: {e}>"
+        while time.monotonic() < deadline:
+            text = _combined_text(bg)
+            m = regex.search(text)
+            if m:
+                tail = _tail(text)
+                return (
+                    f"matched {bg.handle} ({bg.name}) on regex "
+                    f"{pattern!r} (match: {m.group(0)!r})\ntail:\n{tail}"
+                )
+            if bg.proc.poll() is not None:
+                text = _combined_text(bg)
+                m = regex.search(text)
+                if m:
+                    tail = _tail(text)
+                    return (
+                        f"matched {bg.handle} ({bg.name}) on regex "
+                        f"{pattern!r} (after exit, match: "
+                        f"{m.group(0)!r})\ntail:\n{tail}"
+                    )
+                tail = _tail(text)
+                return (
+                    f"<exited before match: {bg.handle} ({bg.name}) "
+                    f"exited rc={bg.proc.returncode} without matching "
+                    f"{pattern!r}; tail:\n{tail}>"
+                )
+            time.sleep(poll_interval)
+        tail = _tail(_combined_text(bg))
+        return (
+            f"<timed out: {bg.handle} ({bg.name}) did not match "
+            f"{pattern!r} within {timeout_s}s; tail:\n{tail}>"
+        )
+
+    if until.startswith("silence:"):
+        spec = until[len("silence:"):]
+        if spec.endswith("s"):
+            spec = spec[:-1]
+        try:
+            quiet_s = float(spec)
+        except ValueError:
+            return f"<error: silence:Ns expected a number, got {spec!r}>"
+        if quiet_s <= 0:
+            return f"<error: silence:Ns must be positive, got {quiet_s}>"
+        while time.monotonic() < deadline:
+            now = time.monotonic()
+            with bg.lock:
+                last = bg.last_write
+            if (now - last) >= quiet_s:
+                tail = _tail(_combined_text(bg))
+                return (
+                    f"settled {bg.handle} ({bg.name}) — "
+                    f"{quiet_s}s without new output\ntail:\n{tail}"
+                )
+            if bg.proc.poll() is not None:
+                # Exited; treat the remaining quiet window as instantly
+                # satisfied — no more output is coming.
+                tail = _tail(_combined_text(bg))
+                return (
+                    f"settled {bg.handle} ({bg.name}) — process exited "
+                    f"rc={bg.proc.returncode}\ntail:\n{tail}"
+                )
+            time.sleep(poll_interval)
+        tail = _tail(_combined_text(bg))
+        return (
+            f"<timed out: {bg.handle} ({bg.name}) kept producing output "
+            f"for {timeout_s}s without a {quiet_s}s quiet window; "
+            f"tail:\n{tail}>"
+        )
+
+    return (
+        f"<error: unknown until={until!r}; expected one of "
+        f"'exit', 'output_contains:STRING', 'output_matches:REGEX', "
+        f"'silence:Ns'>"
+    )
+
+
+def kill_process(handle: str) -> str:
+    """SIGKILL a background process and forget the handle.
+
+    Idempotent in spirit: a stale handle returns the standard
+    `<error: handle ... is not active in this session>` marker. After
+    a successful kill the handle is removed from the registry, so a
+    follow-up `read_output` against it also returns the stale marker.
+
+    Args:
+        handle: Handle returned by `run_background`.
+
+    Returns:
+        Confirmation line with the final exit code (or `unknown` if
+        the wait raced the kill). Stale handles come back as `<...>`.
+    """
+    bg = _coerce_handle(handle)
+    if isinstance(bg, str):
+        return bg
+    try:
+        os.killpg(bg.proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        # Already exited; fall through and clean up.
+        pass
+    try:
+        rc = bg.proc.wait(timeout=2.0)
+        rc_str = str(rc)
+    except subprocess.TimeoutExpired:
+        rc_str = "unknown (wait timed out)"
+    with _ACTIVE_BG_LOCK:
+        _ACTIVE_BG_PROCS.pop(bg.handle, None)
+    return (
+        f"killed {bg.handle} ({bg.name}) rc={rc_str}"
     )
 
 
