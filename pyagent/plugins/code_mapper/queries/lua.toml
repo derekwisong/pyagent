@@ -1,0 +1,17 @@
+# code-mapper language config — Lua.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "lua"
+description = "Lua source files."
+extensions = [".lua"]
+
+definition_node_types = [
+    "function_declaration",
+    "function_definition",
+]
+
+[captures]
+"definition.function" = "function"
+"definition.method" = "method"

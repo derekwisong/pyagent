@@ -1,0 +1,28 @@
+# code-mapper language config — Swift.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "swift"
+description = "Swift source files."
+extensions = [".swift"]
+
+definition_node_types = [
+    "class_declaration",
+    "protocol_declaration",
+    "function_declaration",
+    "protocol_function_declaration",
+]
+
+[captures]
+"definition.class" = "class"
+"definition.interface" = "interface"
+"definition.method" = "method"
+"definition.function" = "function"
+"definition.property" = "property"
+
+# Functions defined inside a class body are methods.
+[[promote]]
+from = "function"
+to = "method"
+when_inside = ["class_declaration"]

@@ -1,0 +1,26 @@
+# code-mapper language config — Kotlin.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "kotlin"
+description = "Kotlin source files."
+extensions = [".kt", ".kts"]
+
+definition_node_types = [
+    "class_declaration",
+    "object_declaration",
+    "function_declaration",
+]
+
+[captures]
+"definition.class" = "class"
+"definition.object" = "object"
+"definition.function" = "function"
+"definition.method" = "method"
+
+# Functions inside a class body are methods.
+[[promote]]
+from = "function"
+to = "method"
+when_inside = ["class_declaration", "object_declaration"]

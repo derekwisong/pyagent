@@ -1,0 +1,16 @@
+# code-mapper language config — CSS.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "css"
+description = "CSS stylesheets — selectors and at-rules."
+extensions = [".css"]
+
+definition_node_types = []
+
+[captures]
+"definition.class_selector" = "class_selector"
+"definition.id_selector" = "id_selector"
+"definition.tag_selector" = "tag_selector"
+"definition.at_rule" = "at_rule"
