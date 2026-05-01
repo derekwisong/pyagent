@@ -67,19 +67,27 @@ def register(api):
     def _index_paths() -> tuple[Path, Path]:
         return storage / "vectors.npy", storage / "index.json"
 
-    def _parse_index_hooks() -> list[tuple[str, str, str]]:
-        """Return list of (title, filename, hook) tuples parsed from
-        MEMORY.md. hook may be empty if the index entry omits it."""
+    def _parse_index_entries() -> list[tuple[str, str, str, str]]:
+        """Return list of (category, title, filename, hook) tuples
+        parsed from MEMORY.md. category is the most recent ## heading
+        seen above the bullet, or "" if the bullet appears before any
+        heading. hook may be empty if the index entry omits it."""
         index_path = source / "MEMORY.md"
         if not index_path.exists():
             return []
         out = []
+        current_category = ""
         for line in index_path.read_text().splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("## "):
+                current_category = stripped[3:].strip()
+                continue
             m = _INDEX_LINE_RE.match(line)
             if not m:
                 continue
             out.append(
                 (
+                    current_category,
                     m.group("title").strip(),
                     m.group("file").strip(),
                     (m.group("hook") or "").strip(),
@@ -91,7 +99,7 @@ def register(api):
         """Walk MEMORY.md + memories/*.md; return list of chunks
         ready to embed. Each chunk has {kind, filename, text}."""
         chunks: list[dict] = []
-        for title, filename, hook in _parse_index_hooks():
+        for _category, title, filename, hook in _parse_index_entries():
             text = f"{title}: {hook}" if hook else title
             chunks.append({"kind": "hook", "filename": filename, "text": text})
         memories_dir = source / "memories"
@@ -183,7 +191,12 @@ def register(api):
         ]
         return "\n".join(lines[:3])
 
-    def recall_memory(query: str, k: int = 5) -> str:
+    def recall_memory(
+        query: str,
+        k: int = 5,
+        min_score: float = 0.0,
+        category: str | None = None,
+    ) -> str:
         """Semantic search over the memory ledger.
 
         Returns the top-k memory files matching `query`, scored by
@@ -198,7 +211,16 @@ def register(api):
 
         Args:
             query: What you're looking for, in natural language.
-            k: How many top hits to return. Default 5.
+            k: Maximum number of memory files in the result.
+                Default 5.
+            min_score: Drop hits below this cosine similarity. Use
+                to filter low-confidence noise — typical useful
+                range is 0.2–0.5; defaults to 0.0 (no threshold).
+            category: Restrict to memories filed under this H2
+                heading in MEMORY.md (case-insensitive). Use when
+                you already know the topic area; avoids dilution
+                from off-topic memories that share keywords.
+                Defaults to None (search everything).
 
         Returns:
             A formatted list of hits, or a `<...>` error string.
@@ -218,6 +240,9 @@ def register(api):
         )
         q_vec = q_vec / max(float(np.linalg.norm(q_vec)), 1e-9)
         scores = vectors @ q_vec  # cosine since normalized
+        entries = _parse_index_entries()
+        file_to_cat = {f: c for c, _t, f, _h in entries}
+        hook_lookup = {f: h for _c, _t, f, h in entries if h}
         # Group by filename: keep highest-scoring chunk per file so a
         # body and its hook don't both show up.
         best: dict[str, tuple[float, dict]] = {}
@@ -226,11 +251,42 @@ def register(api):
             existing = best.get(m["filename"])
             if existing is None or score > existing[0]:
                 best[m["filename"]] = (score, m)
-        ranked = sorted(best.items(), key=lambda kv: -kv[1][0])[:k]
-        hook_lookup = {
-            f: h for _, f, h in _parse_index_hooks() if h
-        }
-        lines = [f"Top {len(ranked)} matches for {query!r}:"]
+
+        target_cat = category.strip().lower() if category else None
+        filtered: list[tuple[str, tuple[float, dict]]] = []
+        for filename, (score, m) in best.items():
+            if score < min_score:
+                continue
+            if target_cat is not None:
+                actual = file_to_cat.get(filename, "")
+                if actual.lower() != target_cat:
+                    continue
+            filtered.append((filename, (score, m)))
+        ranked = sorted(filtered, key=lambda kv: -kv[1][0])[:k]
+
+        # Header reflects active filters so the agent knows what was
+        # applied; unfiltered output is unchanged.
+        filter_parts = []
+        if min_score > 0:
+            filter_parts.append(f"min_score={min_score:.2f}")
+        if category:
+            filter_parts.append(f"category={category!r}")
+        filter_suffix = (
+            f" ({', '.join(filter_parts)})" if filter_parts else ""
+        )
+
+        if not ranked:
+            if filter_parts:
+                return (
+                    f"<no matches for {query!r} with "
+                    f"{', '.join(filter_parts)}; "
+                    "try a broader filter or drop the threshold>"
+                )
+            return f"<no matches for {query!r}>"
+
+        lines = [
+            f"Top {len(ranked)} matches for {query!r}{filter_suffix}:"
+        ]
         for filename, (score, m) in ranked:
             lines.append(
                 f"  • memories/{filename}  "
@@ -270,7 +326,12 @@ def register(api):
             "snippets; fetch the ones you want with read_ledger.\n"
             "\n"
             "Rule of thumb: **index → read_ledger** for direct "
-            "fetches; **recall_memory** for fishing."
+            "fetches; **recall_memory** for fishing.\n"
+            "\n"
+            "Filters when you need them: pass `min_score=0.3` "
+            "(or higher) to drop low-confidence noise, and "
+            "`category=\"Database\"` to scope to one H2 section "
+            "in MEMORY.md when you already know the topic area."
         )
 
     api.register_prompt_section(
