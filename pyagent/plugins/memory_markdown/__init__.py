@@ -1,19 +1,19 @@
 """memory-markdown — bundled markdown ledger backend.
 
-The original USER.md / MEMORY.md system, expressed through the v1
-plugin API. Two tools, two prompt sections, one lifecycle hook.
+USER ledger  — splatted: auto-loaded into every system prompt
+                (small, always-relevant: preferences, conventions,
+                name, timezone). One file.
 
-Memory model preserved from pre-plugin pyagent:
-  USER ledger    — splatted: auto-loaded into every system prompt
-                   (small, always-relevant: preferences, conventions,
-                   name, timezone).
-  MEMORY ledger  — recalled on demand: agent calls read_ledger("MEMORY")
-                   when it judges the answer might be there. Avoids
-                   ballooning the prompt with potentially-large content.
+MEMORY       — index + per-memory files. MEMORY.md is the catalog
+                (auto-loaded into every prompt); each memory is its
+                own markdown file under memories/ in the plugin's
+                data dir. Agent reads the catalog in the prompt,
+                fetches a specific file with read_ledger("MEMORY",
+                file="foo.md") only when it needs the body.
 
 Companion files in this directory:
   manifest.toml
-  defaults/MEMORY.md   — seed template for the long-term memory file
+  defaults/MEMORY.md   — seed template for the index file
   defaults/USER.md     — seed template for the per-user notes file
   defaults/PROMPT.md   — the "how to use the ledgers" instructional
                          prose, lifted from SOUL.md
@@ -25,6 +25,23 @@ import shutil
 from pathlib import Path
 
 _LEDGERS = {"USER": "USER.md", "MEMORY": "MEMORY.md"}
+_MEMORIES_DIRNAME = "memories"
+
+
+def _validate_memory_filename(file: str) -> str | None:
+    """Return None if `file` is a safe bare memory filename, else an
+    error string suitable to return to the LLM. Rejects path traversal,
+    absolute paths, hidden files, and non-`.md` extensions."""
+    if not file:
+        return "<memory filename is empty>"
+    p = Path(file)
+    if p.is_absolute() or len(p.parts) != 1:
+        return f"<memory filename must be a bare name (no slashes): {file!r}>"
+    if file.startswith(".") or ".." in file:
+        return f"<invalid memory filename: {file!r}>"
+    if not file.endswith(".md"):
+        return f"<memory filename must end with .md: {file!r}>"
+    return None
 
 
 def register(api):
@@ -40,6 +57,9 @@ def register(api):
     def _ledger_path(name: str) -> Path:
         return storage / _LEDGERS[name]
 
+    def _memory_file_path(file: str) -> Path:
+        return storage / _MEMORIES_DIRNAME / file
+
     def _seed_if_missing(name: str) -> None:
         target = _ledger_path(name)
         if target.exists():
@@ -51,47 +71,75 @@ def register(api):
 
     # ---- Tools ------------------------------------------------------
 
-    def read_ledger(name: str) -> str:
-        """Read one of the agent's ledgers.
+    def read_ledger(name: str, file: str | None = None) -> str:
+        """Read one of the agent's ledgers, or a specific memory file.
 
-        Ledgers are the agent's persistent notebooks — `USER` (notes
-        about the person being helped) and `MEMORY` (long-term
-        memorable facts). Their on-disk locations are resolved
-        automatically; do not use `read_file` for these.
+        Ledgers are the agent's persistent notebooks. `USER` is a
+        single-file ledger (notes about the person being helped).
+        `MEMORY` is an index + per-memory files: MEMORY.md is the
+        catalog, each memory is its own file under `memories/`.
 
         Args:
             name: Ledger to read. One of: "USER", "MEMORY".
+            file: For MEMORY only — name of a specific memory file
+                under `memories/` (e.g. "stack_choices.md"). Omit to
+                read the MEMORY.md index. Not supported for USER.
 
         Returns:
-            The ledger's contents, or an empty string if unwritten.
+            File contents, or an empty string if unwritten. Returns
+            an error string in `<...>` form for invalid inputs.
         """
         key = name.upper()
         if key not in _LEDGERS:
             valid = ", ".join(sorted(_LEDGERS))
             return f"<unknown ledger: {name!r}; valid: {valid}>"
+        if file is not None:
+            if key == "USER":
+                return "<USER is a single-file ledger; file argument not supported>"
+            err = _validate_memory_filename(file)
+            if err:
+                return err
+            target = _memory_file_path(file)
+            if not target.exists():
+                return f"<memory not found: memories/{file}>"
+            return target.read_text()
         _seed_if_missing(key)
         target = _ledger_path(key)
         if not target.exists():
             return ""
         return target.read_text()
 
-    def write_ledger(name: str, content: str) -> str:
-        """Overwrite one of the agent's ledgers with new content.
+    def write_ledger(
+        name: str, content: str, file: str | None = None
+    ) -> str:
+        """Overwrite a ledger or a specific memory file.
 
-        Ledgers are the agent's persistent notebooks — `USER` and
-        `MEMORY`. Their on-disk locations are resolved automatically;
-        do not use `write_file` for these. Writes overwrite; if you
-        only want to add, `read_ledger` first, edit, then
-        `write_ledger`.
+        For USER, omit `file` — USER is a single-file ledger.
+        For MEMORY, omit `file` to overwrite the MEMORY.md index;
+        pass `file="foo.md"` to write `memories/foo.md`. After
+        creating a new memory file, also update MEMORY.md to add a
+        pointer in the index — agents see only the index by default.
 
         Args:
             name: Ledger to write. One of: "USER", "MEMORY".
-            content: Full new content of the ledger.
+            content: Full new content.
+            file: For MEMORY only — name of a memory file under
+                `memories/`. Omit to write the MEMORY.md index.
         """
         key = name.upper()
         if key not in _LEDGERS:
             valid = ", ".join(sorted(_LEDGERS))
             return f"<unknown ledger: {name!r}; valid: {valid}>"
+        if file is not None:
+            if key == "USER":
+                return "<USER is a single-file ledger; file argument not supported>"
+            err = _validate_memory_filename(file)
+            if err:
+                return err
+            target = _memory_file_path(file)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+            return f"Wrote {len(content)} bytes to {target}"
         target = _ledger_path(key)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
@@ -102,9 +150,10 @@ def register(api):
 
     # ---- Prompt sections --------------------------------------------
     #
-    # Two sections, both volatile=False (stable across turns; cache
-    # stays warm). The USER section's content changes when the agent
-    # writes to it — that breaks the cache for one turn, then re-warms.
+    # Three sections, all volatile=False (stable across turns; cache
+    # stays warm). USER and MEMORY-INDEX content changes when the
+    # agent writes to them — that breaks the cache for one turn,
+    # then re-warms.
 
     prompt_path = seeds / "PROMPT.md"
 
@@ -124,11 +173,25 @@ def register(api):
             return ""
         return target.read_text()
 
+    def render_memory_index(ctx) -> str:
+        """Auto-load the MEMORY.md index into every prompt so the
+        agent always sees the catalog without a tool call. Body
+        files under memories/ are fetched on demand via
+        read_ledger("MEMORY", file=...)."""
+        _seed_if_missing("MEMORY")
+        target = _ledger_path("MEMORY")
+        if not target.exists():
+            return ""
+        return target.read_text()
+
     api.register_prompt_section(
         "memory-guidance", render_memory_guidance, volatile=False
     )
     api.register_prompt_section(
         "user-ledger", render_user_ledger, volatile=False
+    )
+    api.register_prompt_section(
+        "memory-index", render_memory_index, volatile=False
     )
 
     # ---- Lifecycle hooks --------------------------------------------
