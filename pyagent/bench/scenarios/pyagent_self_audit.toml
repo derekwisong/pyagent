@@ -1,0 +1,30 @@
+name = "pyagent_self_audit"
+description = "Audit the pyagent codebase itself: trace tool registration, evaluate the offload threshold design, and propose a one-paragraph improvement. No network, fully reproducible from the snapshotted source."
+
+# Snapshot the user's cwd into the bench workspace before spawning. The
+# agent edits/reads against the snapshot, never the live repo. Run this
+# scenario from inside the pyagent project root so the snapshot makes
+# sense (the prompts assume the codebase layout).
+seed_workspace_from = "cwd"
+
+# Hint for humans reading the file; not enforced.
+tools = ["grep", "read_file", "list_directory"]
+
+[[prompts]]
+text = """List every tool that the root agent registers by default. \
+For each tool, give the source file and a one-sentence description of \
+what it does. Look at the registration site, not the imports — be \
+specific about which tools are core vs. plugin-provided."""
+
+[[prompts]]
+text = """For each tool you listed, identify whether it's registered \
+with `auto_offload=True` (the default) or `auto_offload=False`. \
+Briefly explain the reasoning behind any tool that bypasses \
+auto-offload — what makes that tool's outputs different from the ones \
+that auto-offload at 8K chars?"""
+
+[[prompts]]
+text = """Look at `Agent.SOFT_THRESHOLD_FORCED_TOOLS` in pyagent/agent.py. \
+Are any tools missing from that set that should arguably be included? \
+Justify your answer in two sentences, citing one concrete example of \
+how a missing tool could produce inline-bloat under realistic usage."""

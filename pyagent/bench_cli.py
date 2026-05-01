@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import shutil
 import sys
+import tempfile
 import time
 import tomllib
 from dataclasses import asdict, dataclass, field
@@ -47,6 +49,14 @@ class Scenario:
     description: str
     prompts: list[str]
     tools_hint: list[str] = field(default_factory=list)
+    # If set, snapshot this directory into the bench's tmpdir workspace
+    # before spawning the agent. `"cwd"` means the directory the user
+    # invoked `pyagent-bench` from; an absolute path snapshots that
+    # directory specifically. The agent operates on the snapshot, so
+    # any edits it makes don't touch the live source. Empty (default)
+    # means the workspace stays bare — appropriate for scenarios that
+    # source their inputs from the network (e.g. well_mako).
+    seed_workspace_from: str = ""
 
 
 @dataclass
@@ -54,6 +64,7 @@ class BenchReport:
     scenario: str
     model: str
     session_id: str
+    workspace: str  # absolute path to the run's tmpdir workspace
     reason: str  # "complete" | "budget" | "cancelled" | "error"
     prompts_run: int
     prompts_total: int
@@ -101,6 +112,7 @@ def _load_scenario(name: str) -> Scenario:
         description=data.get("description", ""),
         prompts=prompts,
         tools_hint=list(data.get("tools", []) or []),
+        seed_workspace_from=str(data.get("seed_workspace_from", "") or ""),
     )
 
 
@@ -163,18 +175,22 @@ def _default_budget_for(model: str) -> float:
     return _DEFAULT_BUDGET_BY_BARE_MODEL.get(bare, _BUDGET_FALLBACK_USD)
 
 
-def _build_agent_config(model: str, session_id: str) -> dict[str, Any]:
+def _build_agent_config(
+    model: str, session_id: str, workspace: Path
+) -> dict[str, Any]:
     """Mirror the CLI's startup setup but for a non-interactive run.
 
-    The bench owns its own session id (so it can print it before
-    spawning the child) and runs in the user's cwd so plugins resolve
-    against real config.
+    `workspace` becomes the agent's cwd. The bench mints a fresh
+    tmpdir per run (see `run_cmd`) so write_file targets like
+    `bench-output.md` land inside the workspace and don't trip the
+    permissions gate, AND so back-to-back runs don't leave artifacts
+    in the user's project dir.
     """
     soul = paths.resolve("SOUL.md", override=None, seed="SOUL.md")
     tools_md = paths.resolve("TOOLS.md", override=None, seed="TOOLS.md")
     primer = paths.resolve("PRIMER.md", override=None, seed="PRIMER.md")
     return {
-        "cwd": str(Path.cwd().resolve()),
+        "cwd": str(workspace.resolve()),
         "model": model,
         "session_id": session_id,
         "soul_path": str(soul),
@@ -278,6 +294,7 @@ def _render_report(report: BenchReport) -> str:
     lines.append(f"BENCH REPORT  scenario={report.scenario}")
     lines.append("=" * 60)
     lines.append(f"model:       {report.model}")
+    lines.append(f"workspace:   {report.workspace}")
     lines.append(f"session:     {report.session_id}")
     lines.append(f"reason:      {report.reason}")
     lines.append(
@@ -310,6 +327,7 @@ def _render_report(report: BenchReport) -> str:
         lines.append("tool_calls:  (none)")
     lines.append("")
     lines.append("To inspect this session in detail:")
+    lines.append(f"  cd {report.workspace}")
     lines.append(f"  pyagent-sessions audit {report.session_id}")
     return "\n".join(lines)
 
@@ -384,18 +402,63 @@ def run_cmd(
         budget = _default_budget_for(resolved_model)
     cap = None if no_budget else budget
 
+    # Each bench run gets a fresh tmpdir as its workspace. write_file
+    # calls in the scenario (e.g. "save the analysis to bench-output.md")
+    # land inside this dir and pass the workspace gate; the user's
+    # project dir stays clean across runs. The session and its
+    # attachments live under <tmpdir>/.pyagent/sessions/<id>/, so the
+    # parent and child agree on absolute paths even though they have
+    # different cwds at construction time.
+    workspace = Path(
+        tempfile.mkdtemp(prefix=f"pyagent-bench-{sc.name}-")
+    )
+
+    # Optionally snapshot a source directory into the workspace. Used
+    # by self-audit-style scenarios that need real code or data on
+    # disk; the snapshot keeps the agent's edits off the live source.
+    if sc.seed_workspace_from:
+        if sc.seed_workspace_from == "cwd":
+            seed_src = Path.cwd().resolve()
+        else:
+            seed_src = Path(sc.seed_workspace_from).expanduser().resolve()
+        if not seed_src.is_dir():
+            raise click.ClickException(
+                f"scenario {sc.name!r} seed source {seed_src} "
+                f"is not a directory."
+            )
+        click.echo(f"[bench] seed:      {seed_src} → {workspace}")
+        # Don't copy git/venv/cache cruft. .pyagent IS copied so the
+        # agent inherits the user's project-tier plugins, skills, and
+        # roles; the bench's own session is keyed by id under
+        # .pyagent/sessions/ and won't collide with anything carried
+        # over.
+        shutil.copytree(
+            seed_src,
+            workspace,
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns(
+                ".git", ".venv", "venv", "node_modules",
+                "__pycache__", "*.pyc", "*.egg-info", ".pytest_cache",
+            ),
+        )
+
+    session_root = workspace / ".pyagent" / "sessions"
+
     # Mint the session up front so we can print + report the id even
     # if the child never reaches `ready`.
-    session = Session()
-    click.echo(f"[bench] scenario: {sc.name} ({sc.description})")
-    click.echo(f"[bench] model:    {resolved_model}")
-    click.echo(f"[bench] session:  {session.id}")
+    session = Session(root=session_root)
+    click.echo(f"[bench] scenario:  {sc.name} ({sc.description})")
+    click.echo(f"[bench] model:     {resolved_model}")
+    click.echo(f"[bench] workspace: {workspace}")
+    click.echo(f"[bench] session:   {session.id}")
     if cap is not None:
-        click.echo(f"[bench] budget:   ${cap:.2f}")
+        click.echo(f"[bench] budget:    ${cap:.2f}")
     else:
-        click.echo("[bench] budget:   (disabled)")
+        click.echo("[bench] budget:    (disabled)")
 
-    agent_config = _build_agent_config(resolved_model, session.id)
+    agent_config = _build_agent_config(
+        resolved_model, session.id, workspace
+    )
     state = _BenchState()
     started = time.monotonic()
 
@@ -491,6 +554,7 @@ def run_cmd(
             scenario=sc.name,
             model=resolved_model,
             session_id=session.id,
+            workspace=str(workspace.resolve()),
             reason=reason,
             prompts_run=prompts_run,
             prompts_total=len(sc.prompts),
