@@ -1,0 +1,21 @@
+name = "memory-vector"
+version = "0.1.0"
+description = "Semantic recall over memory-markdown's MEMORY.md index and memories/ bodies via fastembed."
+api_version = "1"
+
+[provides]
+tools = ["recall_memory"]
+prompt_sections = ["memory-vector-guidance"]
+
+# Single tool. Loosely coupled to memory-markdown — reads from its
+# data dir at runtime; doesn't import its code. If memory-markdown
+# isn't installed/enabled, recall_memory just returns "no memories
+# indexed yet".
+#
+# Optional runtime dependency: fastembed (see pyproject
+# [project.optional-dependencies] vector). If fastembed is missing
+# the plugin logs a warning and skips registration; the agent
+# continues without semantic recall.
+
+[load]
+in_subagents = false
