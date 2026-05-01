@@ -1,0 +1,25 @@
+# code-mapper language config — Go.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "go"
+description = "Go source files."
+extensions = [".go"]
+
+definition_node_types = [
+    "function_declaration",
+    "method_declaration",
+    "type_declaration",
+    "type_spec",
+]
+
+[captures]
+"definition.function" = "function"
+"definition.method" = "method"
+"definition.type" = "type"
+"definition.class" = "struct"
+"definition.interface" = "interface"
+"definition.module" = "module"
+"definition.variable" = "variable"
+"definition.constant" = "constant"

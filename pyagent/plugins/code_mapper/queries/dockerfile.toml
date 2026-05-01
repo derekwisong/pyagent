@@ -1,0 +1,14 @@
+# code-mapper language config — Dockerfile.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "dockerfile"
+description = "Dockerfiles — instructions and stage markers."
+extensions = [".dockerfile"]
+
+definition_node_types = []
+
+[captures]
+"definition.directive" = "directive"
+"definition.stage" = "stage"

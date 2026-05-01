@@ -1,0 +1,18 @@
+# code-mapper language config — JSON.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "json"
+description = "JSON documents — top-level keys captured as fields."
+extensions = [".json"]
+
+# Only `pair` is a parent anchor — putting `object` here would stop
+# the walk at the immediate enclosing object (which has no name in
+# def_name_index), so nested keys would lose their parent. With just
+# `pair`, the walk passes through the object up to the next pair,
+# whose @name is in the index.
+definition_node_types = ["pair"]
+
+[captures]
+"definition.field" = "field"

@@ -1,0 +1,28 @@
+# code-mapper language config — TypeScript.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "typescript"
+description = "TypeScript source files (non-JSX)."
+extensions = [".ts", ".mts", ".cts"]
+
+# Definition node types we walk through during parent attribution.
+definition_node_types = [
+    "class_declaration",
+    "abstract_class_declaration",
+    "interface_declaration",
+    "enum_declaration",
+    "module",
+    "function_declaration",
+    "method_definition",
+]
+
+[captures]
+"definition.class" = "class"
+"definition.interface" = "interface"
+"definition.enum" = "enum"
+"definition.module" = "module"
+"definition.type" = "type"
+"definition.function" = "function"
+"definition.method" = "method"

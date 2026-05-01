@@ -1,0 +1,35 @@
+# code-mapper language config — Scala.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "scala"
+description = "Scala source files."
+extensions = [".scala", ".sc"]
+
+definition_node_types = [
+    "class_definition",
+    "object_definition",
+    "trait_definition",
+    "enum_definition",
+    "function_definition",
+    "function_declaration",
+    "package_clause",
+]
+
+[captures]
+"definition.module" = "module"
+"definition.class" = "class"
+"definition.object" = "object"
+"definition.interface" = "trait"
+"definition.enum" = "enum"
+"definition.function" = "function"
+"definition.method" = "method"
+"definition.type" = "type"
+"definition.variable" = "variable"
+"definition.property" = "property"
+
+[[promote]]
+from = "function"
+to = "method"
+when_inside = ["class_definition", "object_definition", "trait_definition"]

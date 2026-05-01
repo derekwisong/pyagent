@@ -1,0 +1,24 @@
+# code-mapper language config — JavaScript.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "javascript"
+description = "JavaScript and JSX source files."
+extensions = [".js", ".mjs", ".cjs", ".jsx"]
+
+definition_node_types = [
+    "class",
+    "class_declaration",
+    "function_declaration",
+    "function_expression",
+    "generator_function",
+    "generator_function_declaration",
+    "method_definition",
+    "arrow_function",
+]
+
+[captures]
+"definition.class" = "class"
+"definition.function" = "function"
+"definition.method" = "method"

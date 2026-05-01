@@ -1,0 +1,17 @@
+# code-mapper language config — TOML.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "toml"
+description = "TOML documents — section headers and top-level keys."
+extensions = [".toml"]
+
+# `table` and `table_array_element` are the section anchors. The
+# enclosing-walk uses them to attribute child keys to the section
+# they're declared under.
+definition_node_types = ["table", "table_array_element"]
+
+[captures]
+"definition.module" = "module"
+"definition.field" = "field"

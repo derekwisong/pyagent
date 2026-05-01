@@ -1,0 +1,25 @@
+# code-mapper language config — PHP.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "php"
+description = "PHP source files."
+extensions = [".php"]
+
+definition_node_types = [
+    "class_declaration",
+    "interface_declaration",
+    "trait_declaration",
+    "enum_declaration",
+    "method_declaration",
+    "function_definition",
+]
+
+[captures]
+"definition.class" = "class"
+"definition.interface" = "interface"
+"definition.trait" = "trait"
+"definition.enum" = "enum"
+"definition.function" = "function"
+"definition.method" = "method"

@@ -1,0 +1,19 @@
+# code-mapper language config — SQL.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "sql"
+description = "SQL — table / view / index / function definitions."
+extensions = [".sql"]
+
+definition_node_types = []
+
+[captures]
+"definition.table" = "table"
+"definition.view" = "view"
+"definition.index" = "index"
+"definition.function" = "function"
+"definition.procedure" = "procedure"
+"definition.trigger" = "trigger"
+"definition.schema" = "schema"

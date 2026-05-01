@@ -1,0 +1,28 @@
+# code-mapper language config — Java.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "java"
+description = "Java source files."
+extensions = [".java"]
+
+definition_node_types = [
+    "class_declaration",
+    "interface_declaration",
+    "enum_declaration",
+    "record_declaration",
+    "annotation_type_declaration",
+    "method_declaration",
+    "constructor_declaration",
+]
+
+[captures]
+"definition.class" = "class"
+"definition.interface" = "interface"
+"definition.enum" = "enum"
+"definition.record" = "record"
+"definition.annotation" = "annotation"
+"definition.method" = "method"
+"definition.constructor" = "constructor"
+"definition.field" = "field"

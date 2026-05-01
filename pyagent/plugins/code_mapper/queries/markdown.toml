@@ -1,0 +1,14 @@
+# code-mapper language config — Markdown.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "markdown"
+description = "Markdown documents — H1-H3 headings as outline."
+extensions = [".md", ".markdown"]
+
+# Section nesting follows H1 > H2 > H3 in the markdown grammar.
+definition_node_types = ["section"]
+
+[captures]
+"definition.heading" = "heading"
