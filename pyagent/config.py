@@ -51,7 +51,7 @@ LOCAL_CONFIG_DIR = Path(".pyagent")
 DEFAULTS: dict[str, Any] = {
     "default_model": "",
     "built_in_skills_enabled": ["write-skill", "write-plugin"],
-    "built_in_plugins_enabled": ["memory-markdown", "html-tools"],
+    "built_in_plugins_enabled": ["memory-markdown", "html-tools", "code-mapper"],
     "subagents": {
         "max_depth": 3,
         "max_fanout": 5,

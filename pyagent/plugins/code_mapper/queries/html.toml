@@ -1,0 +1,22 @@
+# code-mapper language config — HTML.
+#
+# See ../EXTENDING.md for schema docs. Scalars before tables.
+
+language = "html"
+description = "HTML documents — outline view (headings, ids, landmarks, script/style)."
+extensions = [".html", ".htm"]
+
+# HTML has nesting but tree-sitter doesn't surface a single "definition
+# node type" the way function_definition does in C. Leaving this empty
+# means parent attribution comes only from explicit @parent captures
+# (e.g. "this id belongs to a <section>") rather than AST walks. That's
+# the right call for HTML — walking up through every <div>/<span> would
+# produce noisy parent chains.
+definition_node_types = []
+
+[captures]
+"definition.heading" = "heading"
+"definition.element_id" = "element_id"
+"definition.section" = "section"
+"definition.script" = "script"
+"definition.style" = "style"

@@ -1,0 +1,45 @@
+# code-mapper language config — Rust.
+#
+# See ../EXTENDING.md for schema docs. Scalars MUST come before any
+# [table] / [[array_of_tables]] header.
+
+language = "rust"
+description = "Rust source files."
+extensions = [".rs"]
+
+# Definition node types we walk through during parent attribution.
+# Includes impl_item and trait_item so functions inside them get
+# correctly attributed to the impl/trait, and via the promote rules
+# below get upgraded from "function" to "method".
+definition_node_types = [
+    "function_item",
+    "struct_item",
+    "enum_item",
+    "union_item",
+    "type_item",
+    "trait_item",
+    "impl_item",
+    "mod_item",
+]
+
+# Capture-name → normalized kind. We split ADTs into struct/enum/union
+# instead of upstream's @definition.class — see rust.scm header for the
+# rationale.
+[captures]
+"definition.struct" = "struct"
+"definition.enum" = "enum"
+"definition.union" = "union"
+"definition.type" = "type"
+"definition.function" = "function"
+"definition.trait" = "trait"
+"definition.module" = "module"
+"definition.macro" = "macro"
+"definition.impl" = "impl"
+"reference.call" = "call"
+
+# Functions inside an impl or trait block are methods. Functions
+# inside a mod block stay functions (they're plain module-level fns).
+[[promote]]
+from = "function"
+to = "method"
+when_inside = ["impl_item", "trait_item"]

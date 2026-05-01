@@ -1,0 +1,35 @@
+# code-mapper language config — C++.
+#
+# See ../EXTENDING.md for schema docs. Scalars before tables.
+
+language = "cpp"
+description = "C++ source and header files."
+extensions = [".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"]
+
+# Definition node types for parent attribution. Includes namespace
+# and class/struct so methods get correctly attributed up the chain.
+definition_node_types = [
+    "class_specifier",
+    "struct_specifier",
+    "union_specifier",
+    "enum_specifier",
+    "namespace_definition",
+]
+
+[captures]
+"definition.class" = "class"
+"definition.struct" = "struct"
+"definition.union" = "union"
+"definition.enum" = "enum"
+"definition.typedef" = "typedef"
+"definition.namespace" = "namespace"
+"definition.function" = "function"
+"definition.method" = "method"
+
+# Functions defined inside a class/struct body are methods. Out-of-line
+# definitions (`void Foo::bar() {}`) come in as @definition.method
+# directly via the dedicated query pattern, so they bypass this rule.
+[[promote]]
+from = "function"
+to = "method"
+when_inside = ["class_specifier", "struct_specifier"]

@@ -1,0 +1,23 @@
+# code-mapper language config — C.
+#
+# See ../EXTENDING.md for schema docs. Scalars before tables.
+
+language = "c"
+description = "C source and header files."
+extensions = [".c", ".h"]
+
+# Definition node types for parent attribution. C has fewer scoping
+# constructs than C++ — no namespaces, no class methods, just nested
+# functions / structs / unions / enums.
+definition_node_types = [
+    "struct_specifier",
+    "union_specifier",
+    "enum_specifier",
+]
+
+[captures]
+"definition.struct" = "struct"
+"definition.union" = "union"
+"definition.enum" = "enum"
+"definition.typedef" = "typedef"
+"definition.function" = "function"

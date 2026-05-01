@@ -1,0 +1,40 @@
+# code-mapper language config — Python.
+#
+# See ../EXTENDING.md for the schema and the workflow for adding a new
+# language. The .scm file alongside this one is the tree-sitter query
+# that produces captures; this file says how those captures map to the
+# normalized symbol kinds the agent sees.
+#
+# IMPORTANT: scalars and arrays-of-scalars MUST appear before any
+# [table] / [[array_of_tables]] header — TOML's grouping rules mean
+# anything after a header belongs to that header until the next one.
+
+language = "python"
+description = "Python source and stub files."
+extensions = [".py", ".pyi"]
+
+# Node types whose presence in an ancestor walk implies "the symbol
+# is inside a definition" — used for parent attribution.
+definition_node_types = ["class_definition", "function_definition"]
+
+# Plugin-internal: which docstring extractor to use. Only "python" is
+# implemented in v1; other languages report `null` for docstrings.
+docstrings = "python"
+
+# Tree-sitter capture name → normalized symbol kind. Anything not
+# listed here is dropped (e.g. tags.scm's @local.scope). Multiple
+# capture names may map to the same kind; that's fine.
+[captures]
+"definition.class" = "class"
+"definition.function" = "function"
+"definition.constant" = "constant"
+"definition.import" = "import"
+"reference.call" = "call"
+
+# Kind promotion rules. If an emitted symbol has kind=`from` and its
+# enclosing definition is one of `when_inside`, the kind upgrades to
+# `to`. This is how a function inside a class becomes a method.
+[[promote]]
+from = "function"
+to = "method"
+when_inside = ["class_definition"]
