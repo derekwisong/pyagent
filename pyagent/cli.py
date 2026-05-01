@@ -1,7 +1,6 @@
 import logging
 import multiprocessing
 import re
-import readline  # imported for side effect: enables line editing and history in input()
 import shutil
 import sys
 from multiprocessing.connection import Connection
@@ -9,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 import click
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import InMemoryHistory
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.traceback import install as install_traceback
@@ -306,19 +307,30 @@ def _update_agents_state(
         return
 
 
-def _seed_input_history(conversation: list[Any]) -> None:
-    """Populate readline's in-memory history from prior user prompts so
-    up/down arrow at the input cycles through what was typed before.
+def _build_input_history(conversation: list[Any]) -> InMemoryHistory:
+    """Seed an `InMemoryHistory` from prior user prompts so up/down at
+    the prompt cycles through what was typed before — same per-
+    process semantics readline gave us. A persistent on-disk history
+    would be a behavior change (cross-session bleed-through);
+    intentionally avoided here.
+
+    History is built eagerly; the actual `PromptSession` is
+    constructed lazily inside the REPL loop to avoid prompt_toolkit's
+    "Input is not a terminal" warning firing in non-tty contexts
+    (tests, pipes) that import this module without ever prompting.
+
     Filters to user messages with string content; tool-result turns
     are skipped because they don't have a `content` string.
     """
+    history = InMemoryHistory()
     for entry in conversation:
         if not isinstance(entry, dict) or entry.get("role") != "user":
             continue
         content = entry.get("content")
         if not isinstance(content, str):
             continue
-        readline.add_history(content)
+        history.append_string(content)
+    return history
 
 
 def _resume_callback(
@@ -742,10 +754,11 @@ def main(
     primer = paths.resolve("PRIMER.md", override=primer, seed="PRIMER.md")
     permissions.pre_approve(paths.config_dir())
 
-    # CLI keeps a read-only view of history for readline seeding and
-    # the "resumed N entries" line; the child owns writes during the run.
+    # CLI keeps a read-only view of history to seed prompt_toolkit's
+    # in-memory up-arrow history and to render the "resumed N entries"
+    # line; the child owns writes during the run.
     prior = session.load_history()
-    _seed_input_history(prior)
+    input_history = _build_input_history(prior)
 
     agent_config = {
         "cwd": str(Path.cwd().resolve()),
@@ -831,9 +844,18 @@ def main(
         # _update_agents_state.
         agents_state["root"] = {"status": "thinking"}
 
+        # PromptSession lazily — by the time we get here, stdin is the
+        # tty the user is typing into, so prompt_toolkit's no-tty
+        # warning doesn't fire.
+        input_session = PromptSession(history=input_history)
+
         while True:
             try:
-                prompt = input("> ")
+                # prompt_toolkit returns terminal modes to their pre-call
+                # state on every prompt() return — by the time the
+                # CancelWatcher (cbreak) and rich status spinner start
+                # below, prompt_toolkit has fully released the tty.
+                prompt = input_session.prompt("> ")
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 break
