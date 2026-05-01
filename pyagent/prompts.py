@@ -34,6 +34,7 @@ here. Disabling that plugin removes its sections cleanly.
 from __future__ import annotations
 
 import os
+import platform
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -156,10 +157,16 @@ class SystemPromptBuilder:
 
     def _persona_footer(self) -> str:
         today = date.today()
+        shell_path = os.environ.get("SHELL") or os.environ.get("COMSPEC") or ""
+        shell = Path(shell_path).name if shell_path else "unknown"
+        os_label = f"{platform.system()} {platform.release()}".strip() or "unknown"
         return (
             "## Environment\n"
             f"- cwd: {os.getcwd()}\n"
             f"- date: {today.isoformat()} ({today.strftime('%A')})\n"
+            f"- os: {os_label}\n"
+            f"- shell: {shell}\n"
+            f"- python: {platform.python_version()}\n"
             "\n"
             "## Where your persona lives\n"
             "Your SOUL, TOOLS, and PRIMER are loaded from the paths "
