@@ -496,8 +496,8 @@ def _bootstrap(
     of the universal SOUL/TOOLS/PRIMER base.
     """
     # Close stdin so a buggy library or tool that calls input() can't
-    # steal raw keystrokes from the CLI's CancelWatcher (which is the
-    # process holding the controlling tty in cbreak mode).
+    # steal raw keystrokes from the CLI's prompt_toolkit input field
+    # (which holds the controlling tty in raw mode).
     try:
         sys.stdin.close()
     except OSError:
