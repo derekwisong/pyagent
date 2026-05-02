@@ -30,6 +30,10 @@ Run with:
 
 from __future__ import annotations
 
+import json
+import os
+from unittest import mock
+
 from pyagent.agent import Agent
 from pyagent.llms.pyagent import EchoClient, LoremClient
 
@@ -148,12 +152,136 @@ def _check_agent_forwards_delta_callback() -> None:
     )
 
 
+# ---- Per-provider streaming (mocked SDKs) -----------------------
+#
+# Each provider is exercised via mock so the test runs without API
+# keys and without making any network calls. The mocks shape-match
+# what each SDK actually returns so the client's translation logic
+# is genuinely exercised, not stubbed away.
+
+
+class _Attr:
+    """Tiny record-style object — exposes whatever kwargs you hand it
+    as attributes. Used to build SDK-shaped mocks without dragging in
+    pydantic models."""
+
+    def __init__(self, **kw: object) -> None:
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def _check_anthropic_streaming_mocked() -> None:
+    """AnthropicClient.respond with on_text_delta uses messages.stream
+    and assembles final dict from get_final_message()."""
+
+    os.environ.setdefault("ANTHROPIC_API_KEY", "dummy-for-smoke")
+    from pyagent.llms.anthropic import AnthropicClient
+
+    final_msg = _Attr(
+        content=[
+            _Attr(type="text", text="Hello world"),
+            _Attr(type="tool_use", id="t1", name="lookup", input={"q": "x"}),
+        ],
+        usage=_Attr(
+            input_tokens=5,
+            output_tokens=12,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        ),
+    )
+
+    class _FakeStreamCM:
+        def __init__(self, chunks, final):
+            self._chunks = chunks
+            self._final = final
+            self.text_stream = iter(chunks)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get_final_message(self):
+            return self._final
+
+    captured: dict = {}
+
+    def fake_stream(**kwargs):
+        captured["called"] = True
+        captured["kwargs"] = kwargs
+        return _FakeStreamCM(["Hello ", "world"], final_msg)
+
+    client = AnthropicClient(model="claude-sonnet-4-6", api_key="dummy")
+    deltas: list[str] = []
+    with mock.patch.object(client._client.messages, "stream", side_effect=fake_stream):
+        out = client.respond(
+            conversation=[{"role": "user", "content": "hi"}],
+            on_text_delta=deltas.append,
+        )
+
+    _check("anthropic stream() invoked", captured.get("called") is True)
+    _check(
+        "anthropic deltas arrive in chunk order",
+        deltas == ["Hello ", "world"],
+        repr(deltas),
+    )
+    _check(
+        "anthropic concatenated text matches returned",
+        "".join(deltas) == out["text"] == "Hello world",
+        repr(out["text"]),
+    )
+    _check(
+        "anthropic tool_use captured into tool_calls",
+        len(out["tool_calls"]) == 1
+        and out["tool_calls"][0] == {"id": "t1", "name": "lookup", "args": {"q": "x"}},
+        repr(out["tool_calls"]),
+    )
+    _check(
+        "anthropic usage parsed",
+        out["usage"]["input"] == 5 and out["usage"]["output"] == 12,
+        repr(out["usage"]),
+    )
+
+    # No callback → uses messages.create, NOT messages.stream.
+    create_calls: list = []
+
+    def fake_create(**kwargs):
+        create_calls.append(kwargs)
+        return final_msg
+
+    stream_calls: list = []
+
+    def fake_stream_should_not_run(**kwargs):
+        stream_calls.append(kwargs)
+        return _FakeStreamCM([], final_msg)
+
+    fresh = AnthropicClient(model="claude-sonnet-4-6", api_key="dummy")
+    with mock.patch.object(fresh._client.messages, "create", side_effect=fake_create):
+        with mock.patch.object(
+            fresh._client.messages, "stream", side_effect=fake_stream_should_not_run
+        ):
+            out2 = fresh.respond(conversation=[{"role": "user", "content": "x"}])
+    _check(
+        "anthropic no-callback uses messages.create",
+        len(create_calls) == 1 and len(stream_calls) == 0,
+        f"create={len(create_calls)} stream={len(stream_calls)}",
+    )
+    _check(
+        "anthropic no-callback returns same dict shape",
+        out2["text"] == "Hello world" and len(out2["tool_calls"]) == 1,
+        repr(out2),
+    )
+
+
+
 def main() -> None:
     _check_echo_streams_word_by_word()
     _check_echo_no_callback_unchanged()
     _check_lorem_streams_sentences()
     _check_provider_signatures_accept_kwarg()
     _check_agent_forwards_delta_callback()
+    _check_anthropic_streaming_mocked()
     print("smoke_streaming: all checks passed")
 
 

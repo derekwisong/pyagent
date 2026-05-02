@@ -41,12 +41,37 @@ class AnthropicClient:
         system_volatile: str | None = None,
         on_text_delta: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
-        # `on_text_delta` is the streaming hook on the LLMClient
-        # protocol. The Anthropic client doesn't stream yet — its
-        # follow-up PR will switch to `messages.stream()` and emit
-        # incremental text. For now the kwarg is accepted-and-ignored
-        # so the agent can pass it uniformly to every provider.
-        del on_text_delta
+        kwargs = self._build_kwargs(conversation, system, tools, system_volatile)
+        if on_text_delta is None:
+            response = self._client.messages.create(**kwargs)
+            return self._build_response(response)
+        # Streaming path: `messages.stream()` is a context manager that
+        # yields incremental text via `text_stream` and assembles the
+        # full message (content blocks + usage) at exit. We forward
+        # text chunks through the callback while the stream is in
+        # flight, then read `get_final_message()` outside the context
+        # so the SDK has finalised the assembly.
+        with self._client.messages.stream(**kwargs) as stream:
+            for chunk in stream.text_stream:
+                if chunk:
+                    on_text_delta(chunk)
+            final = stream.get_final_message()
+        return self._build_response(final)
+
+    def _build_kwargs(
+        self,
+        conversation: list[dict[str, Any]],
+        system: str | None,
+        tools: list[dict[str, Any]] | None,
+        system_volatile: str | None,
+    ) -> dict[str, Any]:
+        """Translate pyagent's internal conversation into the kwargs
+        dict accepted by both ``messages.create`` and ``messages.stream``.
+
+        The two SDK methods share parameter shape exactly, so the
+        translation lives here once and feeds both branches of
+        ``respond()``.
+        """
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": self.max_tokens,
@@ -102,12 +127,20 @@ class AnthropicClient:
                 tools = [{**t} for t in tools]
                 tools[-1]["cache_control"] = {"type": "ephemeral"}
             kwargs["tools"] = tools
+        return kwargs
 
-        response = self._client.messages.create(**kwargs)
+    def _build_response(self, message: Any) -> dict[str, Any]:
+        """Translate one Anthropic ``Message`` into the agent-facing
+        assistant turn dict.
 
+        Used by both branches of ``respond()`` — the streaming branch
+        reads ``stream.get_final_message()`` (same Message shape as
+        ``messages.create`` returns) so this helper handles both cases
+        without conditionals.
+        """
         text_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
-        for block in response.content:
+        for block in message.content:
             if block.type == "text":
                 text_parts.append(block.text)
             elif block.type == "tool_use":
@@ -115,7 +148,7 @@ class AnthropicClient:
                     {"id": block.id, "name": block.name, "args": dict(block.input)}
                 )
 
-        usage = getattr(response, "usage", None)
+        usage = getattr(message, "usage", None)
         return {
             "role": "assistant",
             "text": "".join(text_parts),
