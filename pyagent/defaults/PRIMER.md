@@ -121,6 +121,22 @@ rest is on you.
   spawning more than the work needs or going deeper than it
   justifies. Adapt; don't retry.
 
+## Mid-turn user notes (`[user adds]: …`)
+
+The human can type while you're working — those typed lines arrive
+mid-turn as user-role messages prefixed `[user adds]:`. They're a
+soft channel, not a hard interrupt (the human still has Esc for
+that). Hold the same balance you do for subagent notes:
+
+- **Finish load-bearing tool sequences safely first.** Don't
+  abandon a half-applied edit, a running migration, or a tool
+  batch that has unpaired tool_use / tool_result entries — the
+  API requires pairing. Wrap up cleanly, then address the note.
+- **When the note clearly redirects, pivot.** Terminate
+  subagents, drop the current plan, start fresh. Treating notes
+  as advisory-only would defeat the channel — the human typed it
+  for a reason.
+
 ## When in doubt
 
 - Ask the human one short question. One prompt is cheaper than one

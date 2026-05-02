@@ -459,28 +459,30 @@ def _prompt_message(busy: bool) -> ANSI:
     return ANSI(f"\x1b[2m{divider}\x1b[0m\n> ")
 
 
-_QUEUE_PREVIEW_MAX = 30
+_PERMS_HEAD_PREVIEW_MAX = 30
 
 
-def _queue_segment(queue: "collections.deque[str]") -> str:
-    """Render the footer's queue segment (' · queued: …') or empty.
+def _perms_segment(perms: "collections.deque[dict]") -> str:
+    """Render the footer's permissions segment (' · perms: …') or empty.
 
-    Mirrors the design from issue #42:
+    Issue #69 — when N>=1 concurrent permission_request events are in
+    flight, show the count and a preview of the head target so the
+    user knows what they're answering. Head target is truncated to
+    ~30 chars so the footer stays one line on typical terminals.
+
       - 0 entries → empty (segment drops out)
-      - 1 entry  → ` · queued: "<head>"`
-      - N>1      → ` · queued: N (next: "<head>")`
-    Head is truncated to ~30 chars so the footer stays one line on
-    typical terminals.
+      - 1 entry   → ` · perms: <target>`
+      - N>1       → ` · perms: N (head: <target>)`
     """
-    n = len(queue)
+    n = len(perms)
     if n == 0:
         return ""
-    head = queue[0]
-    if len(head) > _QUEUE_PREVIEW_MAX:
-        head = head[: _QUEUE_PREVIEW_MAX - 1] + "…"
+    head_target = perms[0].get("target", "?")
+    if len(head_target) > _PERMS_HEAD_PREVIEW_MAX:
+        head_target = head_target[: _PERMS_HEAD_PREVIEW_MAX - 1] + "…"
     if n == 1:
-        return f' · queued: "{head}"'
-    return f' · queued: {n} (next: "{head}")'
+        return f" · perms: {head_target}"
+    return f" · perms: {n} (head: {head_target})"
 
 
 # Braille spinner — 10 frames, indistinguishable in 0-width-glyph
@@ -509,24 +511,19 @@ def _spinner_segment(busy: bool) -> str:
 def _render_status_ansi(
     agents: dict,
     model: str,
-    queue: "collections.deque[str]",
-    perm_pending: str | None,
+    perms: "collections.deque[dict]",
 ) -> str:
     """Render the bottom_toolbar content as ANSI-encoded bytes.
 
     prompt_toolkit accepts an `ANSI("...")` formatted text — we
     re-render rich markup through a non-attached Console so the
     existing `_render_status` styling carries over without duplication
-    and a separate styling vocabulary. Queue depth and a pending
-    permission notice get appended to the same line.
+    and a separate styling vocabulary. Issue #69: perms deque drives
+    the permission segment; the local input queue from issue #42 is
+    gone (issue #68 ships mid-turn input via `user_note` instead).
     """
     base = _render_status(agents, model)
-    queued = _queue_segment(queue)
-    perm = (
-        f" · awaiting permission ({perm_pending}) — type y/n/a"
-        if perm_pending
-        else ""
-    )
+    perms_seg = _perms_segment(perms)
     # rich-markup → ANSI: render through a throwaway Console with
     # force_terminal so styles emit even when stdout isn't a tty.
     buf = io.StringIO()
@@ -535,7 +532,7 @@ def _render_status_ansi(
         force_terminal=True,
         color_system="truecolor",
         width=shutil.get_terminal_size((120, 24)).columns,
-    ).print(base + queued + perm, end="")
+    ).print(base + perms_seg, end="")
     return buf.getvalue()
 
 
@@ -605,41 +602,58 @@ def _print_event(event: dict) -> None:
             )
 
 
-def _handle_queue_command(
-    line: str, queue: "collections.deque[str]"
+def _handle_perms_command(
+    line: str, perms: "collections.deque[dict]"
 ) -> None:
-    """Implement /queue, /queue clear, /queue pop.
+    """Implement /perms (list) and /perms <n> (jump-the-queue).
 
-    The queue is the user's typed-but-undelivered input — entries
-    accumulated while the agent was busy that haven't been pulled
-    off as the next user_prompt yet.
+    Issue #69. With multiple concurrent permission requests, the user
+    needs to see what's pending and answer out of order if useful
+    (e.g. dismiss a less-important one first). `/perms <n>` rotates
+    entry index `n` (1-based) to the head so the next y/n/a answers
+    that one.
     """
     parts = line.split()
     sub = parts[1] if len(parts) > 1 else ""
     if sub == "":
-        if not queue:
-            console.print("[dim]queue empty[/dim]")
+        if not perms:
+            console.print("[dim]no pending permission requests[/dim]")
             return
-        for i, entry in enumerate(queue, 1):
-            preview = entry if len(entry) <= 80 else entry[:77] + "..."
-            console.print(f"[dim]  {i}. {preview}[/dim]")
+        for i, entry in enumerate(perms, 1):
+            target = entry.get("target", "?")
+            sid = entry.get("agent_id") or "root"
+            tag = "" if i > 1 else " [dim](active)[/dim]"
+            console.print(
+                f"[dim]  {i}. {sid}: {target}[/dim]{tag}"
+            )
         return
-    if sub == "clear":
-        n = len(queue)
-        queue.clear()
-        console.print(f"[dim]cleared {n} queued entries[/dim]")
+    try:
+        idx = int(sub)
+    except ValueError:
+        console.print(
+            f"[red]unknown perms command {sub!r}; "
+            f"use /perms or /perms <n>[/red]"
+        )
         return
-    if sub == "pop":
-        if not queue:
-            console.print("[dim]queue empty[/dim]")
-            return
-        dropped = queue.pop()
-        preview = dropped if len(dropped) <= 60 else dropped[:57] + "..."
-        console.print(f"[dim]popped: {preview!r}[/dim]")
+    if not perms:
+        console.print("[dim]no pending permission requests[/dim]")
         return
+    if idx < 1 or idx > len(perms):
+        console.print(
+            f"[red]/perms {idx}: out of range (1..{len(perms)})[/red]"
+        )
+        return
+    if idx == 1:
+        console.print("[dim]already active[/dim]")
+        return
+    # Move entry at position idx-1 to the head. Rotating preserves
+    # arrival order of the others, which keeps the list intuitive.
+    entry = perms[idx - 1]
+    del perms[idx - 1]
+    perms.appendleft(entry)
+    target = entry.get("target", "?")
     console.print(
-        f"[red]unknown queue command {sub!r}; "
-        f"use /queue, /queue clear, /queue pop[/red]"
+        f"[dim]active: {target} (was index {idx})[/dim]"
     )
 
 
@@ -656,18 +670,25 @@ async def _repl_async(
     The previous synchronous `_drive_turn` polling loop is replaced
     with `loop.add_reader` on the pipe's fileno — every inbound event
     triggers `on_pipe` exactly once, no busy-wait. Slash commands and
-    queue draining run on the same asyncio loop as the prompt, so
+    submit handling run on the same asyncio loop as the prompt, so
     there's no thread synchronization to reason about.
+
+    State machine (issue #68 / #69):
+      - perms non-empty → next typed line is a y/n/a answer to the
+        head request; routed back over the pipe with the head's
+        request_id.
+      - turn_busy → next typed line is sent as a `user_note` event;
+        the agent surfaces it as `[user adds]: ...` mid-turn.
+      - idle → next typed line is sent as `user_prompt` (existing
+        path).
     """
-    queue: collections.deque[str] = collections.deque()
+    # Pending permission requests, FIFO. Each entry:
+    # {target, agent_id, request_id}. /perms lists; /perms <n>
+    # rotates index n to head; submit-while-non-empty answers head.
+    perms: collections.deque[dict] = collections.deque()
     state: dict[str, Any] = {
         "model": model,
         "turn_busy": False,
-        # When set, the next submitted line is interpreted as a
-        # y/n/a answer to a pending permission_request rather than
-        # a user_prompt. Value is the pending request's payload
-        # (we hold it until we have the answer).
-        "perm_pending": None,
         "fatal": False,
         "interrupted": False,
     }
@@ -683,25 +704,6 @@ async def _repl_async(
             state["fatal"] = True
             pt_session.app.exit(result="")
             return False
-
-    def drain_queue_one() -> None:
-        """Pop one queued line and send it as the next user_prompt.
-
-        Called when a turn finishes and the queue isn't empty. Only
-        one drain per turn — the next turn ends, we drain again.
-        Subagent async replies (already injected by the agent on its
-        next turn boundary via `pending_async_replies`) are NOT in
-        this queue; they ride a separate path.
-        """
-        if not queue:
-            return
-        next_line = queue.popleft()
-        if not send_or_die("user_prompt", prompt=next_line):
-            return
-        agents_state.setdefault("root", {"status": "thinking"})["status"] = (
-            "thinking"
-        )
-        state["turn_busy"] = True
 
     def on_pipe() -> None:
         """asyncio reader callback for `parent_conn`.
@@ -724,31 +726,38 @@ async def _repl_async(
             kind = event.get("type")
             agent_id = event.get("agent_id")
             if kind == "permission_request":
-                # Pause turn-busy "thinking" UX, ask user inline. The
-                # main prompt is repurposed: the next submission is
-                # the y/n/a answer.
-                state["perm_pending"] = {
+                # Issue #69: append to the deque (don't overwrite a
+                # single slot). The head is the active prompt the
+                # next y/n/a answers; /perms <n> can reorder.
+                perms.append({
                     "target": event["target"],
                     "agent_id": agent_id,
-                }
+                    "request_id": event.get("request_id", ""),
+                })
+                # Only print the inline banner for the new arrival;
+                # the head's status sits on the footer continuously.
+                tail_note = (
+                    "" if len(perms) == 1
+                    else f" [dim](queued; {len(perms)} pending)[/dim]"
+                )
                 console.print(
                     f"\n{_agent_label(agent_id)}"
-                    f"[yellow]access requested OUTSIDE workspace:[/yellow]\n"
+                    f"[yellow]access requested OUTSIDE workspace:[/yellow]"
+                    f"{tail_note}\n"
                     f"  workspace: {permissions.workspace()}\n"
                     f"  target:    {event['target']}\n"
                     f"[yellow]answer at the prompt: y / n / a[/yellow]"
                 )
             elif kind == "turn_complete" and agent_id is None:
                 state["turn_busy"] = False
-                drain_queue_one()
-                # If we didn't drain into a new turn, the agent is
-                # idle. Reset root status so the always-on footer
-                # stops claiming "thinking…" while we wait for the
-                # next user input.
-                if not state["turn_busy"]:
-                    agents_state.setdefault(
-                        "root", {"status": "ready"}
-                    )["status"] = "ready"
+                # Issue #68: no local input queue to drain anymore.
+                # If the user typed during the turn, those lines
+                # already landed as `user_note` events; the agent
+                # handled them mid-turn (or promoted them to a
+                # fresh prompt if the idle-window race fired).
+                agents_state.setdefault(
+                    "root", {"status": "ready"}
+                )["status"] = "ready"
             elif kind == "agent_error":
                 _print_event(event)
                 if agent_id is None:
@@ -756,10 +765,9 @@ async def _repl_async(
                         state["fatal"] = True
                         pt_session.app.exit(result="")
                         return
-                    # Non-fatal root error: turn is over, queue
-                    # freezes (per issue #42 semantics — surface
-                    # the error, let the user decide whether to
-                    # keep going).
+                    # Non-fatal root error: turn is over. Surface
+                    # the error and let the user decide whether to
+                    # keep going.
                     state["turn_busy"] = False
             elif kind in ("usage", "checklist", "notes_unread"):
                 # State already updated; no inline render. Footer
@@ -778,8 +786,7 @@ async def _repl_async(
             spinner + _render_status_ansi(
                 agents_state,
                 state["model"],
-                queue,
-                state["perm_pending"]["target"] if state["perm_pending"] else None,
+                perms,
             )
         )
 
@@ -787,16 +794,15 @@ async def _repl_async(
 
     @bindings.add("escape", eager=True)
     def _esc(event: Any) -> None:
-        # Esc means "cancel the in-flight turn AND clear queue" when
-        # busy. When idle, no-op (don't interfere with line editing).
+        # Esc means "cancel the in-flight turn" when busy. The agent
+        # propagates cancel down to all subagents and SIGKILLs in-flight
+        # shells. Pending permission requests get cleared locally too —
+        # the agent's tearing down whatever was waiting on them. When
+        # idle, no-op (don't interfere with line editing).
         if not state["turn_busy"]:
             return
         send_or_die("cancel")
-        if queue:
-            queue.clear()
-        # Also clear any pending permission state — the agent will
-        # tear down whatever was in flight.
-        state["perm_pending"] = None
+        perms.clear()
         pt_session.app.invalidate()
 
     # prompt_toolkit's default `class:bottom-toolbar` style is
@@ -842,34 +848,10 @@ async def _repl_async(
             stripped = (line or "").strip()
             if not stripped:
                 continue
-            # Permission-pending mode: route the answer back over
-            # the pipe instead of treating the line as a prompt.
-            if state["perm_pending"] is not None:
-                answer = stripped.lower()
-                if answer in ("y", "yes", "n", "no", "a", "always"):
-                    decision = answer in ("y", "yes", "a", "always")
-                    always = answer in ("a", "always")
-                    target = state["perm_pending"]["target"]
-                    pending_agent_id = state["perm_pending"]["agent_id"]
-                    state["perm_pending"] = None
-                    if always:
-                        permissions.pre_approve(target)
-                    if not send_or_die(
-                        "permission_response",
-                        decision=decision,
-                        always=always,
-                        agent_id=pending_agent_id,
-                    ):
-                        return "fatal"
-                else:
-                    console.print(
-                        f"[red]unrecognized: {answer!r} — please answer "
-                        f"y, n, or a[/red]"
-                    )
-                continue
-            # Slash commands (always processed locally, never queued).
-            if stripped.startswith("/queue"):
-                _handle_queue_command(stripped, queue)
+            # Slash commands always process locally — they never go
+            # through the perm_pending / busy / idle gate.
+            if stripped.startswith("/perms"):
+                _handle_perms_command(stripped, perms)
                 continue
             if stripped.startswith("/model"):
                 state["model"] = _handle_model_command(
@@ -879,11 +861,53 @@ async def _repl_async(
             if stripped == "/tasks":
                 _print_tasks(agents_state)
                 continue
-            # Either dispatch to the agent (idle) or queue (busy).
+            # State machine (issue #68 / #69):
+            #   1. perms non-empty → answer head as y/n/a.
+            #   2. turn_busy       → send user_note (mid-turn inject).
+            #   3. idle            → send user_prompt (start new turn).
+            if perms:
+                answer = stripped.lower()
+                if answer in ("y", "yes", "n", "no", "a", "always"):
+                    decision = answer in ("y", "yes", "a", "always")
+                    always = answer in ("a", "always")
+                    head = perms.popleft()
+                    target = head.get("target", "")
+                    pending_agent_id = head.get("agent_id")
+                    request_id = head.get("request_id", "")
+                    if always:
+                        permissions.pre_approve(target)
+                    if not send_or_die(
+                        "permission_response",
+                        decision=decision,
+                        always=always,
+                        agent_id=pending_agent_id,
+                        request_id=request_id,
+                    ):
+                        return "fatal"
+                    # If more requests remain, surface the next head
+                    # so the user knows what they're answering next.
+                    if perms:
+                        next_target = perms[0].get("target", "?")
+                        console.print(
+                            f"[dim]next perm: {next_target} "
+                            f"({len(perms)} pending)[/dim]"
+                        )
+                else:
+                    console.print(
+                        f"[red]unrecognized: {answer!r} — please answer "
+                        f"y, n, or a (or /perms to list, /perms <n> "
+                        f"to reorder)[/red]"
+                    )
+                continue
             if state["turn_busy"]:
-                queue.append(line)
+                # Mid-turn typed input: ship as user_note. Agent
+                # surfaces it as `[user adds]: …` at next LLM call.
+                if not send_or_die("user_note", text=line):
+                    return "fatal"
                 preview = line if len(line) <= 60 else line[:57] + "..."
-                console.print(f"[dim grey42]>> queued: {preview}[/dim grey42]")
+                console.print(
+                    f"[dim grey42]>> note sent: {preview}[/dim grey42]"
+                )
             else:
                 if not send_or_die("user_prompt", prompt=line):
                     return "fatal"

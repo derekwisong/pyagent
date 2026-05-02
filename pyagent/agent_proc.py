@@ -32,6 +32,7 @@ import os
 import queue
 import sys
 import threading
+import uuid
 from dataclasses import dataclass, field
 from multiprocessing.connection import Connection
 from pathlib import Path
@@ -100,6 +101,21 @@ class _ChildState:
     _pending_ask_replies: dict[str, queue.Queue] = field(default_factory=dict)
     _inbound_ask_sid: dict[str, str] = field(default_factory=dict)
     _ask_lock: threading.Lock = field(default_factory=threading.Lock)
+    # permission_handler / permission_response routing (issue #69):
+    # each outstanding permission prompt registers a Queue here keyed
+    # by request_id; the IO thread routes the matching response to it.
+    # Replaces the single shared `permission_replies` queue for the
+    # case where multiple concurrent permission prompts are
+    # in-flight (e.g. parallel subagents). The shared queue stays
+    # for backward-compatibility callers but isn't used by the new
+    # protocol.
+    _pending_perm_replies: dict[str, queue.Queue] = field(default_factory=dict)
+    _perm_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Set while the agent's main thread is inside _run_turn so the IO
+    # thread can decide whether a `user_note` should land on the
+    # mid-turn inbox (turn active) or be promoted to a fresh
+    # `user_prompt` (idle window). Issue #68.
+    turn_active: threading.Event = field(default_factory=threading.Event)
 
     def send(self, event_type: str, **payload: Any) -> None:
         """Send a typed event upstream (CLI for root, parent agent for sub).
@@ -247,6 +263,31 @@ class _ChildState:
 
         if kind == "user_prompt":
             self.work_queue.put(event)
+        elif kind == "user_note":
+            # Issue #68: mid-turn typed input from the human. While
+            # a turn is running, queue as [user adds]: <text> onto
+            # the agent's inbox so the next LLM call sees it
+            # mid-turn. While idle (the brief gap between
+            # turn_complete arriving at the CLI and the user typing
+            # again), promote to a fresh user_prompt so the agent
+            # actually responds — otherwise a stray idle-window
+            # note would sit in the inbox until the next prompt
+            # arrives, surprising the user.
+            text = (event.get("text", "") or "").strip()
+            if not text:
+                logger.debug("user_note with empty text; dropping")
+                return
+            if self.turn_active.is_set():
+                if self.agent is not None:
+                    self.agent.pending_async_replies.put(
+                        f"[user adds]: {text}"
+                    )
+            else:
+                # Idle promotion: kick off a turn whose initial
+                # user message is the note text.
+                self.work_queue.put(
+                    {"type": "user_prompt", "prompt": text}
+                )
         elif kind == "cancel":
             self.cancel_event.set()
             # SIGKILL any in-flight execute() shell so the foreground
@@ -269,7 +310,25 @@ class _ChildState:
                 except (BrokenPipeError, OSError):
                     pass
         elif kind == "permission_response":
-            self.permission_replies.put(event)
+            # Issue #69: route by request_id to the matching
+            # per-request queue. Falls back to the shared
+            # permission_replies queue if no request_id is
+            # present (defensive — shouldn't happen with the new
+            # CLI but keeps stale callers from silently hanging).
+            req_id = event.get("request_id", "")
+            if req_id:
+                with self._perm_lock:
+                    rq = self._pending_perm_replies.pop(req_id, None)
+                if rq is not None:
+                    rq.put(event)
+                else:
+                    logger.warning(
+                        "permission_response for unknown request_id %r; "
+                        "dropping",
+                        req_id,
+                    )
+            else:
+                self.permission_replies.put(event)
         elif kind == "parent_answer":
             # Reply to a prior `ask_parent` from this subagent. Route
             # to the matching request_id queue so the blocked tool
@@ -495,12 +554,32 @@ class _ChildState:
         self._send_dict(out)
 
     def permission_handler(self, target: Path) -> bool:
-        self.send("permission_request", target=str(target))
+        # Issue #69: per-request reply queue keyed by request_id so
+        # multiple concurrent permission prompts (e.g. from parallel
+        # subagents) don't collide on a single shared queue. The CLI
+        # echoes request_id back on permission_response; the IO
+        # thread routes by id to the matching queue here.
+        req_id = f"perm-{uuid.uuid4().hex[:8]}"
+        rq: queue.Queue = queue.Queue(maxsize=1)
+        with self._perm_lock:
+            self._pending_perm_replies[req_id] = rq
         try:
-            reply = self.permission_replies.get(timeout=300)
-        except queue.Empty:
-            logger.warning("permission prompt timed out for %s", target)
-            return False
+            self.send(
+                "permission_request",
+                request_id=req_id,
+                target=str(target),
+            )
+            try:
+                reply = rq.get(timeout=300)
+            except queue.Empty:
+                logger.warning(
+                    "permission prompt timed out for %s (req=%s)",
+                    target, req_id,
+                )
+                return False
+        finally:
+            with self._perm_lock:
+                self._pending_perm_replies.pop(req_id, None)
         if reply.get("always"):
             permissions.pre_approve(target)
         return bool(reply.get("decision"))
@@ -1048,13 +1127,21 @@ def child_main(config: dict[str, Any], conn: Connection) -> None:
         if event.get("type") != "user_prompt":
             logger.warning("main loop: unexpected event %r", event.get("type"))
             continue
-        _run_turn(
-            state,
-            agent,
-            session,
-            prompt=event["prompt"],
-            persist=event.get("persist", True),
-        )
+        # Issue #68: turn_active gates the IO thread's user_note
+        # handling — set while a turn is running so notes go onto
+        # the mid-turn inbox, cleared when idle so notes that
+        # arrive between turns get promoted to fresh prompts.
+        state.turn_active.set()
+        try:
+            _run_turn(
+                state,
+                agent,
+                session,
+                prompt=event["prompt"],
+                persist=event.get("persist", True),
+            )
+        finally:
+            state.turn_active.clear()
 
     # Tear down background shell processes started by run_background
     # so a clean exit doesn't leave the user's dev server / watcher
