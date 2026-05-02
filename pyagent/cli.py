@@ -133,6 +133,43 @@ from pyagent.pricing import (
 )
 
 
+def _render_models_listing() -> str:
+    """Aggregate every provider's advertised models into a printable
+    block.
+
+    Built-in providers ship hardcoded lists (zero network, no key
+    required). Plugin providers can register a live callable —
+    ollama's hits `/api/tags`. Per-provider exceptions are caught
+    upstream in `llms.list_all_models()` and rendered as
+    `(unavailable: <reason>)` so a stopped local server doesn't
+    silence the rest of the catalog.
+
+    Plugin providers are surfaced only if `plugins.load()` has
+    populated them. Caller is responsible for the load — this
+    function only formats.
+    """
+    listings = llms.list_all_models()
+    plugin_names = set(llms._PLUGIN_PROVIDERS)
+
+    lines: list[str] = [
+        "Available models — pass with `--model provider/model`:",
+        "",
+    ]
+    for listing in listings:
+        suffix = " (plugin)" if listing.name in plugin_names else ""
+        lines.append(f"[bold]{listing.name}[/bold]{suffix}:")
+        if listing.error:
+            lines.append(f"  [yellow](unavailable: {listing.error})[/yellow]")
+        elif not listing.models:
+            lines.append("  [dim](no models advertised)[/dim]")
+        else:
+            for m in listing.models:
+                tag = "  [dim](default)[/dim]" if m == listing.default_model else ""
+                lines.append(f"  - {m}{tag}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 def _resolve_model(cli_model: str | None) -> str:
     """Pick a model string. Precedence: --model > config.default_model
     > auto-detect from API-key env vars. Raises a click error if all
@@ -967,6 +1004,18 @@ async def _repl_async(
     ),
 )
 @click.option(
+    "--list-models",
+    "list_models_flag",
+    is_flag=True,
+    help=(
+        "Print every model each provider advertises and exit. "
+        "Built-ins return a hardcoded canonical list (no API key "
+        "needed); plugin providers like ollama query their backend "
+        "live. One unreachable backend renders as "
+        "`(unavailable: ...)` and never blocks the rest."
+    ),
+)
+@click.option(
     "--resume",
     "resume_id",
     is_flag=False,
@@ -1025,6 +1074,7 @@ def main(
     tools_md: Path | None,
     primer: Path | None,
     model: str | None,
+    list_models_flag: bool,
     resume_id: str | None,
     reset_soul: bool,
     reset_tools: bool,
@@ -1039,6 +1089,17 @@ def main(
 
     if verbose:
         logging.getLogger("pyagent").setLevel(logging.INFO)
+
+    if list_models_flag:
+        # Plugins must be loaded so plugin-registered providers (like
+        # ollama) show up in the listing. plugins.load() only runs
+        # register() — no session-start hooks fire — so this is cheap
+        # and side-effect-free for the CLI exit path.
+        from pyagent import plugins as _plugins
+
+        _plugins.load()
+        console.print(_render_models_listing())
+        return
 
     will_reset_soul = reset_soul or reset_all
     will_reset_tools = reset_tools or reset_all

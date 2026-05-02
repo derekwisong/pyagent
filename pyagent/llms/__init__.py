@@ -34,12 +34,55 @@ class ProviderSpec:
         factory: Callable that takes optional `model=` and returns a client.
             The actual SDK import happens here, so unused providers don't
             pay the import cost.
+        list_models: Optional callable returning the model names this
+            provider can serve (the part after `provider/` in `--model`).
+            Built-in providers return a hardcoded canonical list — no
+            network, no API key required. Live providers (e.g. ollama,
+            which queries `/api/tags`) may raise to signal an unreachable
+            backend; the CLI catches and renders the error per-provider
+            so one bad source doesn't kill the listing.
     """
 
     name: str
     env_vars: tuple[str, ...]
     default_model: str
     factory: Callable[..., "LLMClient"]
+    list_models: Callable[[], list[str]] | None = None
+
+
+# Canonical recent-and-popular model lists for each built-in. Hardcoded
+# rather than queried so `pyagent --list-models` works without API
+# keys, instantly. Bumping these is a one-line edit when a new model
+# ships; the alternative (live `/v1/models` calls) silently fails for
+# users without keys configured.
+def _anthropic_models() -> list[str]:
+    return [
+        "claude-opus-4-7",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5-20251001",
+    ]
+
+
+def _openai_models() -> list[str]:
+    return [
+        "gpt-4o",
+        "gpt-4o-mini",
+        "o1",
+        "o1-mini",
+        "o3-mini",
+    ]
+
+
+def _gemini_models() -> list[str]:
+    return [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+    ]
+
+
+def _pyagent_models() -> list[str]:
+    return ["echo", "loremipsum"]
 
 
 def _anthropic_factory(**kw: Any) -> "LLMClient":
@@ -82,24 +125,28 @@ PROVIDERS: list[ProviderSpec] = [
         env_vars=("ANTHROPIC_API_KEY",),
         default_model="claude-sonnet-4-6",
         factory=_anthropic_factory,
+        list_models=_anthropic_models,
     ),
     ProviderSpec(
         name="openai",
         env_vars=("OPENAI_API_KEY",),
         default_model="gpt-4o",
         factory=_openai_factory,
+        list_models=_openai_models,
     ),
     ProviderSpec(
         name="gemini",
         env_vars=("GEMINI_API_KEY", "GOOGLE_API_KEY"),
         default_model="gemini-2.5-flash",
         factory=_gemini_factory,
+        list_models=_gemini_models,
     ),
     ProviderSpec(
         name="pyagent",
         env_vars=(),
         default_model="echo",
         factory=_pyagent_factory,
+        list_models=_pyagent_models,
     ),
 ]
 
@@ -169,6 +216,69 @@ def resolve_model(model: str) -> str:
     if spec is None:
         return model
     return f"{provider}/{name or spec.default_model}"
+
+
+@dataclass(frozen=True)
+class ProviderListing:
+    """One provider's slice of the model catalog.
+
+    `models` is the names returned by the provider's `list_models`
+    callable. `error` is set instead when the callable raised — the
+    CLI renders this as `(unavailable: <error>)` so a stopped
+    Ollama server (or similar) doesn't kill the whole listing.
+    `default_model` mirrors `ProviderSpec.default_model` so renderers
+    can mark the active default with a `(default)` tag without a
+    second lookup.
+    """
+
+    name: str
+    default_model: str
+    models: tuple[str, ...] = ()
+    error: str = ""
+
+
+def list_all_models() -> list[ProviderListing]:
+    """Walk every registered provider (built-in + plugin) and collect
+    its advertised models.
+
+    Built-in providers come first (in `PROVIDERS` order); plugin
+    providers follow in registration order. Providers without a
+    `list_models` callable get a `ProviderListing` with empty
+    `models`. Providers whose callable raises get `error` populated
+    so the CLI can render `(unavailable: <reason>)` per-provider —
+    one bad source (e.g. ollama with the server stopped) never
+    kills the rest of the listing.
+    """
+    out: list[ProviderListing] = []
+    seen: set[str] = set()
+    for spec in PROVIDERS:
+        out.append(_listing_for(spec))
+        seen.add(spec.name)
+    for name, spec in _PLUGIN_PROVIDERS.items():
+        if name in seen:
+            continue
+        out.append(_listing_for(spec))
+    return out
+
+
+def _listing_for(spec: ProviderSpec) -> ProviderListing:
+    if spec.list_models is None:
+        return ProviderListing(
+            name=spec.name, default_model=spec.default_model
+        )
+    try:
+        models = spec.list_models()
+    except Exception as e:
+        return ProviderListing(
+            name=spec.name,
+            default_model=spec.default_model,
+            error=str(e) or e.__class__.__name__,
+        )
+    return ProviderListing(
+        name=spec.name,
+        default_model=spec.default_model,
+        models=tuple(models),
+    )
 
 
 def auto_detect_provider() -> ProviderSpec | None:
