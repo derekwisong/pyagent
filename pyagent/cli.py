@@ -20,6 +20,7 @@ from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.traceback import install as install_traceback
+from wcwidth import wcswidth
 
 from pyagent import agent_proc
 from pyagent import config
@@ -127,6 +128,7 @@ from pyagent.pricing import (
     ANTHROPIC_CACHE_WRITE_MULT as _ANTHROPIC_CACHE_WRITE_MULT,
     PRICING_USD_PER_MTOK as _PRICING_USD_PER_MTOK,
     estimate_cost_usd as _estimate_cost_usd,
+    format_right_zone as _format_right_zone,
     format_usage_suffix as _format_usage_suffix,
     is_anthropic_model as _is_anthropic_model,
     model_name as _model_name,
@@ -177,7 +179,7 @@ def _agents_tokens(agents: dict) -> tuple[int, int, int, int]:
 _CHECKLIST_TITLE_MAX = 40
 
 
-def _checklist_segment(agents: dict) -> str:
+def _checklist_segment(agents: dict, drop_title: bool = False) -> str:
     """Return the footer's checklist segment ('· N/M · "title"') or empty.
 
     Reads the most recent checklist snapshot stashed under
@@ -185,6 +187,9 @@ def _checklist_segment(agents: dict) -> str:
     cleanly when there's no list, or when every task is done — the
     point of the segment is *progress on something live*, not a
     monument to past work.
+
+    `drop_title=True` keeps just the `N/M` count — the third step in
+    the footer's degradation pipeline (issue #67).
     """
     cl = agents.get("root", {}).get("checklist")
     if not cl:
@@ -194,45 +199,188 @@ def _checklist_segment(agents: dict) -> str:
     if total <= 0 or completed >= total:
         return ""
     title = cl.get("current_title", "") or ""
+    if drop_title or not title:
+        return f" · {completed}/{total}"
     if len(title) > _CHECKLIST_TITLE_MAX:
         title = title[: _CHECKLIST_TITLE_MAX - 1] + "…"
-    if title:
-        return f" · {completed}/{total} · {title}"
-    return f" · {completed}/{total}"
+    return f" · {completed}/{total} · {title}"
+
+
+def _msgs_segment(
+    agents: dict, drop_severity_tag: bool = False
+) -> tuple[str, str | None]:
+    """Render the footer's `msgs:N` segment from `notes_unread` state.
+
+    Returns `(text, severity)`. `text` is empty when there's nothing
+    to show (no notes pending, or count == 0). `severity` is the
+    highest severity present (`alert` > `warn` > `info`) or None.
+
+    `drop_severity_tag=True` collapses ` · msgs: 2 (warn)` to
+    ` · msgs: 2`. The count survives — only the severity word drops.
+    """
+    notes = agents.get("root", {}).get("notes_unread")
+    if not notes:
+        return "", None
+    count = int(notes.get("count", 0) or 0)
+    if count <= 0:
+        return "", None
+    by_sev = notes.get("by_severity") or {}
+    if int(by_sev.get("alert", 0) or 0) > 0:
+        sev = "alert"
+    elif int(by_sev.get("warn", 0) or 0) > 0:
+        sev = "warn"
+    else:
+        sev = "info"
+    if drop_severity_tag or sev == "info":
+        return f" · msgs: {count}", sev
+    return f" · msgs: {count} ({sev})", sev
+
+
+def _agent_count_summary(agents: dict) -> dict[str, int]:
+    """Bucket counts for Tier C overflow rendering.
+
+    `ready` and `idle` collapse into the same bucket per the spec:
+    no "done" bucket — a finished agent is just idle from the user's
+    point of view.
+    """
+    buckets = {"working": 0, "idle": 0, "error": 0}
+    for info in agents.values():
+        status = info.get("status", "")
+        if status == "error":
+            buckets["error"] += 1
+        elif status in ("ready", "idle"):
+            buckets["idle"] += 1
+        else:
+            buckets["working"] += 1
+    return buckets
+
+
+def _agents_tier_a(agents: dict) -> str:
+    """Tier A — full per-agent labels separated by `│`.
+
+    `root(thinking) │ s1(· bash)`. Plain text (no rich markup) so the
+    composer can measure visible width before deciding whether to
+    apply Tier B or Tier C collapse.
+    """
+    parts = []
+    for key, info in agents.items():
+        label = "root" if key == "root" else key
+        parts.append(f"{label}({info.get('status', 'idle')})")
+    return " │ ".join(parts)
+
+
+def _agents_tier_b(agents: dict) -> str:
+    """Tier B — drop idle/ready agents, append ` · +N idle`.
+
+    htop-style: keep only the agents doing something interesting.
+    Errors stay in the working list (their state is the interesting
+    bit). Returns plain text.
+    """
+    working = []
+    idle_n = 0
+    for key, info in agents.items():
+        label = "root" if key == "root" else key
+        status = info.get("status", "")
+        if status in ("ready", "idle"):
+            idle_n += 1
+        else:
+            working.append(f"{label}({status})")
+    body = " │ ".join(working) if working else ""
+    if idle_n > 0:
+        sep = " · " if body else ""
+        body = f"{body}{sep}+{idle_n} idle"
+    return body
+
+
+def _agents_tier_c(agents: dict) -> str:
+    """Tier C — `N agents: X working · Y idle [· Z error]`.
+
+    Zero-count buckets drop out (per spec). The `working` bucket is
+    always rendered when non-zero so the user sees what's actually
+    in flight; `error` only appears when an agent has actually failed.
+    """
+    buckets = _agent_count_summary(agents)
+    pieces: list[str] = []
+    if buckets["working"] > 0:
+        pieces.append(f"{buckets['working']} working")
+    if buckets["idle"] > 0:
+        pieces.append(f"{buckets['idle']} idle")
+    if buckets["error"] > 0:
+        pieces.append(f"{buckets['error']} error")
+    if not pieces:
+        # Edge case: every agent in some pre-spawn limbo. Still show
+        # the count so the user knows the tree exists.
+        pieces.append("0 working")
+    return f"{len(agents)} agents: " + " · ".join(pieces)
+
+
+def _root_status_text(agents: dict) -> str:
+    """Single-agent left-zone state word.
+
+    `…` indicates active work — drop it for terminal states
+    (`ready`, `error`) so the always-on bottom_toolbar doesn't lie
+    about what the agent is doing while it sits idle waiting for the
+    next user input.
+    """
+    status = agents.get("root", {}).get("status", "thinking")
+    trailing = "" if status in ("ready", "error") else "…"
+    return f"{status}{trailing}"
 
 
 def _render_status(agents: dict, model: str = "") -> str:
-    """Return the rich-markup string for the status footer.
+    """Return the rich-markup string for the status footer's left zone.
 
     Single-agent (only root) → the classic `thinking…` text so the UI
-    is unchanged for users not using subagents, plus a token/cost
-    suffix once any LLM calls have happened.
+    is unchanged for users not using subagents.
 
     Multi-agent → `agent(status) │ agent(status) │ …` separated by box-
     drawing pipes. Order is insertion order (root first, then
     subagents in spawn order) which gives a stable left-to-right read.
-    Token/cost suffix is the aggregate across the whole tree.
 
     Both renderings get a checklist segment appended when the root
-    agent has a non-empty, not-yet-finished task list.
+    agent has a non-empty, not-yet-finished task list. `model` is
+    accepted for API compatibility with earlier versions; the right
+    zone (gross/net/$cost) lives in `_format_right_zone_markup` now.
     """
-    in_tot, out_tot, cw_tot, cr_tot = _agents_tokens(agents)
-    suffix = _format_usage_suffix(in_tot, out_tot, model, cw_tot, cr_tot)
+    del model  # right zone is composed separately now
     checklist = _checklist_segment(agents)
     if len(agents) <= 1:
-        status = agents.get("root", {}).get("status", "thinking")
-        # `…` indicates active work — drop it for terminal states
-        # (`ready`, `error`) so the always-on bottom_toolbar doesn't
-        # lie about what the agent is doing while it sits idle
-        # waiting for the next user input.
-        trailing = "" if status in ("ready", "error") else "…"
-        return f"[dim]{status}{trailing}{checklist}{suffix}[/dim]"
+        return f"[dim]{_root_status_text(agents)}{checklist}[/dim]"
     parts = []
     for key, info in agents.items():
         label = "root" if key == "root" else key
         parts.append(f"{label}([cyan]{info['status']}[/cyan])")
     body = " [/dim][dim]│[/dim] [dim]".join(parts)
-    return f"[dim]{body}{checklist}{suffix}[/dim]"
+    return f"[dim]{body}{checklist}[/dim]"
+
+
+def _format_right_zone_markup(
+    agents: dict,
+    model: str,
+    drop_gross: bool = False,
+    drop_net: bool = False,
+) -> str:
+    """Rich-markup right-zone string: `gross / net · $cost`.
+
+    Empty when no LLM activity has happened yet. `drop_gross` and
+    `drop_net` are degradation knobs — gross drops first (step 4),
+    then net (step 6). The cost segment never drops.
+    """
+    in_tot, out_tot, cw_tot, cr_tot = _agents_tokens(agents)
+    gross_str, net_str, cost_str = _format_right_zone(
+        in_tot, out_tot, model, cw_tot, cr_tot
+    )
+    if not cost_str:
+        return ""
+    pieces: list[str] = []
+    if not drop_gross and gross_str:
+        pieces.append(gross_str)
+    if not drop_net and net_str:
+        pieces.append(net_str)
+    tok_part = " / ".join(pieces)
+    if tok_part:
+        return f"[dim]{tok_part} · {cost_str}[/dim]"
+    return f"[dim]{cost_str}[/dim]"
 
 
 def _update_agents_state(
@@ -462,7 +610,9 @@ def _prompt_message(busy: bool) -> ANSI:
 _PERMS_HEAD_PREVIEW_MAX = 30
 
 
-def _perms_segment(perms: "collections.deque[dict]") -> str:
+def _perms_segment(
+    perms: "collections.deque[dict]", drop_head: bool = False
+) -> str:
     """Render the footer's permissions segment (' · perms: …') or empty.
 
     Issue #69 — when N>=1 concurrent permission_request events are in
@@ -471,12 +621,16 @@ def _perms_segment(perms: "collections.deque[dict]") -> str:
     ~30 chars so the footer stays one line on typical terminals.
 
       - 0 entries → empty (segment drops out)
-      - 1 entry   → ` · perms: <target>`
-      - N>1       → ` · perms: N (head: <target>)`
+      - 1 entry   → ` · perms: <target>` (or ` · perms: 1` if
+        `drop_head` — the first step in the degradation pipeline)
+      - N>1       → ` · perms: N (head: <target>)` or ` · perms: N`
+        when `drop_head` is set.
     """
     n = len(perms)
     if n == 0:
         return ""
+    if drop_head:
+        return f" · perms: {n}"
     head_target = perms[0].get("target", "?")
     if len(head_target) > _PERMS_HEAD_PREVIEW_MAX:
         head_target = head_target[: _PERMS_HEAD_PREVIEW_MAX - 1] + "…"
@@ -494,6 +648,22 @@ _SPINNER_FPS = 10  # ticks per second; chosen to feel "alive" without
                    # actually render every frame.
 
 
+def _tree_busy(agents: dict) -> bool:
+    """True iff any agent in the tree is non-`ready`/non-`error`.
+
+    Broader than the old `turn_busy` — if root finished but a
+    subagent is still working, the spinner should keep spinning.
+    Truthful signal per issue #67's spinner predicate.
+    """
+    if not agents:
+        return False
+    for info in agents.values():
+        status = info.get("status", "")
+        if status not in ("ready", "error"):
+            return True
+    return False
+
+
 def _spinner_segment(busy: bool) -> str:
     """ANSI-encoded spinner prefix when `busy`, empty string otherwise.
 
@@ -508,32 +678,281 @@ def _spinner_segment(busy: bool) -> str:
     return f"\x1b[2m{_SPINNER_FRAMES[idx]}\x1b[0m "
 
 
-def _render_status_ansi(
-    agents: dict,
-    model: str,
-    perms: "collections.deque[dict]",
-) -> str:
-    """Render the bottom_toolbar content as ANSI-encoded bytes.
+# Right-zone budget: the spec caps it at 28 cols so wide terminals
+# don't swallow huge stretches of footer with a stale dollar figure.
+_RIGHT_ZONE_MAX = 28
+# Tier-C agent-count threshold: lazygit-style heuristic. Past 6 live
+# agents, even Tier B feels noisy on most terminals.
+_TIER_C_AGENT_THRESHOLD = 6
 
-    prompt_toolkit accepts an `ANSI("...")` formatted text — we
-    re-render rich markup through a non-attached Console so the
-    existing `_render_status` styling carries over without duplication
-    and a separate styling vocabulary. Issue #69: perms deque drives
-    the permission segment; the local input queue from issue #42 is
-    gone (issue #68 ships mid-turn input via `user_note` instead).
+
+def _visible_width(s: str) -> int:
+    """Visible cell width of an ANSI- or rich-styled string.
+
+    Strips ANSI escape sequences and rich `[tag]` markup before
+    measuring. wcswidth handles double-width and zero-width glyphs
+    (Braille spinner registers as 1 cell — wcswidth knows).
     """
-    base = _render_status(agents, model)
-    perms_seg = _perms_segment(perms)
-    # rich-markup → ANSI: render through a throwaway Console with
-    # force_terminal so styles emit even when stdout isn't a tty.
+    no_ansi = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", s)
+    no_markup = re.sub(r"\[/?[a-zA-Z #]+\]", "", no_ansi)
+    w = wcswidth(no_markup)
+    if w < 0:
+        return len(no_markup)
+    return w
+
+
+def _markup_to_ansi(markup: str, width: int) -> str:
+    """Render a rich-markup string through a throwaway Console to ANSI.
+
+    Width is fixed up-front so rich doesn't soft-wrap our pre-padded
+    composition. force_terminal=True forces escape emission even
+    when stdout isn't a tty (test harness, piped capture).
+    """
+    if not markup:
+        return ""
     buf = io.StringIO()
     Console(
         file=buf,
         force_terminal=True,
         color_system="truecolor",
-        width=shutil.get_terminal_size((120, 24)).columns,
-    ).print(base + perms_seg, end="")
+        width=max(width, 1),
+    ).print(markup, end="")
     return buf.getvalue()
+
+
+_SEVERITY_COLORS = {
+    "info": "cyan",
+    "warn": "yellow",
+    "alert": "red",
+}
+
+
+def _style_perms(text: str) -> str:
+    """Wrap a perms segment in bold-yellow markup — the brightest
+    pixel in the bar when N>0 (issue #67). Bold is intentional here:
+    perms is the one segment that warrants it, because it's literally
+    blocking the agent."""
+    return f"[bold yellow]{text}[/bold yellow]"
+
+
+def _style_msgs(text: str, severity: str | None) -> str:
+    """Severity-color the msgs segment, or dim if no severity."""
+    color = _SEVERITY_COLORS.get(severity or "", "dim")
+    return f"[{color}]{text}[/{color}]"
+
+
+def _style_left(text: str, has_error: bool) -> str:
+    """Wrap the left-zone center body. Errors paint red; everything
+    else stays dim (the footer is ambient — see spec's visual rules).
+    """
+    if has_error:
+        return f"[red]{text}[/red]"
+    return f"[dim]{text}[/dim]"
+
+
+def _has_error(agents: dict) -> bool:
+    return any(
+        a.get("status") == "error" for a in agents.values()
+    )
+
+
+def _compose_footer(
+    agents: dict,
+    model: str,
+    perms: "collections.deque[dict]",
+    cols: int,
+) -> str:
+    """Width-aware three-zone composition. Returns the ANSI-encoded
+    bottom_toolbar line.
+
+    Layout: `[spinner] LEFT  …pad…  RIGHT`. The right zone is the
+    contract — it's pinned to the right edge and never truncated.
+    The left zone degrades through a fixed priority order until the
+    whole line fits in `cols` columns; if it still doesn't fit, the
+    center (subagent labels / state) is truncated with `…`.
+    """
+    busy = _tree_busy(agents)
+    spinner_ansi = _spinner_segment(busy)
+    spinner_w = _visible_width(spinner_ansi)
+    has_error = _has_error(agents)
+    multi_agent = len(agents) > 1
+
+    # Right zone composition (drop-tier knobs flipped during
+    # degradation). Pre-render to ANSI once so width math sees the
+    # same byte sequence we'll embed. Anything wider than 28 cols
+    # forces an internal drop_gross / drop_net step so the right
+    # zone always honors its budget.
+    def render_right(drop_gross: bool, drop_net: bool) -> tuple[str, int]:
+        for dg, dn in ((drop_gross, drop_net), (True, drop_net), (True, True)):
+            markup = _format_right_zone_markup(
+                agents, model, drop_gross=dg, drop_net=dn
+            )
+            if not markup:
+                return "", 0
+            ansi = _markup_to_ansi(markup, max(cols, _RIGHT_ZONE_MAX))
+            w = _visible_width(ansi)
+            if w <= _RIGHT_ZONE_MAX:
+                return ansi, w
+        # Fall through with the most-degraded variant even if it still
+        # exceeds the cap (extreme edge case — 8-digit cost number).
+        return ansi, w
+
+    # Helper: compose left given a set of degradation choices.
+    def build_left(
+        agent_tier: str,
+        drop_perms_head: bool,
+        drop_msgs_severity: bool,
+        drop_checklist_title: bool,
+        drop_msgs: bool,
+        drop_perms: bool,
+    ) -> str:
+        """Plain-text left zone (no rich markup) so we can measure
+        width before deciding to recurse into a tighter tier."""
+        if multi_agent:
+            if agent_tier == "A":
+                center = _agents_tier_a(agents)
+            elif agent_tier == "B":
+                center = _agents_tier_b(agents)
+            else:
+                center = _agents_tier_c(agents)
+        else:
+            center = _root_status_text(agents)
+        center += _checklist_segment(agents, drop_title=drop_checklist_title)
+        if not drop_perms:
+            center += _perms_segment(perms, drop_head=drop_perms_head)
+        if not drop_msgs:
+            msgs_text, _ = _msgs_segment(agents, drop_severity_tag=drop_msgs_severity)
+            center += msgs_text
+        return center
+
+    # Degradation pipeline. Each step makes one targeted concession
+    # in the order the spec lists (1..9). We try the budget after
+    # each and stop on the first fit.
+    def fits(left_text: str, drop_gross: bool, drop_net: bool) -> tuple[bool, str, int]:
+        right_a, right_wlocal = render_right(drop_gross, drop_net)
+        left_w = _visible_width(left_text)
+        # `+1` for the minimum single-space gap between left and right
+        # when the right zone is non-empty.
+        gap = 1 if right_a else 0
+        return spinner_w + left_w + gap + right_wlocal <= cols, right_a, right_wlocal
+
+    # The tuple structure is the dial set the composer has to pick:
+    # (agent_tier, drop_perms_head, drop_msgs_severity,
+    #  drop_checklist_title, drop_gross, drop_net, drop_msgs, drop_perms)
+    # Order matches the spec's 1..9 priority list.
+    steps: list[tuple[str, bool, bool, bool, bool, bool, bool, bool]] = []
+    # Decide the starting agent tier. If there are >6 agents we go
+    # straight to Tier C — the count alone already says enough.
+    base_tier = "A"
+    if multi_agent and len(agents) > _TIER_C_AGENT_THRESHOLD:
+        base_tier = "C"
+
+    # Step 0: nothing dropped.
+    steps.append((base_tier, False, False, False, False, False, False, False))
+    # Step 1: drop perms head preview.
+    steps.append((base_tier, True, False, False, False, False, False, False))
+    # Step 2: drop msgs severity tag.
+    steps.append((base_tier, True, True, False, False, False, False, False))
+    # Step 3: drop checklist title.
+    steps.append((base_tier, True, True, True, False, False, False, False))
+    # Step 4: drop gross.
+    steps.append((base_tier, True, True, True, True, False, False, False))
+    # Step 5: tier collapse A → B → C.
+    if multi_agent and base_tier == "A":
+        steps.append(("B", True, True, True, True, False, False, False))
+        steps.append(("C", True, True, True, True, False, False, False))
+    elif multi_agent and base_tier == "B":
+        steps.append(("C", True, True, True, True, False, False, False))
+    # Step 6: drop net.
+    final_tier = "C" if multi_agent else base_tier
+    steps.append((final_tier, True, True, True, True, True, False, False))
+    # Step 7: drop msgs entirely.
+    steps.append((final_tier, True, True, True, True, True, True, False))
+    # Step 8: drop perms entirely (last resort — always-on signal).
+    steps.append((final_tier, True, True, True, True, True, True, True))
+
+    chosen_step: tuple[str, bool, bool, bool, bool, bool, bool, bool] | None = None
+    chosen_right_a = ""
+    chosen_right_w = 0
+    chosen_left_text = ""
+    truncated = False
+    for tier, dph, dms, dct, dg, dn, dmsgs, dperms in steps:
+        left_text = build_left(tier, dph, dms, dct, dmsgs, dperms)
+        ok, right_a, right_wlocal = fits(left_text, dg, dn)
+        if ok:
+            chosen_step = (tier, dph, dms, dct, dg, dn, dmsgs, dperms)
+            chosen_right_a = right_a
+            chosen_right_w = right_wlocal
+            chosen_left_text = left_text
+            break
+
+    if chosen_step is None:
+        # Even the most-degraded variant didn't fit. Truncate the
+        # center with `…` so the right zone keeps its column.
+        tier, dph, dms, dct, dg, dn, dmsgs, dperms = steps[-1]
+        left_text = build_left(tier, dph, dms, dct, dmsgs, dperms)
+        right_a, right_wlocal = render_right(dg, dn)
+        gap = 1 if right_a else 0
+        max_left = max(0, cols - spinner_w - gap - right_wlocal)
+        if _visible_width(left_text) > max_left and max_left > 1:
+            left_text = left_text[: max_left - 1] + "…"
+            truncated = True
+        chosen_step = (tier, dph, dms, dct, dg, dn, dmsgs, dperms)
+        chosen_right_a = right_a
+        chosen_right_w = right_wlocal
+        chosen_left_text = left_text
+
+    tier, dph, dms, dct, dg, dn, dmsgs, dperms = chosen_step
+    right_a = chosen_right_a
+    right_wlocal = chosen_right_w
+
+    if truncated:
+        # Single-style the truncated text — no per-segment coloring
+        # because the segment boundaries are gone.
+        left_markup = _style_left(chosen_left_text, has_error)
+    else:
+        if multi_agent:
+            if tier == "A":
+                center = _agents_tier_a(agents)
+            elif tier == "B":
+                center = _agents_tier_b(agents)
+            else:
+                center = _agents_tier_c(agents)
+        else:
+            center = _root_status_text(agents)
+        center += _checklist_segment(agents, drop_title=dct)
+        center_markup = _style_left(center, has_error)
+        perms_text = "" if dperms else _perms_segment(perms, drop_head=dph)
+        perms_markup = _style_perms(perms_text) if perms_text else ""
+        if dmsgs:
+            msgs_markup = ""
+        else:
+            msgs_text, sev = _msgs_segment(agents, drop_severity_tag=dms)
+            msgs_markup = _style_msgs(msgs_text, sev) if msgs_text else ""
+        left_markup = f"{center_markup}{perms_markup}{msgs_markup}"
+
+    left_ansi = _markup_to_ansi(left_markup, max(cols, 1))
+    left_w = _visible_width(left_ansi)
+    pad = max(1, cols - spinner_w - left_w - right_wlocal) if right_a else 0
+    return spinner_ansi + left_ansi + (" " * pad) + right_a
+
+
+def _render_status_ansi(
+    agents: dict,
+    model: str,
+    perms: "collections.deque[dict]",
+    cols: int | None = None,
+) -> str:
+    """Render the bottom_toolbar content as ANSI-encoded bytes.
+
+    Three-zone layout per issue #67: spinner+left, filler, right
+    (`gross / net · $cost`). Width-aware degradation is in
+    `_compose_footer`; this is just the entry point that reads the
+    terminal width when no explicit `cols` is supplied.
+    """
+    if cols is None:
+        cols = shutil.get_terminal_size((120, 24)).columns
+    return _compose_footer(agents, model, perms, cols)
 
 
 def _print_event(event: dict) -> None:
@@ -779,14 +1198,17 @@ async def _repl_async(
             pt_session.app.invalidate()
 
     def bottom_toolbar() -> ANSI:
-        # Spinner gates on `turn_busy` — visible only while the
-        # agent is actively working; stays out of the way at idle.
-        spinner = _spinner_segment(state["turn_busy"])
+        # Three-zone composition lives in `_compose_footer` now; the
+        # spinner predicate broadened to cover non-root activity (see
+        # `_tree_busy`) so a finished root with a still-thinking
+        # subagent keeps the heartbeat visible.
+        cols = shutil.get_terminal_size((120, 24)).columns
         return ANSI(
-            spinner + _render_status_ansi(
+            _render_status_ansi(
                 agents_state,
                 state["model"],
                 perms,
+                cols=cols,
             )
         )
 

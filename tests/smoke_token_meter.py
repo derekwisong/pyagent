@@ -26,14 +26,30 @@ from typing import Any
 from rich.console import Console
 
 from pyagent.agent import Agent
+import collections
+import re
+
 from pyagent.cli import (
     _agents_tokens,
     _estimate_cost_usd,
     _format_usage_suffix,
     _model_name,
     _render_status,
+    _render_status_ansi,
     _update_agents_state,
 )
+
+
+def _strip_ansi(s: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", s)
+
+
+def _render_full(agents: dict, model: str, cols: int = 100) -> str:
+    """Run the full three-zone composer through ANSI strip — gives
+    plain text including the right zone (`gross / net · $cost`)."""
+    return _strip_ansi(
+        _render_status_ansi(agents, model, collections.deque(), cols=cols)
+    )
 
 
 class StubClientWithUsage:
@@ -311,25 +327,74 @@ def main() -> None:
     assert cw_tot == 0 and cr_tot == 0, (cw_tot, cr_tot)
     print(f"✓ aggregate: {in_tot} in / {out_tot} out / {cw_tot} cw / {cr_tot} cr")
 
-    # 8. _render_status includes the suffix
-    out = _render_plain(_render_status(agents, "anthropic"))
-    assert "tok" in out and "$" in out, out
+    # 8. Full footer composer renders the right zone (`gross / net ·
+    # $cost`). On Anthropic the right zone shows two token figures
+    # plus a cost; unknown models still get a `$0.00` fallback (the
+    # right zone is the contract).
+    out = _render_full(agents, "anthropic")
+    assert "$" in out and "/" in out, out
     print(f"✓ render with cost: {out!r}")
 
-    out = _render_plain(_render_status(agents, "pyagent/echo"))
-    assert "tok" in out and "$" not in out, out
-    print(f"✓ render without cost: {out!r}")
+    out = _render_full(agents, "pyagent/echo")
+    assert "$0.00" in out, out
+    print(f"✓ render unknown-model right zone shows $0.00: {out!r}")
 
-    # Single-agent, zero tokens → no suffix
+    # Single-agent, zero tokens → right zone empty, only state shown
     minimal = {"root": {"status": "thinking"}}
-    out = _render_plain(_render_status(minimal, "anthropic"))
-    assert out == "thinking…", out
+    out = _render_full(minimal, "anthropic").strip()
+    assert "thinking…" in out and "$" not in out, out
     print(f"✓ render zero-token: {out!r}")
 
     # 9. Cache-aware extensions
     _check_cache_token_aggregation()
 
+    # 10. Right-zone formatter (gross / net / cost)
+    _check_format_right_zone()
+
     print("\nALL CHECKS PASSED")
+
+
+def _check_format_right_zone() -> None:
+    """`format_right_zone` returns (gross, net, cost) for the footer's
+    right zone — Anthropic shows the cache-savings divergence; non-
+    Anthropic shows gross == net == input + output."""
+    from pyagent.pricing import format_right_zone, gross_net_tokens
+
+    # Anthropic, no cache traffic → gross == net.
+    g, n, c = format_right_zone(1000, 500, "anthropic", 0, 0)
+    assert g == "1.5k" and n == "1.5k", (g, n)
+    assert c.startswith("$"), c
+    print(f"✓ right-zone (anthropic, no cache): gross={g} net={n} cost={c}")
+
+    # Anthropic, cache-heavy: net should be << gross.
+    # gross = 100 + 50 + 0 + 100000 = 100150 → 100.2k
+    # net = 100 + 50 + 0 + 100000*0.1 = 10150 → 10.2k
+    g, n, c = format_right_zone(100, 50, "anthropic", 0, 100000)
+    gross_int, net_float = gross_net_tokens(100, 50, "anthropic", 0, 100000)
+    assert gross_int == 100150 and abs(net_float - 10150.0) < 1e-6, (
+        gross_int, net_float,
+    )
+    assert g == "100.2k" and n == "10.2k", (g, n)
+    print(f"✓ right-zone (anthropic, cache-heavy): {g} / {n} · {c}")
+
+    # Non-Anthropic: gross == net.
+    g, n, c = format_right_zone(1000, 500, "openai/gpt-4o", 0, 1000)
+    gross_int, net_float = gross_net_tokens(
+        1000, 500, "openai/gpt-4o", 0, 1000
+    )
+    assert gross_int == 1500 and net_float == 1500.0, (gross_int, net_float)
+    assert g == n == "1.5k", (g, n)
+    print(f"✓ right-zone (non-anthropic): gross == net == {g}")
+
+    # Unknown model → cost falls back to $0.00.
+    g, n, c = format_right_zone(100, 50, "pyagent/echo", 0, 0)
+    assert g and n and c == "$0.00", (g, n, c)
+    print(f"✓ right-zone unknown model: {g} / {n} · {c}")
+
+    # Zero usage → all empty.
+    g, n, c = format_right_zone(0, 0, "anthropic", 0, 0)
+    assert g == n == c == "", (g, n, c)
+    print("✓ right-zone zero-usage → all empty")
 
 
 if __name__ == "__main__":
