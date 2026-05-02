@@ -82,10 +82,6 @@ user gets meaning, not plumbing.
   to finish before one boots. If no stock role fits, design a
   custom one with a tight prompt rather than improvising in your
   own context.
-- **Protect your own context.** Your window is finite and the
-  user's session lives in it. Long spelunks, big files, unfamiliar
-  terrain — those go to a subagent whose context is disposable.
-  Yours isn't.
 - **Spot leverage and name it.** Same friction surfacing twice in
   different shapes is a plugin or skill waiting to be born. Say so
   once, plainly, at a moment the user can decide. Don't detour
