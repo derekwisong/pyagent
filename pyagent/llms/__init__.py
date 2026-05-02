@@ -19,6 +19,25 @@ from typing import Any, Callable, Protocol
 
 
 @dataclass(frozen=True)
+class ModelInfo:
+    """One model the provider can serve, plus optional capability tags.
+
+    `name` is the string callers pass after `provider/` in `--model`.
+    `capabilities` is a free-form tuple of tags the provider chose to
+    surface (e.g. ``"tools"``, ``"vision"``, ``"embedding"``) — used
+    by the CLI listing to flag models that are or aren't compatible
+    with pyagent's tool-using agent loop. Empty tuple means "the
+    provider didn't enumerate"; the CLI prints nothing rather than
+    over-claiming. We deliberately don't enumerate capabilities for
+    built-ins (anthropic / openai / gemini): that data is meaningful
+    only when it can vary per model, which is the ollama story.
+    """
+
+    name: str
+    capabilities: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ProviderSpec:
     """One LLM provider's registration data.
 
@@ -34,20 +53,22 @@ class ProviderSpec:
         factory: Callable that takes optional `model=` and returns a client.
             The actual SDK import happens here, so unused providers don't
             pay the import cost.
-        list_models: Optional callable returning the model names this
-            provider can serve (the part after `provider/` in `--model`).
-            Built-in providers return a hardcoded canonical list — no
-            network, no API key required. Live providers (e.g. ollama,
-            which queries `/api/tags`) may raise to signal an unreachable
-            backend; the CLI catches and renders the error per-provider
-            so one bad source doesn't kill the listing.
+        list_models: Optional callable returning `ModelInfo` records
+            for the models this provider can serve. Built-in providers
+            return a hardcoded canonical list — no network, no API
+            key required, and capabilities are left empty (those
+            providers' models are uniformly tool-capable). Live
+            providers like ollama populate capabilities from the
+            backend (`/api/show`) so the CLI can flag tool/vision/
+            embedding variants. Callable may raise to signal an
+            unreachable backend; the aggregator catches per-provider.
     """
 
     name: str
     env_vars: tuple[str, ...]
     default_model: str
     factory: Callable[..., "LLMClient"]
-    list_models: Callable[[], list[str]] | None = None
+    list_models: Callable[[], list[ModelInfo]] | None = None
 
 
 # Canonical recent-and-popular model lists for each built-in. Hardcoded
@@ -55,34 +76,34 @@ class ProviderSpec:
 # keys, instantly. Bumping these is a one-line edit when a new model
 # ships; the alternative (live `/v1/models` calls) silently fails for
 # users without keys configured.
-def _anthropic_models() -> list[str]:
+def _anthropic_models() -> list[ModelInfo]:
     return [
-        "claude-opus-4-7",
-        "claude-sonnet-4-6",
-        "claude-haiku-4-5-20251001",
+        ModelInfo(name="claude-opus-4-7"),
+        ModelInfo(name="claude-sonnet-4-6"),
+        ModelInfo(name="claude-haiku-4-5-20251001"),
     ]
 
 
-def _openai_models() -> list[str]:
+def _openai_models() -> list[ModelInfo]:
     return [
-        "gpt-4o",
-        "gpt-4o-mini",
-        "o1",
-        "o1-mini",
-        "o3-mini",
+        ModelInfo(name="gpt-4o"),
+        ModelInfo(name="gpt-4o-mini"),
+        ModelInfo(name="o1"),
+        ModelInfo(name="o1-mini"),
+        ModelInfo(name="o3-mini"),
     ]
 
 
-def _gemini_models() -> list[str]:
+def _gemini_models() -> list[ModelInfo]:
     return [
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.0-flash",
+        ModelInfo(name="gemini-2.5-flash"),
+        ModelInfo(name="gemini-2.5-pro"),
+        ModelInfo(name="gemini-2.0-flash"),
     ]
 
 
-def _pyagent_models() -> list[str]:
-    return ["echo", "loremipsum"]
+def _pyagent_models() -> list[ModelInfo]:
+    return [ModelInfo(name="echo"), ModelInfo(name="loremipsum")]
 
 
 def _anthropic_factory(**kw: Any) -> "LLMClient":
@@ -233,7 +254,7 @@ class ProviderListing:
 
     name: str
     default_model: str
-    models: tuple[str, ...] = ()
+    models: tuple[ModelInfo, ...] = ()
     error: str = ""
 
 

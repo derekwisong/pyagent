@@ -141,14 +141,18 @@ def _render_models_listing() -> str:
 
     Built-in providers ship hardcoded lists (zero network, no key
     required). Plugin providers can register a live callable —
-    ollama's hits `/api/tags`. Per-provider exceptions are caught
-    upstream in `llms.list_all_models()` and rendered as
-    `(unavailable: <reason>)` so a stopped local server doesn't
-    silence the rest of the catalog.
+    ollama's hits `/api/tags` + per-model `/api/show`. Per-provider
+    exceptions are caught upstream in `llms.list_all_models()` and
+    rendered as `(unavailable: <reason>)` so a stopped local server
+    doesn't silence the rest of the catalog.
 
-    Plugin providers are surfaced only if `plugins.load()` has
-    populated them. Caller is responsible for the load — this
-    function only formats.
+    pyagent's agent loop relies on tool-calling, so the renderer
+    flags ollama models that explicitly don't advertise the ``tools``
+    capability with a yellow ``(no tools — chat only)`` note. Models
+    where capabilities is empty (older Ollama servers, or built-ins
+    we don't enumerate) get no annotation rather than a misleading
+    one. Plugin providers are surfaced only if `plugins.load()` has
+    populated them.
     """
     listings = llms.list_all_models()
     plugin_names = set(llms._PLUGIN_PROVIDERS)
@@ -166,8 +170,15 @@ def _render_models_listing() -> str:
             lines.append("  [dim](no models advertised)[/dim]")
         else:
             for m in listing.models:
-                tag = "  [dim](default)[/dim]" if m == listing.default_model else ""
-                lines.append(f"  - {m}{tag}")
+                tags: list[str] = []
+                if m.name == listing.default_model:
+                    tags.append("[dim](default)[/dim]")
+                if m.capabilities:
+                    tags.append(f"[dim]({', '.join(m.capabilities)})[/dim]")
+                    if "tools" not in m.capabilities:
+                        tags.append("[yellow](no tools — chat only)[/yellow]")
+                tag_str = "  " + " ".join(tags) if tags else ""
+                lines.append(f"  - {m.name}{tag_str}")
         lines.append("")
     return "\n".join(lines).rstrip()
 

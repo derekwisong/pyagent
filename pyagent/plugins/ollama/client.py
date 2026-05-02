@@ -107,6 +107,23 @@ def list_models(host: str | None = None, timeout: float = 30) -> list[dict[str, 
     return models
 
 
+def show_model(
+    name: str, host: str | None = None, timeout: float = 30
+) -> dict[str, Any]:
+    """Return the parsed ``POST /api/show`` payload for one model.
+
+    Used to extract capability tags (``"tools"``, ``"vision"``,
+    ``"embedding"``, ...) — Ollama 0.5+ surfaces these in the
+    ``capabilities`` array. Older servers return this field empty,
+    so callers must treat the absence of capabilities as
+    "unknown", not "none".
+    """
+    url = f"{(host or _resolve_host()).rstrip('/')}/api/show"
+    resp = requests.post(url, json={"name": name}, timeout=timeout)
+    _raise_with_body(resp, "/api/show")
+    return resp.json()
+
+
 class OllamaClient:
     """Wraps a local Ollama HTTP server in the pyagent LLMClient interface.
 

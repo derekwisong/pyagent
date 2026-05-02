@@ -522,6 +522,118 @@ def _check_http_error_surfaces_ollama_body() -> None:
             _check("HTTPError raised on 502 with HTML body", False)
 
 
+def _check_provider_list_models_hook() -> None:
+    """The ollama provider exposes a `list_models` callable on its
+    ProviderSpec — that's how `pyagent --list-models` discovers what
+    a remote Ollama has pulled, and how it tags each model's
+    capabilities."""
+    plugins.load()
+    spec = llms._PLUGIN_PROVIDERS["ollama"]
+    _check(
+        "ollama ProviderSpec carries list_models",
+        spec.list_models is not None,
+    )
+
+    tags_payload = {
+        "models": [
+            {"name": "llama3.2:latest"},
+            {"name": "llava:7b"},
+            {"name": ""},  # filtered: blank-name entries dropped
+        ]
+    }
+
+    def fake_post(url, json=None, timeout=None):
+        # /api/show payload — capabilities array varies per model so
+        # we exercise both the tool and vision tag paths plus the
+        # ``completion`` filter.
+        name = (json or {}).get("name", "")
+        if "llama3.2" in name:
+            return _FakeResponse(
+                {"capabilities": ["completion", "tools"]}
+            )
+        if "llava" in name:
+            return _FakeResponse(
+                {"capabilities": ["completion", "vision"]}
+            )
+        return _FakeResponse({"capabilities": []})
+
+    with mock.patch.object(
+        ollama_client_mod.requests,
+        "get",
+        return_value=_FakeResponse(tags_payload),
+    ):
+        with mock.patch.object(
+            ollama_client_mod.requests, "post", side_effect=fake_post
+        ):
+            infos = spec.list_models()
+
+    _check(
+        "list_models returns ModelInfo records",
+        all(isinstance(m, llms.ModelInfo) for m in infos),
+        repr(infos),
+    )
+    by_name = {m.name: m for m in infos}
+    _check(
+        "blank-name entries filtered",
+        list(by_name) == ["llama3.2:latest", "llava:7b"],
+        repr(list(by_name)),
+    )
+    _check(
+        "tool-capable model gets ('tools',) capability",
+        by_name["llama3.2:latest"].capabilities == ("tools",),
+        repr(by_name["llama3.2:latest"]),
+    )
+    _check(
+        "vision model gets ('vision',) capability",
+        by_name["llava:7b"].capabilities == ("vision",),
+        repr(by_name["llava:7b"]),
+    )
+
+    # An /api/show failure for one model must not blank capabilities
+    # for siblings — the model still appears, just without tags.
+    def half_broken(url, json=None, timeout=None):
+        if (json or {}).get("name") == "llava:7b":
+            raise ConnectionError("model gone")
+        return _FakeResponse({"capabilities": ["tools"]})
+
+    with mock.patch.object(
+        ollama_client_mod.requests,
+        "get",
+        return_value=_FakeResponse(tags_payload),
+    ):
+        with mock.patch.object(
+            ollama_client_mod.requests, "post", side_effect=half_broken
+        ):
+            infos = spec.list_models()
+    by_name = {m.name: m for m in infos}
+    _check(
+        "per-model show failure leaves the model in the list",
+        "llava:7b" in by_name,
+        repr(list(by_name)),
+    )
+    _check(
+        "per-model show failure → empty capabilities, not raise",
+        by_name["llava:7b"].capabilities == (),
+        repr(by_name["llava:7b"]),
+    )
+
+    # The initial /api/tags failure does still raise — that's the
+    # signal the aggregator turns into "(unavailable: ...)".
+    def boom(*a, **kw):
+        raise ConnectionError("refused")
+
+    with mock.patch.object(ollama_client_mod.requests, "get", side_effect=boom):
+        try:
+            spec.list_models()
+        except ConnectionError as e:
+            _check(
+                "list_models raises on /api/tags connection failure",
+                "refused" in str(e),
+            )
+        else:
+            _check("list_models raised on /api/tags failure", False)
+
+
 def _check_no_tools_auto_retry() -> None:
     """When a model 400s with `does not support tools`, the client
     must transparently retry without tools, latch the decision so
@@ -648,6 +760,7 @@ def main() -> None:
     _check_list_ollama_models_empty()
     _check_http_error_surfaces_ollama_body()
     _check_no_tools_auto_retry()
+    _check_provider_list_models_hook()
     print("smoke_ollama_plugin: all checks passed")
 
 
