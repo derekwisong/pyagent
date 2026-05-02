@@ -1,0 +1,17 @@
+name = "py-dev-toolkit"
+version = "0.1.0"
+description = "Python developer toolkit: structured lint / typecheck / pytest results."
+api_version = "1"
+
+[provides]
+tools = ["lint", "typecheck", "run_pytest"]
+
+# No [requires] binaries gate — each tool checks its own binary at
+# call time and returns a clean error if missing. A user with only
+# ruff installed can still use `lint` while `typecheck` /
+# `run_pytest` surface their own missing-tool errors. Keeps the
+# plugin from disappearing entirely just because one of three tools
+# isn't on PATH.
+
+[load]
+in_subagents = true
