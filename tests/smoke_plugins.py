@@ -422,7 +422,9 @@ def test_lifecycle_hooks_fire() -> None:
 
         loaded.call_after_assistant_response("hello there")
         loaded.call_before_tool_call("read_file", {"path": "/x"})
-        loaded.call_after_tool_call("read_file", {"path": "/x"}, "file content here")
+        loaded.call_after_tool_call(
+            "read_file", {"path": "/x"}, "file content here", False
+        )
         loaded.call_on_session_end(session=None)
 
         assert events[0] == "start"

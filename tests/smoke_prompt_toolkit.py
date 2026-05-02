@@ -81,17 +81,21 @@ def main() -> None:
         assert b">" in out, f"no prompt rendered:\n{out!r}"
         print("✓ ready, prompt rendered under PTY")
 
-        # Issue /queue while idle — confirms the new async REPL
-        # routes the slash command through `_handle_queue_command`
-        # locally (no IPC round-trip) and prints "queue empty".
-        os.write(fd, b"/queue\r")
-        slash_out = _read_until(fd, b"queue empty", timeout_s=5.0)
-        assert b"queue empty" in slash_out, (
-            f"/queue did not produce expected output:\n{slash_out!r}"
+        # Issue /perms while idle — confirms the async REPL routes
+        # the slash command through `_handle_perms_command` locally
+        # (no IPC round-trip) and prints "no pending permission
+        # requests". Replaces the old `/queue` smoke now that the
+        # local input queue is gone (issues #68/#69).
+        os.write(fd, b"/perms\r")
+        slash_out = _read_until(
+            fd, b"no pending permission requests", timeout_s=5.0,
         )
-        print("✓ /queue routed locally, printed 'queue empty'")
+        assert b"no pending permission requests" in slash_out, (
+            f"/perms did not produce expected output:\n{slash_out!r}"
+        )
+        print("✓ /perms routed locally, printed 'no pending permission requests'")
 
-        # Brief pause so /queue's redraw settles before we send EOF;
+        # Brief pause so /perms' redraw settles before we send EOF;
         # otherwise prompt_toolkit can swallow the Ctrl-D inside the
         # in-flight repaint.
         time.sleep(0.5)
