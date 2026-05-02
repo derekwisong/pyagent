@@ -244,6 +244,7 @@ class _RegisteredProvider:
     default_model: str
     env_vars: tuple[str, ...]
     plugin_name: str
+    list_models: Callable[[], list[str]] | None = None
 
 
 @dataclass
@@ -329,6 +330,7 @@ class PluginAPI:
         *,
         default_model: str = "",
         env_vars: tuple[str, ...] = (),
+        list_models: Callable[[], list[str]] | None = None,
     ) -> None:
         """Register an LLM provider exposed as `<name>/<model>` for `--model`.
 
@@ -343,6 +345,13 @@ class PluginAPI:
         suffix. `env_vars` is informational at this level — plugins
         should still gate their own loading on env presence via the
         manifest's `[requires] env`.
+
+        `list_models` is an optional callable returning the model
+        names the provider can serve (the part after `provider/` in
+        `--model`). Used by `pyagent --list-models`. Live providers
+        (e.g. a server query) may raise to signal an unreachable
+        backend; the CLI catches per-provider so one bad source
+        doesn't kill the whole listing.
 
         Conflicts with built-in providers raise immediately so the
         problem surfaces at plugin load time rather than at the next
@@ -371,6 +380,7 @@ class PluginAPI:
             default_model=default_model,
             env_vars=tuple(env_vars),
             plugin_name=self._state.manifest.name,
+            list_models=list_models,
         )
 
     def register_prompt_section(
@@ -1191,6 +1201,7 @@ def load(*, is_subagent: bool = False) -> LoadedPlugins:
                 env_vars=tuple(p.env_vars),
                 default_model=p.default_model,
                 factory=p.factory,
+                list_models=p.list_models,
             )
             for name, p in loaded._resolved_providers.items()
         }
