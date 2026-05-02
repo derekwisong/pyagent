@@ -194,10 +194,17 @@ v2 plugins (manifest `api_version = "2"`) may return a
 `ToolHookResult` to block / mutate / inject feedback — see
 "Controlling hooks (v2)" below."""
 
-api.after_tool_call(fn: Callable[[str, dict, Any], AfterToolHookResult | None])
-"""Fired after each tool call with (name, args, result). v1 plugins
-return None (observer). v2 plugins may return an
-`AfterToolHookResult` to replace the tool result or inject feedback."""
+api.after_tool_call(fn: Callable[..., AfterToolHookResult | None])
+"""Fired after each tool call.
+
+v1 signature: (name, args, result)            — observer only.
+v2 signature: (name, args, result, is_error)  — may return a
+              ``AfterToolHookResult`` to replace the tool result or
+              inject feedback.
+
+`is_error` is the harness-computed failure signal (True iff the tool
+raised or returned a `<…>` error marker; see `pyagent.tools.is_error_result`
+for the contract). Plugins no longer have to sniff result strings."""
 ```
 
 Utility (1):
@@ -307,14 +314,20 @@ from pyagent.plugins import AfterToolHookResult
 @dataclass(frozen=True)
 class AfterToolHookResult:
     extra_user_message: str = ""
-    replace_result: Any = _SENTINEL  # if set, replaces the tool result
+    replace_result: str | None = None  # if not None, replaces the tool result
 ```
+
+v2 hook signature: `fn(name, args, result, is_error)`. `is_error` is
+True iff the tool raised or returned a `<…>` error marker (see
+`pyagent.tools.is_error_result` for the contract). Use it instead of
+sniffing result strings yourself.
 
 - `extra_user_message` — same shape as in `ToolHookResult`.
 - `replace_result` — overrides the tool result string the model
   sees on this turn. Useful for secret redaction, summarising a
-  huge log, etc. The sentinel default means "no replacement";
-  `None` is a legal replacement value.
+  huge log, etc. `None` (default) means "no replacement". Tool
+  results are strings by contract; non-string replacements are
+  dropped with a warning.
 
 ### Conflict resolution across multiple plugins
 

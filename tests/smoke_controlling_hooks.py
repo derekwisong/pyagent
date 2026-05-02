@@ -134,7 +134,7 @@ def test_allow_no_change() -> None:
             "    def before(name, args):\n"
             "        events.append(('before', name, dict(args)))\n"
             "        return ToolHookResult(decision='allow')\n"
-            "    def after(name, args, result):\n"
+            "    def after(name, args, result, is_error):\n"
             "        events.append(('after', name, result))\n"
             "        return None\n"
             "    api.before_tool_call(before)\n"
@@ -294,7 +294,7 @@ def test_extra_user_message_before_and_after() -> None:
             "        return ToolHookResult(\n"
             "            extra_user_message='heads up: tool incoming',\n"
             "        )\n"
-            "    def after(name, args, result):\n"
+            "    def after(name, args, result, is_error):\n"
             "        return AfterToolHookResult(\n"
             "            extra_user_message='heads up: tool ran',\n"
             "        )\n"
@@ -332,7 +332,7 @@ def test_extra_user_message_drains_to_next_turn() -> None:
         plugin_py = (
             "from pyagent.plugins import AfterToolHookResult\n"
             "def register(api):\n"
-            "    def after(name, args, result):\n"
+            "    def after(name, args, result, is_error):\n"
             "        return AfterToolHookResult(\n"
             "            extra_user_message='reconsider',\n"
             "        )\n"
@@ -472,7 +472,7 @@ def test_replace_result_chaining() -> None:
         plugin_a = (
             "from pyagent.plugins import AfterToolHookResult\n"
             "def register(api):\n"
-            "    def after(name, args, result):\n"
+            "    def after(name, args, result, is_error):\n"
             "        return AfterToolHookResult(replace_result='A')\n"
             "    api.after_tool_call(after)\n"
         )
@@ -480,7 +480,7 @@ def test_replace_result_chaining() -> None:
             "from pyagent.plugins import AfterToolHookResult\n"
             "seen = []\n"
             "def register(api):\n"
-            "    def after(name, args, result):\n"
+            "    def after(name, args, result, is_error):\n"
             "        seen.append(result)\n"
             "        return AfterToolHookResult(\n"
             "            replace_result=result + '-then-B',\n"
@@ -684,7 +684,130 @@ def test_strategic_reevaluation_resets_on_success() -> None:
         restore()
 
 
+def test_is_error_helper_contract() -> None:
+    """The errors-as-data contract: any tool result starting with `<`
+    is an error marker; non-error results MUST NOT start with `<`.
+    """
+    from pyagent.tools import is_error_result, ERROR_MARKER_PREFIX
+
+    assert ERROR_MARKER_PREFIX == "<", ERROR_MARKER_PREFIX
+    assert is_error_result("<refused: empty>") is True
+    assert is_error_result("<unknown sid 'foo'>") is True
+    assert is_error_result("Error: ValueError: bad") is False
+    assert is_error_result("Wrote 1 replacement to /x") is False
+    assert is_error_result("") is False
+    # Tolerant of leading whitespace.
+    assert is_error_result("\n  <error: something>") is True
+    # Defensive against non-string defenders.
+    assert is_error_result(None) is False  # type: ignore[arg-type]
+    assert is_error_result(42) is False  # type: ignore[arg-type]
+    print("✓ tools.is_error_result encodes the <…>-prefix contract")
+
+
+def test_after_hook_receives_is_error_flag() -> None:
+    """v2 after_tool hooks receive `is_error` as the 4th positional
+    argument, set by the harness from (raised exception OR result
+    starts with `<`).
+    """
+    cfg, restore = _isolated_config_dir()
+    try:
+        plugin_py = (
+            "from pyagent.plugins import AfterToolHookResult\n"
+            "calls = []\n"
+            "def register(api):\n"
+            "    def after(name, args, result, is_error):\n"
+            "        calls.append((name, result[:24], is_error))\n"
+            "        return None\n"
+            "    api.after_tool_call(after)\n"
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="errflag",
+            name="errflag",
+            plugin_py=plugin_py,
+        )
+        loaded = plugins_mod.load()
+        agent = _mk_agent(loaded)
+        # Override widget to be deterministic.
+        agent.add_tool(
+            "widget",
+            lambda path="", value="": "happy result",
+            auto_offload=False,
+        )
+        # Add a failing-marker tool.
+        agent.add_tool(
+            "fail_marker",
+            lambda: "<error: simulated failure>",
+            auto_offload=False,
+        )
+        # Add a raising tool.
+        def boom() -> str:
+            raise RuntimeError("boom")
+        agent.add_tool("boom", boom, auto_offload=False)
+
+        agent._route_tool({"id": "1", "name": "widget", "args": {}})
+        agent._route_tool({"id": "2", "name": "fail_marker", "args": {}})
+        agent._route_tool({"id": "3", "name": "boom", "args": {}})
+
+        mod = next(
+            m for n, m in sys.modules.items()
+            if n.startswith("pyagent_plugin_errflag")
+        )
+        assert len(mod.calls) == 3, mod.calls
+        # Success → is_error False.
+        assert mod.calls[0] == ("widget", "happy result", False), mod.calls[0]
+        # `<…>` marker → is_error True.
+        assert mod.calls[1][0] == "fail_marker"
+        assert mod.calls[1][2] is True, mod.calls[1]
+        # Raised exception → is_error True (rendered into Error: …
+        # which doesn't start with `<` but the harness tracks the
+        # raise separately).
+        assert mod.calls[2][0] == "boom"
+        assert mod.calls[2][2] is True, mod.calls[2]
+        print("✓ after_tool receives is_error: success=False, marker=True, raise=True")
+    finally:
+        restore()
+
+
+def test_replace_result_must_be_string() -> None:
+    """v2 contract: replace_result is `str | None`. Non-string values
+    are dropped with a warning; the original tool result stands."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        plugin_py = (
+            "from pyagent.plugins import AfterToolHookResult\n"
+            "def register(api):\n"
+            "    def after(name, args, result, is_error):\n"
+            "        # Returning a non-string replace_result must be\n"
+            "        # ignored (typed as str|None per the v2 contract).\n"
+            "        return AfterToolHookResult(replace_result=42)\n"
+            "    api.after_tool_call(after)\n"
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="badtype",
+            name="badtype",
+            plugin_py=plugin_py,
+        )
+        loaded = plugins_mod.load()
+        agent = _mk_agent(loaded)
+        result = agent._route_tool({
+            "id": "1", "name": "widget",
+            "args": {"path": "/x", "value": "v"},
+        })
+        # Non-string replace_result was dropped; original tool output
+        # stands.
+        assert "widget(path='/x'" in result, result
+        assert result != "42", result
+        print("✓ replace_result non-string dropped with warning")
+    finally:
+        restore()
+
+
 def main() -> None:
+    test_is_error_helper_contract()
+    test_after_hook_receives_is_error_flag()
+    test_replace_result_must_be_string()
     test_allow_no_change()
     test_block_short_circuits_before_permission()
     test_mutate_args()

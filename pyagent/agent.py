@@ -364,21 +364,30 @@ class Agent:
                 # hooks — the contract is "after the tool runs"; no
                 # tool ran.
                 return content
+        is_error = False
         try:
             content = self._execute_tool(name, args)
         except Exception as e:
             logger.exception("tool %s raised", name)
             content = f"Error: {type(e).__name__}: {e}"
+            is_error = True
+        else:
+            # Errors-as-data convention: tools encode refusals /
+            # failures as `<…>`-prefixed strings. See
+            # `pyagent.tools.is_error_result` for the full contract.
+            from pyagent.tools import is_error_result
+            is_error = is_error_result(content)
         if self.plugins is not None:
-            after = self.plugins.call_after_tool_call(name, args, content)
+            after = self.plugins.call_after_tool_call(
+                name, args, content, is_error
+            )
             for note in after.extra_user_messages:
                 self.pending_async_replies.put(note)
             if after.replaced:
-                content = (
-                    after.result
-                    if isinstance(after.result, str)
-                    else str(after.result)
-                )
+                # AfterToolHookResult.replace_result is typed as
+                # `str | None`; the dispatch loop already drops
+                # non-strings with a warning, so this is safe.
+                content = after.result
         if on_tool_result:
             on_tool_result(name, content)
         # Scrub bulky string args from the conversation so they don't

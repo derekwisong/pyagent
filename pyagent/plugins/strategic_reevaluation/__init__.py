@@ -18,8 +18,12 @@ Counter resets on:
     write_file, grep — any of these are evidence the agent is
     actually inspecting the situation rather than blind-retrying).
 
+Failure detection uses the harness-provided ``is_error`` flag
+introduced alongside the v2 hook tightening — no string-sniffing,
+robust against any future change to the error-marker convention.
+
 This plugin is the canonical worked example for the "controlling
-hooks" feature: ~80 lines, zero tools registered, demonstrates that
+hooks" feature: ~70 lines, zero tools registered, demonstrates that
 plugin-injected mid-turn feedback is now a 30-line plugin instead of
 a paragraph baked into PRIMER.
 """
@@ -36,15 +40,6 @@ CONSECUTIVE_FAILURE_THRESHOLD = 3
 # only ever lives in the root agent's process.
 _consecutive_fails: dict[str, int] = {}
 
-# A tool result counts as a failure if the tool returned an error
-# marker. pyagent's `<...>` convention covers most cases:
-# `<file not found: ...>`, `<error: old_string ... not found>`, etc.
-# We also flag `_denied(path)` results (which start with
-# `<permission denied to ...>`) as failures.
-_FAILURE_PREFIXES = ("<error", "<file not found", "<permission denied",
-                     "<is a directory", "<cannot decode", "<no match",
-                     "<old_string", "<the original", "<")
-
 
 RECONSIDER_NOTE = (
     "You've now had several consecutive edit_file failures on the "
@@ -56,21 +51,6 @@ RECONSIDER_NOTE = (
 )
 
 
-def _is_failure(result: Any) -> bool:
-    """edit_file returns a string; failures start with `<...>` markers
-    (the codebase's `tools.py` `<...>` convention). A confirmation
-    starts with `Wrote ...` or `Replaced ...`."""
-    if not isinstance(result, str):
-        return False
-    s = result.lstrip()
-    if not s:
-        return False
-    # Cheap test: confirmations start with Wrote/Replaced/etc., not
-    # with `<`. Anything starting with `<` is a marker per the
-    # tools.py convention.
-    return s.startswith("<")
-
-
 def _path_from_args(args: dict) -> str | None:
     if not isinstance(args, dict):
         return None
@@ -78,7 +58,9 @@ def _path_from_args(args: dict) -> str | None:
     return p if isinstance(p, str) and p else None
 
 
-def _on_after_tool(name: str, args: dict, result: Any) -> AfterToolHookResult | None:
+def _on_after_tool(
+    name: str, args: dict, result: Any, is_error: bool
+) -> AfterToolHookResult | None:
     path = _path_from_args(args)
     if path is None:
         return None
@@ -89,7 +71,7 @@ def _on_after_tool(name: str, args: dict, result: Any) -> AfterToolHookResult | 
         _consecutive_fails.pop(path, None)
         return None
 
-    if not _is_failure(result):
+    if not is_error:
         # Successful edit. Reset.
         _consecutive_fails.pop(path, None)
         return None

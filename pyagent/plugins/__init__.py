@@ -60,10 +60,6 @@ ENTRY_POINT_GROUP = "pyagent.plugins"
 SUPPORTED_API_VERSIONS: set[str] = {"1", "2"}
 RECENT_MESSAGES_WINDOW = 8
 
-# Sentinel for "no replacement" on AfterToolHookResult.replace_result
-# — `None` is a legitimate result value, so we need a distinct marker.
-_REPLACE_RESULT_SENTINEL = object()
-
 
 # ---- Public types ----------------------------------------------
 
@@ -132,18 +128,20 @@ class AfterToolHookResult:
     Both fields are optional. Returning ``None`` is a no-op observer.
 
     Fields:
-      - ``replace_result``: if set, replaces the tool result that the
-        model sees. Multiple plugins chain in registration order —
-        each later plugin sees the *replaced* result. Useful for
-        secret redaction or huge-log summarisation. Sentinel default
-        means "no replacement"; ``None`` is a legal replacement value.
+      - ``replace_result``: if not ``None``, replaces the tool result
+        string that the model sees. Multiple plugins chain in
+        registration order — each later plugin sees the *replaced*
+        result. Useful for secret redaction or huge-log summarisation.
+        ``None`` (default) means "no replacement". Tool results are
+        strings by contract; non-string replacements are not allowed
+        (the dispatch loop drops them with a warning).
       - ``extra_user_message``: same shape as in ``ToolHookResult`` —
         prepended to the next assistant turn as a user-role message
         tagged with the plugin name.
     """
 
     extra_user_message: str = ""
-    replace_result: Any = _REPLACE_RESULT_SENTINEL
+    replace_result: str | None = None
 
 
 @dataclass
@@ -179,12 +177,13 @@ class AfterToolDispatch:
     for one tool call.
 
     - ``result``: the (possibly replaced) result the model should see.
-    - ``replaced``: True iff at least one plugin returned a
-      ``replace_result`` other than the sentinel.
+      Always a string.
+    - ``replaced``: True iff at least one plugin returned a non-None
+      ``replace_result``.
     - ``extra_user_messages``: same shape as on ``BeforeToolDispatch``.
     """
 
-    result: Any
+    result: str
     replaced: bool = False
     extra_user_messages: list[str] = field(default_factory=list)
 
@@ -1045,14 +1044,23 @@ class LoadedPlugins:
         return dispatch
 
     def call_after_tool_call(
-        self, name: str, args: dict, result: Any
+        self, name: str, args: dict, result: str, is_error: bool
     ) -> "AfterToolDispatch":
         """Fire every plugin's after_tool hook in registration order.
+
+        v1 hooks accept ``(name, args, result)`` and have their return
+        value ignored. v2 hooks accept ``(name, args, result, is_error)``
+        and may return an ``AfterToolHookResult`` to replace the result
+        or inject a user-role message.
 
         ``replace_result`` chains in registration order — each later
         plugin's hook is invoked with the result the previous plugin
         replaced. ``extra_user_message`` accumulates the same way as
         in ``call_before_tool_call``.
+
+        ``is_error`` is the harness-computed failure signal (see
+        ``pyagent.tools.is_error_result`` for the contract). Plugins
+        no longer have to sniff for ``<...>`` markers themselves.
         """
         dispatch = AfterToolDispatch(result=result)
         for state in self.states:
@@ -1060,7 +1068,10 @@ class LoadedPlugins:
             plugin_name = state.manifest.name
             for fn in state.after_tool_hooks:
                 try:
-                    rv = fn(name, args, dispatch.result)
+                    if is_v2:
+                        rv = fn(name, args, dispatch.result, is_error)
+                    else:
+                        rv = fn(name, args, dispatch.result)
                 except Exception:
                     logger.exception(
                         "plugin %s after_tool_call raised",
@@ -1083,7 +1094,15 @@ class LoadedPlugins:
                             plugin_name, rv.extra_user_message
                         )
                     )
-                if rv.replace_result is not _REPLACE_RESULT_SENTINEL:
+                if rv.replace_result is not None:
+                    if not isinstance(rv.replace_result, str):
+                        logger.warning(
+                            "plugin %s after_tool_call replace_result "
+                            "must be str | None, got %r; ignoring",
+                            plugin_name,
+                            type(rv.replace_result).__name__,
+                        )
+                        continue
                     dispatch.result = rv.replace_result
                     dispatch.replaced = True
         return dispatch
