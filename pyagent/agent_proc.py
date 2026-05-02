@@ -284,6 +284,17 @@ class _ChildState:
                     "parent_answer for unknown request_id %r; dropping",
                     req_id,
                 )
+        elif kind == "parent_note":
+            # Non-blocking note from this agent's parent. Queue as a
+            # formatted user-role message onto our own
+            # pending_async_replies so the next LLM call sees it.
+            # Issue #64. No producer ships in this PR; #65 adds
+            # `tell_subagent` which fires this event downward.
+            text = event.get("text", "") or ""
+            if self.agent is not None:
+                self.agent.pending_async_replies.put(
+                    f"[parent says]: {text}"
+                )
         elif kind == "set_model":
             self._handle_set_model(event.get("model", ""))
         elif kind == "shutdown":
@@ -431,6 +442,38 @@ class _ChildState:
             # `agent_id=sid` so the CLI knows which subagent originated.
             self._forward_upstream(event, sid)
             return
+        if kind == "subagent_note":
+            # A direct child dropped a non-blocking note. Append to
+            # the per-sid ring on the parent agent and queue a
+            # formatted user-role message onto pending_async_replies
+            # so the parent's next LLM call sees it. Issue #64.
+            #
+            # Notes always target the IMMEDIATE parent — a bubbled
+            # variant from a grandchild is dropped with a warning,
+            # mirroring the subagent_ask rule above.
+            if inner_id is not None:
+                logger.warning(
+                    "subagent_note bubbled past its direct parent "
+                    "(inner_id=%r via sid=%r); dropping",
+                    inner_id, sid,
+                )
+                self._forward_upstream(event, sid)
+                return
+            severity = event.get("severity", "info") or "info"
+            text = event.get("text", "") or ""
+            if self.agent is not None:
+                self.agent._append_subagent_note(sid, severity, text)
+                entry = self.agent._subagents.get(sid)
+                name = entry.name if entry else sid
+                formatted = (
+                    f"[subagent {name} ({sid}) notes ({severity})]: "
+                    f"{text}"
+                )
+                self.agent.pending_async_replies.put(formatted)
+            # Surface upstream so the CLI can render the note in
+            # the transcript like any other cross-agent event.
+            self._forward_upstream(event, sid)
+            return
         # Everything else (assistant_text, tool_*, info, permission_request).
         # Learn the route if this event came from a deeper descendant,
         # then forward upstream so the CLI can render it.
@@ -531,6 +574,14 @@ def _register_tools(
         _add(
             "ask_parent",
             subagent_mod.make_ask_parent(state, agent),
+            auto_offload=False,
+        )
+        # notify_parent (issue #64): non-blocking, fire-and-forget.
+        # Counterpart to ask_parent for cases where the subagent
+        # has information for the parent but doesn't need a reply.
+        _add(
+            "notify_parent",
+            subagent_mod.make_notify_parent(state, agent),
             auto_offload=False,
         )
     # pip_install (issue #46): registered ONLY on the root agent.

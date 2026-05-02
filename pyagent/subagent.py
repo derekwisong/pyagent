@@ -514,6 +514,71 @@ def make_ask_parent(
     return ask_parent
 
 
+_NOTIFY_VALID_SEVERITIES = ("info", "warn", "alert")
+
+
+def make_notify_parent(
+    state: "_ChildState",
+    agent: "Agent",
+) -> Callable[..., str]:
+    """Build the `notify_parent` tool — only registered on subagents.
+
+    Sends a non-blocking note up to the immediate parent agent and
+    returns immediately. The parent's IO thread appends the note to
+    a per-sid ring and queues a formatted user-role message onto the
+    parent's `pending_async_replies`, surfacing at the parent's next
+    LLM-call boundary. Issue #64.
+    """
+
+    def notify_parent(text: str, severity: str = "info") -> str:
+        """Drop a non-blocking note to your immediate parent agent.
+
+        Use this when you've learned something the parent should
+        know but you don't need an answer to keep going. The parent
+        will see your note as a user-role message at its next
+        LLM-call boundary; it can act, defer, or ignore.
+
+        Don't spam. One note should change the parent's behavior or
+        understanding — if it wouldn't, don't send it. Good fits:
+        a framing concern ("the test runner here is broken; switch
+        approach"), a heads-up that supersedes earlier work, a
+        completed milestone the parent is waiting on. Bad fits:
+        progress chatter ("starting now", "still working"),
+        restating the obvious, anything that reads like narration.
+
+        Unlike `ask_parent`, this is fire-and-forget: there's no
+        request_id and the parent never replies. Use `ask_parent`
+        when you actually need a decision.
+
+        Args:
+            text: The note text. Plain prose, self-contained — the
+                parent has its context but doesn't have yours.
+            severity: One of "info", "warn", "alert". "alert"
+                signals the parent should consider pivoting; "warn"
+                flags a concern; "info" is everything else. Default
+                "info".
+
+        Returns:
+            A short status string. Errors come back as `<...>`
+            markers (empty text, unknown severity, send failure).
+        """
+        text = (text or "").strip()
+        if not text:
+            return "<refused: empty text>"
+        if severity not in _NOTIFY_VALID_SEVERITIES:
+            valid = ", ".join(repr(s) for s in _NOTIFY_VALID_SEVERITIES)
+            return f"<refused: severity {severity!r} not in {{{valid}}}>"
+        try:
+            state.send(
+                "subagent_note", severity=severity, text=text
+            )
+        except Exception as e:
+            return f"<send failed: {type(e).__name__}: {e}>"
+        return f"note sent ({severity})"
+
+    return notify_parent
+
+
 def make_reply_to_subagent(
     state: "_ChildState",
     agent: "Agent",
