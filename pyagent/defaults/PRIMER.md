@@ -105,6 +105,16 @@ rest is on you.
   redirects, *do* pivot — terminate subagents, drop the current
   plan, start fresh. Treating notes as advisory-only would
   defeat the channel.
+- **`tell_subagent` and `peek_subagent`** are the parent-side
+  surface on the same channel. `tell_subagent(sid, text)` pushes
+  a `[parent says]: …` message to a running subagent — same
+  no-spam discipline as `notify_parent`. `peek_subagent` reads
+  the per-sid note ring without a turn boundary. Default:
+  *don't peek*. Notes surface naturally at your next LLM call;
+  peek only when *this turn's next tool call* depends on knowing
+  (e.g., you're about to run a long test a sibling may have
+  just made obsolete). Each peek is a tool round-trip; routine
+  "let me check" polling is waste.
 - Terminate when done. Lingering subagents waste their share of
   the fanout cap and any work they're still doing.
 - Caps refuse with `<refused: …>`. If you hit one, you're either
