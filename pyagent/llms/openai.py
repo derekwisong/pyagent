@@ -39,12 +39,70 @@ class OpenAIClient:
         system_volatile: str | None = None,
         on_text_delta: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
-        # `on_text_delta` is the streaming hook on the LLMClient
-        # protocol. The OpenAI client doesn't stream yet — its
-        # follow-up PR will pass `stream=True` and consume the SSE
-        # delta stream. Accepted-and-ignored here so the agent can
-        # pass it uniformly to every provider.
-        del on_text_delta
+        kwargs = self._build_kwargs(conversation, system, tools, system_volatile)
+        if on_text_delta is None:
+            response = self._client.chat.completions.create(**kwargs)
+            return self._build_response_from_message(
+                response.choices[0].message, getattr(response, "usage", None)
+            )
+        # Streaming: include_usage so the trailing chunk carries the
+        # token counters; OpenAI omits them otherwise. Tool calls
+        # arrive incrementally and are keyed by `index` — the model
+        # interleaves arg-string fragments across many chunks for the
+        # same call, so we accumulate per-index and join at the end.
+        kwargs["stream"] = True
+        kwargs["stream_options"] = {"include_usage": True}
+        text_parts: list[str] = []
+        tc_acc: dict[int, dict[str, Any]] = {}
+        usage = None
+        for chunk in self._client.chat.completions.create(**kwargs):
+            choices = getattr(chunk, "choices", None) or []
+            if choices:
+                delta = choices[0].delta
+                if getattr(delta, "content", None):
+                    on_text_delta(delta.content)
+                    text_parts.append(delta.content)
+                for tc_delta in getattr(delta, "tool_calls", None) or []:
+                    idx = tc_delta.index
+                    slot = tc_acc.setdefault(
+                        idx, {"id": "", "name": "", "args_str": ""}
+                    )
+                    if getattr(tc_delta, "id", None):
+                        slot["id"] = tc_delta.id
+                    fn = getattr(tc_delta, "function", None)
+                    if fn is not None:
+                        if getattr(fn, "name", None):
+                            slot["name"] = fn.name
+                        if getattr(fn, "arguments", None):
+                            slot["args_str"] += fn.arguments
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None:
+                usage = chunk_usage
+
+        tool_calls: list[dict[str, Any]] = []
+        for idx in sorted(tc_acc):
+            slot = tc_acc[idx]
+            try:
+                args = json.loads(slot["args_str"] or "{}")
+            except json.JSONDecodeError:
+                args = {"_raw": slot["args_str"]}
+            tool_calls.append(
+                {"id": slot["id"], "name": slot["name"], "args": args}
+            )
+        return self._build_response_from_parts(
+            "".join(text_parts), tool_calls, usage
+        )
+
+    def _build_kwargs(
+        self,
+        conversation: list[dict[str, Any]],
+        system: str | None,
+        tools: list[dict[str, Any]] | None,
+        system_volatile: str | None,
+    ) -> dict[str, Any]:
+        """Translate pyagent's internal conversation into the kwargs
+        dict accepted by both the streaming and non-streaming branches
+        of ``chat.completions.create``."""
         messages: list[dict[str, Any]] = []
         # OpenAI prompt caching is automatic on the prefix; concatenate
         # stable + volatile into one system message. Volatile content
@@ -82,10 +140,13 @@ class OpenAIClient:
                 }
                 for t in tools
             ]
+        return kwargs
 
-        response = self._client.chat.completions.create(**kwargs)
-        message = response.choices[0].message
-
+    def _build_response_from_message(
+        self, message: Any, usage: Any
+    ) -> dict[str, Any]:
+        """Translate one non-streaming ``ChatCompletionMessage`` into
+        the agent-facing assistant turn dict."""
         tool_calls: list[dict[str, Any]] = []
         for tc in message.tool_calls or []:
             tool_calls.append(
@@ -95,13 +156,23 @@ class OpenAIClient:
                     "args": json.loads(tc.function.arguments or "{}"),
                 }
             )
+        return self._build_response_from_parts(
+            message.content or "", tool_calls, usage
+        )
 
-        usage = getattr(response, "usage", None)
+    def _build_response_from_parts(
+        self,
+        text: str,
+        tool_calls: list[dict[str, Any]],
+        usage: Any,
+    ) -> dict[str, Any]:
+        """Common shape-builder. Both branches converge here so the
+        returned dict's structure is identical regardless of mode."""
         prompt_details = getattr(usage, "prompt_tokens_details", None)
         cache_read = getattr(prompt_details, "cached_tokens", 0) or 0
         return {
             "role": "assistant",
-            "text": message.content or "",
+            "text": text,
             "tool_calls": tool_calls,
             "usage": {
                 "input": getattr(usage, "prompt_tokens", 0) or 0,

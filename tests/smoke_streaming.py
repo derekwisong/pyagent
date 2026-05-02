@@ -273,6 +273,159 @@ def _check_anthropic_streaming_mocked() -> None:
         repr(out2),
     )
 
+def _check_openai_streaming_mocked() -> None:
+    """OpenAIClient.respond with on_text_delta uses
+    chat.completions.create(stream=True) and accumulates tool-call
+    arguments by index across chunks."""
+
+    os.environ.setdefault("OPENAI_API_KEY", "dummy-for-smoke")
+    from pyagent.llms.openai import OpenAIClient
+
+    # Stream of chunks: text deltas, then tool-call argument
+    # fragments (OpenAI splits the JSON args string across chunks),
+    # then a final usage chunk.
+    chunks = [
+        _Attr(
+            choices=[_Attr(delta=_Attr(content="Looking ", tool_calls=None))],
+            usage=None,
+        ),
+        _Attr(
+            choices=[_Attr(delta=_Attr(content="this up...", tool_calls=None))],
+            usage=None,
+        ),
+        _Attr(
+            choices=[
+                _Attr(
+                    delta=_Attr(
+                        content=None,
+                        tool_calls=[
+                            _Attr(
+                                index=0,
+                                id="call_42",
+                                function=_Attr(name="lookup", arguments='{"q":'),
+                            )
+                        ],
+                    )
+                )
+            ],
+            usage=None,
+        ),
+        _Attr(
+            choices=[
+                _Attr(
+                    delta=_Attr(
+                        content=None,
+                        tool_calls=[
+                            _Attr(
+                                index=0,
+                                id=None,
+                                function=_Attr(name=None, arguments=' "x"}'),
+                            )
+                        ],
+                    )
+                )
+            ],
+            usage=None,
+        ),
+        _Attr(
+            choices=[],
+            usage=_Attr(
+                prompt_tokens=8,
+                completion_tokens=15,
+                prompt_tokens_details=_Attr(cached_tokens=2),
+            ),
+        ),
+    ]
+
+    captured: dict = {}
+
+    def fake_create(**kwargs):
+        captured["kwargs"] = kwargs
+        return iter(chunks)
+
+    client = OpenAIClient(model="gpt-4o", api_key="dummy")
+    deltas: list[str] = []
+    with mock.patch.object(
+        client._client.chat.completions, "create", side_effect=fake_create
+    ):
+        out = client.respond(
+            conversation=[{"role": "user", "content": "hi"}],
+            on_text_delta=deltas.append,
+        )
+
+    _check(
+        "openai create called with stream=True",
+        captured["kwargs"].get("stream") is True,
+        repr(captured["kwargs"].get("stream")),
+    )
+    _check(
+        "openai create called with include_usage option",
+        captured["kwargs"].get("stream_options") == {"include_usage": True},
+        repr(captured["kwargs"].get("stream_options")),
+    )
+    _check(
+        "openai deltas arrive in chunk order",
+        deltas == ["Looking ", "this up..."],
+        repr(deltas),
+    )
+    _check(
+        "openai concat deltas == returned text",
+        "".join(deltas) == out["text"] == "Looking this up...",
+        repr(out["text"]),
+    )
+    _check(
+        "openai accumulates tool_call args across chunks",
+        len(out["tool_calls"]) == 1
+        and out["tool_calls"][0]["id"] == "call_42"
+        and out["tool_calls"][0]["name"] == "lookup"
+        and out["tool_calls"][0]["args"] == {"q": "x"},
+        repr(out["tool_calls"]),
+    )
+    _check(
+        "openai usage parsed including cache_read",
+        out["usage"]["input"] == 8
+        and out["usage"]["output"] == 15
+        and out["usage"]["cache_read"] == 2,
+        repr(out["usage"]),
+    )
+
+    # No callback → no stream kwarg, returns from a non-iterator response.
+    non_stream_response = _Attr(
+        choices=[
+            _Attr(
+                message=_Attr(
+                    content="non-stream",
+                    tool_calls=None,
+                )
+            )
+        ],
+        usage=_Attr(
+            prompt_tokens=1,
+            completion_tokens=2,
+            prompt_tokens_details=None,
+        ),
+    )
+    captured.clear()
+
+    def fake_create_one_shot(**kwargs):
+        captured["kwargs"] = kwargs
+        return non_stream_response
+
+    fresh = OpenAIClient(model="gpt-4o", api_key="dummy")
+    with mock.patch.object(
+        fresh._client.chat.completions, "create", side_effect=fake_create_one_shot
+    ):
+        out2 = fresh.respond(conversation=[{"role": "user", "content": "x"}])
+    _check(
+        "openai no-callback omits stream from kwargs",
+        "stream" not in captured["kwargs"],
+        repr(captured["kwargs"]),
+    )
+    _check(
+        "openai no-callback returns full text",
+        out2["text"] == "non-stream",
+        repr(out2),
+    )
 
 
 def main() -> None:
@@ -282,6 +435,7 @@ def main() -> None:
     _check_provider_signatures_accept_kwarg()
     _check_agent_forwards_delta_callback()
     _check_anthropic_streaming_mocked()
+    _check_openai_streaming_mocked()
     print("smoke_streaming: all checks passed")
 
 
