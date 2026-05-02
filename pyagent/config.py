@@ -59,6 +59,7 @@ DEFAULTS: dict[str, Any] = {
         "web-search",
         "claude-code-cli",
         "echo-plugin",
+        "py-dev-toolkit",
     ],
     "subagents": {
         "max_depth": 3,
