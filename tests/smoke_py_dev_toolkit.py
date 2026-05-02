@@ -36,8 +36,7 @@ def _setup() -> tuple[dict, Path]:
     return tools, workdir
 
 
-def test_plugin_registers_three_tools() -> None:
-    tools, _ = _setup()
+def test_plugin_registers_three_tools(tools: dict) -> None:
     for name in ("lint", "typecheck", "run_pytest"):
         _check(f"{name!r} registered", name in tools, f"have: {sorted(tools)}")
 
@@ -147,9 +146,12 @@ def test_run_pytest_k_filter(tools: dict, workdir: Path) -> None:
     out = tools["run_pytest"](str(test_file), k="pass")
     if "pytest-json-report" in out and "<error:" in out:
         return
+    # Format omits zero-counts ("0 failed" never appears), so a
+    # filtered run with only passes shouldn't mention "failed" in
+    # the summary half (the part before the duration parenthesis).
     _check(
         "pytest k= filter narrows to one test",
-        "1 passed" in out and "0 failed" not in out and "failed" not in out.split("(")[0],
+        "1 passed" in out and "failed" not in out.split("(")[0],
         out[:200],
     )
 
@@ -244,6 +246,32 @@ def test_lint_on_directory(tools: dict, workdir: Path) -> None:
     _check("finding cites file in directory", "a.py" in out, out[:300])
 
 
+def test_pytest_permission_gate_runs_for_nonexistent_paths(
+    tools: dict,
+) -> None:
+    """Reviewer-found bug: `if target_path.exists() and not
+    require_access(...)` skipped the permission check when the path
+    didn't exist. An out-of-workspace target like `/etc/foo.py` then
+    got pytest invoked anyway (its discovery walks parents).
+    Regression test: a non-existent out-of-workspace path must
+    surface a clear refusal, not silently invoke pytest.
+
+    We install a deny-all prompt handler so any out-of-workspace
+    path is rejected without an interactive prompt.
+    """
+    saved_handler = permissions._PROMPT_HANDLER  # type: ignore[attr-defined]
+    permissions.set_prompt_handler(lambda _target: False)
+    try:
+        out = tools["run_pytest"]("/no/such/dir/test_xyz.py")
+        _check(
+            "pytest surfaces access-denied for non-existent OOW path",
+            "<error:" in out and "access denied" in out,
+            out,
+        )
+    finally:
+        permissions.set_prompt_handler(saved_handler)
+
+
 def test_missing_binary_path(workdir: Path) -> None:
     # Spoof PATH to confirm clean error when binary missing. Need a
     # real-on-disk file because the existence check runs before the
@@ -266,7 +294,7 @@ def test_missing_binary_path(workdir: Path) -> None:
 
 def main() -> None:
     tools, workdir = _setup()
-    test_plugin_registers_three_tools()
+    test_plugin_registers_three_tools(tools)
     test_lint_findings_and_clean(tools, workdir)
     test_lint_input_validation(tools, workdir)
     test_typecheck_mypy(tools, workdir)
@@ -277,6 +305,7 @@ def main() -> None:
     test_mypy_text_parser_filters_notes()
     test_mypy_json_parser_filters_notes()
     test_lint_on_directory(tools, workdir)
+    test_pytest_permission_gate_runs_for_nonexistent_paths(tools)
     test_missing_binary_path(workdir)
     print("\nALL CHECKS PASSED")
 

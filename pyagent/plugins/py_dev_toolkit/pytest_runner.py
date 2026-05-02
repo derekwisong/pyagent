@@ -62,17 +62,20 @@ def run(
             "`pip_install pytest pytest-json-report` and retry>"
         )
 
-    # `require_access` gates the target itself, but pytest's
-    # collection phase walks parent directories looking for
-    # `conftest.py` and `pyproject.toml`. Those reads aren't
-    # individually checked against the workspace gate — in practice
-    # only matters for out-of-workspace targets, since conftest
-    # discovery from inside the workspace can't escape it. Caller
-    # who passes `target=/some/abs/path` and approves it implicitly
-    # accepts ancestor reads up to filesystem root; documented
-    # rather than fought.
+    # Always gate the target with `require_access`, even if it
+    # doesn't exist on disk yet. A non-existent out-of-workspace
+    # path (typo, wrong relative path, or deliberately escapist
+    # `target="../../../etc/test_x.py"`) still causes pytest to be
+    # invoked, and pytest's collection phase walks parent
+    # directories for `conftest.py` / `pyproject.toml` — so the
+    # right time to prompt is *before* invocation, regardless of
+    # whether the named file exists.
+    #
+    # `require_access` is a no-op for paths that resolve inside the
+    # workspace, so the common case (relative paths, default ".")
+    # is silent.
     target_path = Path(target.split("::", 1)[0])
-    if target_path.exists() and not permissions.require_access(target_path):
+    if not permissions.require_access(target_path):
         return f"<error: access denied to {target}>"
 
     with tempfile.NamedTemporaryFile(
@@ -141,6 +144,10 @@ def _format_report(data: dict, target: str) -> str:
     passed = summary.get("passed", 0)
     failed = summary.get("failed", 0)
     skipped = summary.get("skipped", 0)
+    # pytest-json-report uses `error` (singular) in current versions;
+    # the `errors` fallback is belt-and-suspenders for a hypothetical
+    # schema rename. If/when we pin a minimum json-report version we
+    # can drop one.
     errors = summary.get("error", 0) + summary.get("errors", 0)
     duration = data.get("duration") or 0.0
 
