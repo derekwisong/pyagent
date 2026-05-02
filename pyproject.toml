@@ -31,6 +31,10 @@ dependencies = [
     "rich>=13",
     "tree-sitter>=0.25",
     "tree-sitter-language-pack>=0.10",
+    # Visible-width measurement for the status footer's three-zone
+    # layout — Braille spinner and middle-dot separators need accurate
+    # widths for the right-zone padding math.
+    "wcwidth>=0.2",
 ]
 
 [project.scripts]

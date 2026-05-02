@@ -144,19 +144,23 @@ def main() -> None:
     # =========================================================
     # 3. _render_status_ansi composes base + perms
     # =========================================================
+    # `thinking` is a non-terminal state, so the broadened spinner
+    # predicate (#67) prefixes the footer with a Braille glyph. Use
+    # `endswith` rather than equality to ignore the spinner cell
+    # without coupling this test to its frame cycle.
     agents = {"root": {"status": "thinking"}}
     p.clear()
-    out = _strip_ansi(_render_status_ansi(agents, "", p))
-    assert out == "thinking…", repr(out)
+    out = _strip_ansi(_render_status_ansi(agents, "", p, cols=80))
+    assert "thinking…" in out, repr(out)
     print(f"✓ ansi base only: {out!r}")
 
     p.append({"target": "/etc/passwd", "agent_id": None, "request_id": "r1"})
-    out = _strip_ansi(_render_status_ansi(agents, "", p))
+    out = _strip_ansi(_render_status_ansi(agents, "", p, cols=80))
     assert "thinking…" in out and "perms: /etc/passwd" in out, out
     print(f"✓ ansi base + single perm: {out!r}")
 
     p.append({"target": "/var/secrets", "agent_id": "sub", "request_id": "r2"})
-    out = _strip_ansi(_render_status_ansi(agents, "", p))
+    out = _strip_ansi(_render_status_ansi(agents, "", p, cols=80))
     assert "perms: 2 (head: /etc/passwd)" in out, out
     print(f"✓ ansi base + multi-perm: {out!r}")
 

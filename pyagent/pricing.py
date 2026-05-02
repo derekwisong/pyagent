@@ -74,6 +74,97 @@ def estimate_cost_usd(
     return cost / 1_000_000
 
 
+def _format_token_count(total: int) -> str:
+    if total >= 1000:
+        return f"{total / 1000:.1f}k"
+    return str(total)
+
+
+def _format_cost(cost: float) -> str:
+    if cost < 0.01:
+        return f"${cost:.4f}"
+    return f"${cost:.3f}"
+
+
+def gross_net_tokens(
+    input_tokens: int,
+    output_tokens: int,
+    model: str,
+    cache_creation_tokens: int = 0,
+    cache_read_tokens: int = 0,
+) -> tuple[int, float]:
+    """Return (gross_tokens, net_tokens) for the status footer.
+
+    On Anthropic the four counts are disjoint — input excludes both
+    cache reads and writes — so:
+      - gross = input + output + cache_creation + cache_read
+        (everything sent + got back; matches today's "tok" number)
+      - net = input + output + cache_creation*1.25 + cache_read*0.1
+        (cost-equivalent token count; weights match
+        `estimate_cost_usd`'s Anthropic multipliers)
+
+    On non-Anthropic providers, prompt_tokens already includes the
+    cached count, so gross == net == input + output.
+    """
+    name = model_name(model)
+    if is_anthropic_model(name):
+        gross = (
+            input_tokens
+            + output_tokens
+            + cache_creation_tokens
+            + cache_read_tokens
+        )
+        net = (
+            input_tokens
+            + output_tokens
+            + cache_creation_tokens * ANTHROPIC_CACHE_WRITE_MULT
+            + cache_read_tokens * ANTHROPIC_CACHE_READ_MULT
+        )
+        return gross, net
+    base = input_tokens + output_tokens
+    return base, float(base)
+
+
+def format_right_zone(
+    input_tokens: int,
+    output_tokens: int,
+    model: str,
+    cache_creation_tokens: int = 0,
+    cache_read_tokens: int = 0,
+) -> tuple[str, str, str]:
+    """Return (gross_str, net_str, cost_str) for the footer's right zone.
+
+    Each component is a pre-formatted string ready to drop into the
+    `gross / net · $cost` display. All three are empty strings when no
+    LLM activity has happened yet (so the right zone can be omitted
+    entirely on first launch).
+
+    `cost_str` is `$0.00` rather than empty when pricing returns None
+    for the model — the right zone is the contract; a missing dollar
+    figure is a separate concern from "nothing to show".
+    """
+    gross, net = gross_net_tokens(
+        input_tokens,
+        output_tokens,
+        model,
+        cache_creation_tokens,
+        cache_read_tokens,
+    )
+    if gross == 0:
+        return "", "", ""
+    gross_str = _format_token_count(gross)
+    net_str = _format_token_count(int(round(net)))
+    cost = estimate_cost_usd(
+        model,
+        input_tokens,
+        output_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+    )
+    cost_str = "$0.00" if cost is None else _format_cost(cost)
+    return gross_str, net_str, cost_str
+
+
 def format_usage_suffix(
     input_tokens: int,
     output_tokens: int,
@@ -94,22 +185,16 @@ def format_usage_suffix(
     to Anthropic; this gate keeps the displayed token count honest the
     same way.
     """
-    name = model_name(model)
-    if is_anthropic_model(name):
-        total = (
-            input_tokens
-            + output_tokens
-            + cache_creation_tokens
-            + cache_read_tokens
-        )
-    else:
-        total = input_tokens + output_tokens
-    if total == 0:
+    gross, _ = gross_net_tokens(
+        input_tokens,
+        output_tokens,
+        model,
+        cache_creation_tokens,
+        cache_read_tokens,
+    )
+    if gross == 0:
         return ""
-    if total >= 1000:
-        tok_str = f"{total / 1000:.1f}k tok"
-    else:
-        tok_str = f"{total} tok"
+    tok_str = f"{_format_token_count(gross)} tok"
     cost = estimate_cost_usd(
         model,
         input_tokens,
@@ -119,8 +204,4 @@ def format_usage_suffix(
     )
     if cost is None:
         return f" [{tok_str}]"
-    if cost < 0.01:
-        cost_str = f"${cost:.4f}"
-    else:
-        cost_str = f"${cost:.3f}"
-    return f" [{tok_str} / {cost_str}]"
+    return f" [{tok_str} / {_format_cost(cost)}]"
