@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Literal, Mapping
 
 from pyagent import config, paths
 
@@ -52,8 +52,17 @@ logger = logging.getLogger(__name__)
 LOCAL_PLUGINS_DIR = Path(".pyagent") / "plugins"
 PACKAGE_PLUGINS_PKG = "pyagent.plugins"
 ENTRY_POINT_GROUP = "pyagent.plugins"
-SUPPORTED_API_VERSION = "1"
+# Set of plugin API versions this build of pyagent understands. v1
+# plugins are observers (return values ignored); v2 plugins can return
+# `ToolHookResult` / `AfterToolHookResult` from before_tool / after_tool
+# to direct flow (block, mutate args, replace results, inject
+# user-role messages).
+SUPPORTED_API_VERSIONS: set[str] = {"1", "2"}
 RECENT_MESSAGES_WINDOW = 8
+
+# Sentinel for "no replacement" on AfterToolHookResult.replace_result
+# — `None` is a legitimate result value, so we need a distinct marker.
+_REPLACE_RESULT_SENTINEL = object()
 
 
 # ---- Public types ----------------------------------------------
@@ -75,6 +84,121 @@ class Manifest:
     requires_binaries: tuple[str, ...]
     in_subagents: bool
     source: Path  # absolute path to manifest.toml
+
+
+@dataclass(frozen=True)
+class ToolHookResult:
+    """Return value from a v2 ``before_tool`` hook.
+
+    Returning ``None`` (or omitting all fields → ``decision="allow"``)
+    is a no-op observer — the call proceeds with the original args and
+    no message is injected.
+
+    Fields:
+      - ``decision``: one of ``"allow"`` / ``"block"`` / ``"mutate"``.
+        ``"block"`` short-circuits the call before it reaches
+        ``_execute_tool`` (and before any permission prompt). The model
+        sees a synthetic ``<blocked by plugin <name>: <reason>>`` tool
+        result.
+        ``"mutate"`` runs the tool with ``mutated_args`` instead of the
+        original args. Multiple mutating plugins compose in
+        registration order — each later plugin sees the args the
+        earlier one returned.
+      - ``reason``: required when ``decision="block"``. Surfaces in the
+        synthetic tool-result string and in the structured INFO log.
+      - ``mutated_args``: required when ``decision="mutate"``. Replaces
+        the args dict for downstream hooks and tool execution.
+      - ``extra_user_message``: optional. If non-empty, the harness
+        prepends a user-role message tagged
+        ``[plugin <name> notes]: <text>`` onto the next assistant turn
+        (via the same ``pending_async_replies`` queue the subagent
+        notes machinery uses). Combinable with any ``decision``.
+
+    v1 plugins' return values are ignored unconditionally — the
+    dispatch loop checks ``record.api_version == "2"`` before honoring
+    these semantics.
+    """
+
+    decision: Literal["allow", "block", "mutate"] = "allow"
+    reason: str = ""
+    mutated_args: dict | None = None
+    extra_user_message: str = ""
+
+
+@dataclass(frozen=True)
+class AfterToolHookResult:
+    """Return value from a v2 ``after_tool`` hook.
+
+    Both fields are optional. Returning ``None`` is a no-op observer.
+
+    Fields:
+      - ``replace_result``: if set, replaces the tool result that the
+        model sees. Multiple plugins chain in registration order —
+        each later plugin sees the *replaced* result. Useful for
+        secret redaction or huge-log summarisation. Sentinel default
+        means "no replacement"; ``None`` is a legal replacement value.
+      - ``extra_user_message``: same shape as in ``ToolHookResult`` —
+        prepended to the next assistant turn as a user-role message
+        tagged with the plugin name.
+    """
+
+    extra_user_message: str = ""
+    replace_result: Any = _REPLACE_RESULT_SENTINEL
+
+
+@dataclass
+class BeforeToolDispatch:
+    """Aggregated outcome of running every plugin's ``before_tool``
+    hook for one tool call. Returned to the agent's ``_route_tool``.
+
+    - ``args``: the args dict to pass to the tool. Equals the original
+      dict when no plugin mutated; otherwise the last mutator's output.
+    - ``blocked`` + ``block_plugin`` + ``block_reason``: when ``blocked``,
+      the agent must not invoke the tool. The synthetic
+      ``<blocked by plugin <name>: <reason>>`` marker becomes the tool
+      result, and an INFO log line is emitted.
+    - ``mutated``: True iff at least one plugin returned
+      ``decision="mutate"``. Informational only — callers usually only
+      need ``args``.
+    - ``extra_user_messages``: pre-formatted user-role strings to push
+      onto the agent's ``pending_async_replies`` queue so they show up
+      at the start of the next turn.
+    """
+
+    args: dict
+    blocked: bool = False
+    block_plugin: str = ""
+    block_reason: str = ""
+    mutated: bool = False
+    extra_user_messages: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AfterToolDispatch:
+    """Aggregated outcome of running every plugin's ``after_tool`` hook
+    for one tool call.
+
+    - ``result``: the (possibly replaced) result the model should see.
+    - ``replaced``: True iff at least one plugin returned a
+      ``replace_result`` other than the sentinel.
+    - ``extra_user_messages``: same shape as on ``BeforeToolDispatch``.
+    """
+
+    result: Any
+    replaced: bool = False
+    extra_user_messages: list[str] = field(default_factory=list)
+
+
+def _format_plugin_note(plugin_name: str, text: str) -> str:
+    """Format a plugin-contributed extra_user_message into the
+    canonical user-role string the agent sees on the next turn.
+
+    Mirrors the ``[subagent <name> (<id>) reports]: <text>`` shape
+    used by ``pending_async_replies`` for async-subagent notes so the
+    LLM has one consistent grammar for "harness-injected note from
+    component X".
+    """
+    return f"[plugin {plugin_name} notes]: {text}"
 
 
 @dataclass(frozen=True)
@@ -338,12 +462,12 @@ def _parse_manifest(manifest_path: Path) -> Manifest | None:
         )
         return None
 
-    if str(data.get("api_version")) != SUPPORTED_API_VERSION:
+    if str(data.get("api_version")) not in SUPPORTED_API_VERSIONS:
         logger.warning(
-            "plugin %s: api_version %r unsupported (expected %r); skipping",
+            "plugin %s: api_version %r unsupported (supported: %s); skipping",
             data.get("name"),
             data.get("api_version"),
-            SUPPORTED_API_VERSION,
+            sorted(SUPPORTED_API_VERSIONS),
         )
         return None
 
@@ -845,29 +969,124 @@ class LoadedPlugins:
                         state.manifest.name,
                     )
 
-    def call_before_tool_call(self, name: str, args: dict) -> None:
+    def call_before_tool_call(
+        self, name: str, args: dict
+    ) -> "BeforeToolDispatch":
+        """Fire every plugin's before_tool hook in registration order.
+
+        Conflict resolution (matches the v2 contract documented in
+        `docs/plugin-design.md`):
+
+        - ``block`` short-circuits the dispatch loop. No further
+          plugins fire after the first block. The block reason is
+          carried back to the call site for surfacing as a synthetic
+          tool result and an INFO log line. Hooks earlier in
+          registration order than the blocker still run; their
+          ``extra_user_message`` contributions are preserved on the
+          returned dispatch.
+        - ``mutate`` chains: later plugins see the args the earlier
+          plugin returned. The returned ``args`` is the final mutated
+          dict (or the original if no plugin mutated).
+        - ``extra_user_message`` accumulates from every plugin that
+          contributed one, each tagged with the originating plugin
+          name. Returned as a list of pre-formatted strings the
+          caller queues onto ``pending_async_replies``.
+
+        v1 plugins' return values are ignored unconditionally — the
+        loop only honors decision semantics when ``api_version == "2"``.
+        Hooks that raise are caught and logged so one bad plugin
+        doesn't poison the rest of the loop.
+        """
+        dispatch = BeforeToolDispatch(args=args)
         for state in self.states:
+            is_v2 = state.manifest.api_version == "2"
+            plugin_name = state.manifest.name
             for fn in state.before_tool_hooks:
                 try:
-                    fn(name, args)
+                    rv = fn(name, dispatch.args)
                 except Exception:
                     logger.exception(
                         "plugin %s before_tool_call raised",
-                        state.manifest.name,
+                        plugin_name,
                     )
+                    continue
+                if not is_v2 or rv is None:
+                    continue
+                if not isinstance(rv, ToolHookResult):
+                    logger.warning(
+                        "plugin %s before_tool_call returned unexpected "
+                        "type %r; ignoring",
+                        plugin_name,
+                        type(rv).__name__,
+                    )
+                    continue
+                if rv.extra_user_message:
+                    dispatch.extra_user_messages.append(
+                        _format_plugin_note(
+                            plugin_name, rv.extra_user_message
+                        )
+                    )
+                if rv.decision == "block":
+                    dispatch.blocked = True
+                    dispatch.block_plugin = plugin_name
+                    dispatch.block_reason = rv.reason or ""
+                    return dispatch
+                if rv.decision == "mutate":
+                    if isinstance(rv.mutated_args, dict):
+                        dispatch.args = rv.mutated_args
+                        dispatch.mutated = True
+                    else:
+                        logger.warning(
+                            "plugin %s before_tool_call returned "
+                            "decision='mutate' without a dict "
+                            "mutated_args; ignoring",
+                            plugin_name,
+                        )
+        return dispatch
 
     def call_after_tool_call(
-        self, name: str, args: dict, result: str
-    ) -> None:
+        self, name: str, args: dict, result: Any
+    ) -> "AfterToolDispatch":
+        """Fire every plugin's after_tool hook in registration order.
+
+        ``replace_result`` chains in registration order — each later
+        plugin's hook is invoked with the result the previous plugin
+        replaced. ``extra_user_message`` accumulates the same way as
+        in ``call_before_tool_call``.
+        """
+        dispatch = AfterToolDispatch(result=result)
         for state in self.states:
+            is_v2 = state.manifest.api_version == "2"
+            plugin_name = state.manifest.name
             for fn in state.after_tool_hooks:
                 try:
-                    fn(name, args, result)
+                    rv = fn(name, args, dispatch.result)
                 except Exception:
                     logger.exception(
                         "plugin %s after_tool_call raised",
-                        state.manifest.name,
+                        plugin_name,
                     )
+                    continue
+                if not is_v2 or rv is None:
+                    continue
+                if not isinstance(rv, AfterToolHookResult):
+                    logger.warning(
+                        "plugin %s after_tool_call returned unexpected "
+                        "type %r; ignoring",
+                        plugin_name,
+                        type(rv).__name__,
+                    )
+                    continue
+                if rv.extra_user_message:
+                    dispatch.extra_user_messages.append(
+                        _format_plugin_note(
+                            plugin_name, rv.extra_user_message
+                        )
+                    )
+                if rv.replace_result is not _REPLACE_RESULT_SENTINEL:
+                    dispatch.result = rv.replace_result
+                    dispatch.replaced = True
+        return dispatch
 
 
 def load(*, is_subagent: bool = False) -> LoadedPlugins:
