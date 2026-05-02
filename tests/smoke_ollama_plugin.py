@@ -254,7 +254,7 @@ def _check_respond_request_shape_and_response_parse() -> None:
     normalisation."""
     captured: dict = {}
 
-    def fake_post(url, json=None, timeout=None):
+    def fake_post(url, json=None, timeout=None, stream=False):
         captured["url"] = url
         captured["body"] = json
         captured["timeout"] = timeout
@@ -522,6 +522,183 @@ def _check_http_error_surfaces_ollama_body() -> None:
             _check("HTTPError raised on 502 with HTML body", False)
 
 
+def _check_streaming_ndjson_path() -> None:
+    """When `on_text_delta` is set, OllamaClient must POST with
+    `stream=True`, drain NDJSON, fire deltas as they arrive, and
+    accumulate the final dict's text/tool_calls/usage from the
+    chunks. The non-streaming path stays untouched (no callback)
+    so existing audit/bench callers see no behavior change."""
+
+    chunks_wire = [
+        # Three text chunks then one done-chunk with usage.
+        b'{"message": {"role": "assistant", "content": "Hel"}, "done": false}\n',
+        b'{"message": {"role": "assistant", "content": "lo "}, "done": false}\n',
+        b'{"message": {"role": "assistant", "content": "world"}, "done": false}\n',
+        b'{"message": {"role": "assistant", "content": ""}, "done": true, '
+        b'"prompt_eval_count": 5, "eval_count": 12}\n',
+    ]
+
+    class _StreamResp:
+        """Minimal `requests.Response` stand-in that exposes
+        `iter_lines` and the OK-path attributes `_raise_with_body`
+        peeks at."""
+
+        status_code = 200
+        ok = True
+
+        def __init__(self, lines):
+            self._lines = lines
+
+        def iter_lines(self, decode_unicode=False):
+            for line in self._lines:
+                # The client passes decode_unicode=True; honor it so
+                # we hand back str, matching real `requests` behavior.
+                if decode_unicode and isinstance(line, bytes):
+                    yield line.decode("utf-8").rstrip("\n")
+                else:
+                    yield line.rstrip(b"\n") if isinstance(line, bytes) else line
+
+        def close(self):
+            pass
+
+    captured: dict = {}
+
+    def fake_post(url, json=None, timeout=None, stream=False):
+        captured["body"] = json
+        captured["stream"] = stream
+        return _StreamResp(list(chunks_wire))
+
+    deltas: list[str] = []
+    client = ollama_client_mod.OllamaClient(model="llama3.2")
+    with mock.patch.object(
+        ollama_client_mod.requests, "post", side_effect=fake_post
+    ):
+        out = client.respond(
+            conversation=[{"role": "user", "content": "hi"}],
+            on_text_delta=deltas.append,
+        )
+
+    _check(
+        "post called with stream=True when callback present",
+        captured["stream"] is True,
+        repr(captured),
+    )
+    _check(
+        "request body says stream: true",
+        captured["body"]["stream"] is True,
+        repr(captured["body"]),
+    )
+    _check(
+        "deltas arrived in chunk order",
+        deltas == ["Hel", "lo ", "world"],
+        repr(deltas),
+    )
+    _check(
+        "final text concatenates the deltas",
+        out["text"] == "Hello world",
+        repr(out["text"]),
+    )
+    _check(
+        "usage parsed from done-chunk",
+        out["usage"]["input"] == 5 and out["usage"]["output"] == 12,
+        repr(out["usage"]),
+    )
+
+    # Without a callback, the non-streaming path stays in effect —
+    # no stream=True, returns immediately from .json().
+    json_resp = _FakeResponse(
+        {
+            "message": {"role": "assistant", "content": "non-stream", "tool_calls": []},
+            "prompt_eval_count": 1,
+            "eval_count": 1,
+        }
+    )
+    captured.clear()
+
+    def fake_post_one_shot(url, json=None, timeout=None, stream=False):
+        captured["stream"] = stream
+        return json_resp
+
+    fresh = ollama_client_mod.OllamaClient(model="llama3.2")
+    with mock.patch.object(
+        ollama_client_mod.requests, "post", side_effect=fake_post_one_shot
+    ):
+        out = fresh.respond(conversation=[{"role": "user", "content": "x"}])
+    _check(
+        "no callback → stream=False on the wire",
+        captured["stream"] is False,
+        repr(captured),
+    )
+    _check(
+        "no callback → full text returned in dict",
+        out["text"] == "non-stream",
+        repr(out),
+    )
+
+
+def _check_streaming_tool_calls_accumulate() -> None:
+    """Tool calls in the stream — Ollama emits them as a complete
+    payload in one chunk (not char-by-char), so the client takes the
+    latest non-empty `tool_calls` value as the canonical batch."""
+
+    chunks = [
+        b'{"message": {"role": "assistant", "content": "Calling..."}, "done": false}\n',
+        b'{"message": {"role": "assistant", "content": "", "tool_calls": '
+        b'[{"function": {"name": "lookup", "arguments": {"q": "x"}}}]}, '
+        b'"done": false}\n',
+        b'{"message": {"role": "assistant", "content": ""}, "done": true, '
+        b'"prompt_eval_count": 3, "eval_count": 9}\n',
+    ]
+
+    class _StreamResp:
+        status_code = 200
+        ok = True
+
+        def __init__(self, lines):
+            self._lines = lines
+
+        def iter_lines(self, decode_unicode=False):
+            for line in self._lines:
+                yield line.decode("utf-8").rstrip("\n") if isinstance(line, bytes) else line
+
+        def close(self):
+            pass
+
+    def fake_post(url, json=None, timeout=None, stream=False):
+        return _StreamResp(list(chunks))
+
+    deltas: list[str] = []
+    client = ollama_client_mod.OllamaClient(model="llama3.2")
+    with mock.patch.object(
+        ollama_client_mod.requests, "post", side_effect=fake_post
+    ):
+        out = client.respond(
+            conversation=[{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "name": "lookup",
+                    "description": "x",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            ],
+            on_text_delta=deltas.append,
+        )
+
+    _check("text delta still fired", deltas == ["Calling..."], repr(deltas))
+    _check(
+        "tool_calls captured from the chunk that carried them",
+        len(out["tool_calls"]) == 1
+        and out["tool_calls"][0]["name"] == "lookup"
+        and out["tool_calls"][0]["args"] == {"q": "x"},
+        repr(out["tool_calls"]),
+    )
+    _check(
+        "synthesized id present",
+        out["tool_calls"][0]["id"] == "call_0",
+        repr(out["tool_calls"][0]),
+    )
+
+
 def _check_provider_list_models_hook() -> None:
     """The ollama provider exposes a `list_models` callable on its
     ProviderSpec — that's how `pyagent --list-models` discovers what
@@ -542,7 +719,7 @@ def _check_provider_list_models_hook() -> None:
         ]
     }
 
-    def fake_post(url, json=None, timeout=None):
+    def fake_post(url, json=None, timeout=None, stream=False):
         # /api/show payload — capabilities array varies per model so
         # we exercise both the tool and vision tag paths plus the
         # ``completion`` filter.
@@ -591,7 +768,7 @@ def _check_provider_list_models_hook() -> None:
 
     # An /api/show failure for one model must not blank capabilities
     # for siblings — the model still appears, just without tags.
-    def half_broken(url, json=None, timeout=None):
+    def half_broken(url, json=None, timeout=None, stream=False):
         if (json or {}).get("name") == "llava:7b":
             raise ConnectionError("model gone")
         return _FakeResponse({"capabilities": ["tools"]})
@@ -656,7 +833,7 @@ def _check_no_tools_auto_retry() -> None:
 
     posts: list[dict] = []
 
-    def fake_post(url, json=None, timeout=None):
+    def fake_post(url, json=None, timeout=None, stream=False):
         # Deep-copy: respond() mutates the dict in place during the
         # tools-stripping retry, so a shallow capture would lose the
         # pre-mutation state.
@@ -761,6 +938,8 @@ def main() -> None:
     _check_http_error_surfaces_ollama_body()
     _check_no_tools_auto_retry()
     _check_provider_list_models_hook()
+    _check_streaming_ndjson_path()
+    _check_streaming_tool_calls_accumulate()
     print("smoke_ollama_plugin: all checks passed")
 
 

@@ -81,6 +81,42 @@ def _on_text(text: str, agent_id: str | None = None) -> None:
     console.print()
 
 
+# Per-agent streaming state. Keys are agent_id strings (or "root" for
+# the main agent); values are True from the first `assistant_text_delta`
+# of a text segment until the closing `assistant_text` arrives. Used
+# by the renderer to (a) emit a leading blank line + label exactly
+# once per streamed segment, and (b) decide whether the closing
+# `assistant_text` should re-render as markdown (provider didn't
+# stream) or just close out the line (provider did stream).
+_streaming_open: dict[str, bool] = {}
+
+
+def _on_text_delta(chunk: str, agent_id: str | None = None) -> None:
+    """Print one streaming text chunk inline, no markdown formatting.
+
+    Markdown rendering happens at end-of-turn via the closing
+    `assistant_text` event in the non-streaming case. While streaming
+    we lose markdown emphasis (bold, headers, lists) — the tradeoff
+    for getting characters on screen as the model produces them.
+    Worth it: the user can react to the response shape immediately,
+    and the raw text is still readable for any well-formed reply.
+
+    Each text segment in a turn (one per LLM call before/between/
+    after tool batches) gets its own leading blank line + agent
+    label exactly once, on the first delta.
+    """
+    key = agent_id or "root"
+    if not _streaming_open.get(key):
+        console.print()
+        if agent_id:
+            console.print(_agent_label(agent_id))
+        _streaming_open[key] = True
+    # `style="dim"` matches the non-streaming render so the streamed
+    # text doesn't visually pop while the user's prompt is still the
+    # most-prominent thing on screen.
+    console.print(chunk, end="", style="dim", soft_wrap=True, highlight=False)
+
+
 def _on_tool_call(
     name: str, args: dict[str, Any], agent_id: str | None = None
 ) -> None:
@@ -1014,8 +1050,23 @@ def _print_event(event: dict) -> None:
     """
     kind = event.get("type")
     agent_id = event.get("agent_id")
+    if kind == "assistant_text_delta":
+        _on_text_delta(event["text"], agent_id=agent_id)
+        return
     if kind == "assistant_text":
-        _on_text(event["text"], agent_id=agent_id)
+        key = agent_id or "root"
+        if _streaming_open.get(key):
+            # Provider streamed — the buffer already shows the full
+            # text in plain form. Close out with the trailing blank
+            # line and clear the streaming flag; do NOT re-render
+            # as markdown over the top (would force a flicker /
+            # scroll-back that's worse UX than losing markdown).
+            console.print()
+            console.print()
+            _streaming_open.pop(key, None)
+        else:
+            # Non-streaming provider — full markdown render as before.
+            _on_text(event["text"], agent_id=agent_id)
     elif kind == "tool_call_started":
         _on_tool_call(event["name"], event["args"], agent_id=agent_id)
     elif kind == "tool_result":

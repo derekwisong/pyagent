@@ -250,7 +250,7 @@ def _check_cli_prints_and_exits() -> None:
         }
     )
 
-    def fake_show(url, json=None, timeout=None):
+    def fake_show(url, json=None, timeout=None, stream=False):
         # Distinct capability arrays per model so the renderer can
         # exercise both the tool-capable and no-tools branches.
         name = (json or {}).get("name", "")

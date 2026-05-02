@@ -171,13 +171,23 @@ class Agent:
         messages: list[Any],
         system: str | None,
         system_volatile: str | None = None,
+        on_text_delta: Callable[[str], None] | None = None,
     ) -> Any:
-        """One model turn. Sends conversation + tool schemas, returns the assistant turn."""
+        """One model turn. Sends conversation + tool schemas, returns the assistant turn.
+
+        `on_text_delta`, when set, receives incremental text chunks as
+        the provider streams them. The returned dict still carries the
+        fully-accumulated `text` field — streaming is a UX channel,
+        not a flow-control change. Providers that haven't implemented
+        streaming silently ignore the callback and return the same
+        dict at end-of-call.
+        """
         return self.client.respond(
             conversation=messages,
             system=system,
             tools=self._tool_schemas(),
             system_volatile=system_volatile,
+            on_text_delta=on_text_delta,
         )
 
     def _execute_tool(self, name: str, args: dict[str, Any]) -> str:
@@ -577,6 +587,7 @@ class Agent:
         self,
         prompt: str,
         on_text: Callable[[str], None] | None = None,
+        on_text_delta: Callable[[str], None] | None = None,
         on_tool_call: Callable[[str, dict[str, Any]], None] | None = None,
         on_tool_result: Callable[[str, str], None] | None = None,
         on_usage: Callable[[dict[str, int]], None] | None = None,
@@ -594,7 +605,10 @@ class Agent:
             # ⇒ prompt cache stays warm.
             stable, volatile = self._system_prompt_segments()
             turn = self._call_llm(
-                self.conversation, stable, system_volatile=volatile
+                self.conversation,
+                stable,
+                system_volatile=volatile,
+                on_text_delta=on_text_delta,
             )
             self.conversation.append(turn)
             # After every assistant turn, evict stale single-shot tool

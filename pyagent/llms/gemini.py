@@ -1,7 +1,7 @@
 """Gemini implementation of the LLM client interface."""
 
 import os
-from typing import Any
+from typing import Any, Callable
 
 from google import genai
 from google.genai import types
@@ -53,7 +53,14 @@ class GeminiClient:
         system: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         system_volatile: str | None = None,
+        on_text_delta: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
+        # `on_text_delta` is the streaming hook on the LLMClient
+        # protocol. The Gemini client doesn't stream yet — its
+        # follow-up PR will switch to `generate_content_stream()`.
+        # Accepted-and-ignored here so the agent can pass it
+        # uniformly to every provider.
+        del on_text_delta
         contents = [self._to_gemini(m) for m in conversation]
 
         # Gemini implicit caching keys on the prefix; concatenate

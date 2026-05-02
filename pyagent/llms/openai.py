@@ -2,7 +2,7 @@
 
 import json
 import os
-from typing import Any
+from typing import Any, Callable
 
 from openai import OpenAI
 
@@ -37,7 +37,14 @@ class OpenAIClient:
         system: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         system_volatile: str | None = None,
+        on_text_delta: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
+        # `on_text_delta` is the streaming hook on the LLMClient
+        # protocol. The OpenAI client doesn't stream yet — its
+        # follow-up PR will pass `stream=True` and consume the SSE
+        # delta stream. Accepted-and-ignored here so the agent can
+        # pass it uniformly to every provider.
+        del on_text_delta
         messages: list[dict[str, Any]] = []
         # OpenAI prompt caching is automatic on the prefix; concatenate
         # stable + volatile into one system message. Volatile content

@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -162,6 +162,7 @@ class OllamaClient:
         system: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         system_volatile: str | None = None,
+        on_text_delta: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
         # Ollama has no prefix-cache surface to preserve, so stable +
@@ -179,10 +180,16 @@ class OllamaClient:
         for m in conversation:
             messages.extend(self._to_ollama(m))
 
+        # Streaming hinges entirely on the on_text_delta callback. When
+        # set, ask Ollama to NDJSON-stream and surface chunks as they
+        # arrive; when unset, ask for a single-shot reply so callers
+        # like the audit / bench paths that just want the final dict
+        # don't pay any iteration overhead.
+        streaming = on_text_delta is not None
         body: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "stream": False,
+            "stream": streaming,
         }
         if tools and not self._skip_tools:
             body["tools"] = [
@@ -197,17 +204,35 @@ class OllamaClient:
                 for t in tools
             ]
 
+        resp = self._post_chat(body)
+        if not streaming:
+            return self._build_response(resp.json())
+        return self._consume_stream(resp, on_text_delta)
+
+    def _post_chat(self, body: dict[str, Any]) -> requests.Response:
+        """POST /api/chat, with the no-tools-auto-retry path applied.
+
+        Honors ``body["stream"]`` to decide whether the underlying
+        ``requests`` call streams the response body — without this
+        flag, a streaming chat would buffer fully before
+        ``iter_lines`` even runs, defeating the point.
+
+        On a 400 ``"does not support tools"``, retries once without
+        ``tools`` and latches ``_skip_tools`` so subsequent turns
+        skip the failed round trip. Other 4xx / 5xx propagate. The
+        first response object is closed before the retry so a
+        partially-buffered streaming connection doesn't linger.
+        """
+        streaming = bool(body.get("stream"))
         resp = requests.post(
-            f"{self.host}/api/chat", json=body, timeout=self.timeout
+            f"{self.host}/api/chat",
+            json=body,
+            timeout=self.timeout,
+            stream=streaming,
         )
         try:
             _raise_with_body(resp, "/api/chat")
         except requests.HTTPError as e:
-            # If Ollama rejected the request because the model doesn't
-            # support tools, retry once without them and latch the
-            # decision so subsequent turns don't repeat the failed
-            # round trip. We also warn so the user knows the agent is
-            # operating without its tool surface.
             if (
                 "does not support tools" in str(e).lower()
                 and "tools" in body
@@ -221,16 +246,30 @@ class OllamaClient:
                 )
                 self._skip_tools = True
                 body.pop("tools")
+                try:
+                    resp.close()
+                except Exception:
+                    pass
                 resp = requests.post(
                     f"{self.host}/api/chat",
                     json=body,
                     timeout=self.timeout,
+                    stream=streaming,
                 )
                 _raise_with_body(resp, "/api/chat")
             else:
                 raise
-        data = resp.json()
+        return resp
 
+    def _build_response(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Translate one parsed `/api/chat` payload into the agent-
+        facing assistant turn dict.
+
+        Used by the non-streaming path directly and by the streaming
+        path after it has assembled `data` from accumulated chunks
+        — keeps tool-call id synthesis and arg normalisation in one
+        place so behavior is identical between modes.
+        """
         message = data.get("message") or {}
         text = message.get("content") or ""
         raw_calls = message.get("tool_calls") or []
@@ -266,6 +305,72 @@ class OllamaClient:
                 "model": self.provider_model,
             },
         }
+
+    def _consume_stream(
+        self,
+        resp: requests.Response,
+        on_text_delta: Callable[[str], None],
+    ) -> dict[str, Any]:
+        """Drain Ollama's NDJSON stream, firing text deltas as they
+        arrive, and assemble the final agent-facing turn dict.
+
+        Wire format: each line is one JSON object with optional
+        ``message.content`` chunk, optional ``message.tool_calls``,
+        and a final line carrying ``done=true`` plus
+        ``prompt_eval_count`` / ``eval_count`` token counters.
+
+        Tool-call accumulation strategy: we keep the latest non-empty
+        ``tool_calls`` payload from any chunk. Ollama's streaming
+        usually emits the complete call object once per call (not
+        char-by-char), so the last value is the canonical batch.
+        Empty arrays are ignored so a late "no more tool calls"
+        signal doesn't blank a real call we already captured.
+        """
+        text_parts: list[str] = []
+        latest_tool_calls: list[dict[str, Any]] = []
+        final_meta: dict[str, Any] = {}
+
+        try:
+            for raw in resp.iter_lines(decode_unicode=True):
+                if not raw:
+                    continue
+                try:
+                    chunk = json.loads(raw)
+                except json.JSONDecodeError:
+                    # Malformed line — skip rather than blow up the
+                    # whole turn. Real Ollama servers don't emit
+                    # these but a flaky proxy might.
+                    logger.debug("ollama: skipping malformed NDJSON line: %r", raw)
+                    continue
+
+                msg = chunk.get("message") or {}
+                content = msg.get("content") or ""
+                if content:
+                    on_text_delta(content)
+                    text_parts.append(content)
+                tc = msg.get("tool_calls")
+                if tc:
+                    latest_tool_calls = tc
+
+                if chunk.get("done"):
+                    final_meta = chunk
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass
+
+        # Reconstruct a single-shot-shaped payload so _build_response
+        # can do the rest. The accumulated text wins over whatever
+        # `message.content` ended up on the final chunk (which is
+        # typically empty in streaming mode anyway).
+        synthetic = dict(final_meta)
+        synthetic["message"] = {
+            "role": "assistant",
+            "content": "".join(text_parts),
+            "tool_calls": latest_tool_calls,
+        }
+        return self._build_response(synthetic)
 
     @staticmethod
     def _to_ollama(message: dict[str, Any]) -> list[dict[str, Any]]:

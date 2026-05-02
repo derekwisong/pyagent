@@ -7,7 +7,7 @@ spending real tokens. Selected with `--model pyagent/<stub-name>`.
 """
 
 import random
-from typing import Any
+from typing import Any, Callable
 
 
 class EchoClient:
@@ -35,6 +35,7 @@ class EchoClient:
         system: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         system_volatile: str | None = None,
+        on_text_delta: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         text = ""
         for msg in reversed(conversation):
@@ -44,6 +45,13 @@ class EchoClient:
             if isinstance(content, str):
                 text = content
                 break
+        # Word-by-word streaming so the protocol exercise covers the
+        # multi-delta path even on the simplest stub. Fires
+        # synchronously — no sleep — so tests stay fast.
+        if on_text_delta and text:
+            for i, word in enumerate(text.split(" ")):
+                chunk = word if i == 0 else f" {word}"
+                on_text_delta(chunk)
         return {
             "text": text,
             "tool_calls": [],
@@ -100,6 +108,7 @@ class LoremClient:
         system: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         system_volatile: str | None = None,
+        on_text_delta: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         paragraphs = []
         for _ in range(random.randint(1, 5)):
@@ -107,8 +116,20 @@ class LoremClient:
                 _LOREM_SENTENCES, k=random.randint(2, 6)
             )
             paragraphs.append(" ".join(sentences))
+        text = "\n\n".join(paragraphs)
+        # Sentence-by-sentence streaming gives a realistic pacing
+        # cadence when used with a CLI renderer (paragraphs flow in
+        # noticeable chunks, mid-sentence lag is rare). No sleeps —
+        # the consumer drives any pacing it wants.
+        if on_text_delta:
+            buf: list[str] = []
+            remaining = text
+            for sent in _split_for_stream(text):
+                buf.append(sent)
+                on_text_delta(sent)
+                remaining = remaining[len(sent):]
         return {
-            "text": "\n\n".join(paragraphs),
+            "text": text,
             "tool_calls": [],
             "usage": {
                 "input": 0,
@@ -118,3 +139,28 @@ class LoremClient:
                 "model": self.provider_model,
             },
         }
+
+
+def _split_for_stream(text: str) -> list[str]:
+    """Break the lorem text into bite-sized streaming chunks.
+
+    Splits on sentence-ending punctuation while keeping the trailing
+    delimiter + any whitespace attached to the chunk that ends with
+    it, so concatenating the chunks reproduces the input exactly.
+    Used only by `LoremClient` — real providers' streaming chunks
+    come pre-segmented from the wire.
+    """
+    chunks: list[str] = []
+    start = 0
+    for i, ch in enumerate(text):
+        if ch in ".!?\n":
+            # consume trailing whitespace into this chunk so the next
+            # one starts cleanly with a non-space character
+            end = i + 1
+            while end < len(text) and text[end] in " \t":
+                end += 1
+            chunks.append(text[start:end])
+            start = end
+    if start < len(text):
+        chunks.append(text[start:])
+    return chunks

@@ -931,6 +931,12 @@ def _run_turn(
         final_text = agent.run(
             prompt,
             on_text=lambda t: state.send("assistant_text", text=t),
+            # Streaming text deltas — fire as the provider produces
+            # them. The CLI accumulates and renders incrementally;
+            # the trailing `assistant_text` event still carries the
+            # full, completed text so non-streaming consumers (and
+            # the markdown re-render at end-of-turn) work uniformly.
+            on_text_delta=lambda t: state.send("assistant_text_delta", text=t),
             on_tool_call=lambda n, a: state.send(
                 "tool_call_started", name=n, args=a
             ),
