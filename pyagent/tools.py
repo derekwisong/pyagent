@@ -1,4 +1,23 @@
-"""Built-in tools for the agent."""
+"""Built-in tools for the agent.
+
+## Error-marker contract
+
+Tool results are strings. When a tool wants to signal failure or
+refusal *as data* — without raising — it returns a string starting
+with the `<` character. By convention the rest of the marker is a
+short categorising word followed by a colon, e.g.
+``<refused: …>``, ``<unknown sid …>``, ``<no answer from …>``,
+``<send failed: …>``. Raised exceptions caught at the dispatch
+boundary (``Agent._route_tool``) are also rendered into the same
+``<…>`` shape (``Error: <type>: <msg>``).
+
+**Non-error tool results MUST NOT start with ``<``.** Plugins (and
+session-audit code) rely on this to detect failures structurally
+without a per-tool keyword list. The helper ``is_error_result(s)``
+encodes the contract; controlling-hook plugins receive the same
+signal as a boolean ``is_error`` argument to the ``after_tool``
+hook.
+"""
 
 import fnmatch
 import os
@@ -15,6 +34,27 @@ import requests
 
 from pyagent import permissions
 from pyagent.session import Attachment
+
+#: Prefix character that marks an errors-as-data tool result.
+ERROR_MARKER_PREFIX = "<"
+
+
+def is_error_result(content: str) -> bool:
+    """Return True iff ``content`` is a tool error/refusal marker.
+
+    Encodes the contract documented in this module's docstring:
+    non-error tool results MUST NOT start with ``<``. Used by the
+    plugin dispatch loop to give v2 ``after_tool`` hooks a clean
+    boolean failure signal so they don't have to sniff for the
+    prefix themselves.
+
+    Tolerant of leading whitespace (some tools format with a
+    leading newline for readability).
+    """
+    if not isinstance(content, str):
+        return False
+    s = content.lstrip()
+    return s.startswith(ERROR_MARKER_PREFIX)
 
 # Track in-flight execute() shell subprocesses so the cancel pathway
 # can kill them on Esc. Within a single agent process the tool loop
