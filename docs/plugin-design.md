@@ -55,9 +55,11 @@ don't conflict because they target different scopes.
   things that aren't in the session: `info` events, status footer,
   tool-call previews. `api.log(...)` writes here.
 - **The human** — the actor at the keyboard.
-- **Observer hook** — a hook whose return value pyagent ignores. **All
-  v1 hooks are observers.** Controlling hooks (return value directs
-  flow) are reserved for v2.
+- **Observer hook** — a hook whose return value pyagent ignores. All
+  v1 hooks are observers. v2 promotes `before_tool_call` and
+  `after_tool_call` to **controlling hooks** whose return value can
+  block / mutate / inject mid-turn feedback (see "Controlling hooks
+  (v2)" below). Other hooks remain observers.
 
 ## The plugin contract
 
@@ -186,14 +188,16 @@ no text doesn't fire it. Plugin can extract facts, index for vector
 recall, persist a clean transcript, trigger external systems, etc.
 Observer only — return value ignored."""
 
-api.before_tool_call(fn: Callable[[str, dict], None])
-"""Fired before each tool call. Plugin can log, audit, prefetch
-context. Observer only — cannot abort or modify the call (controlling
-hooks are v2)."""
+api.before_tool_call(fn: Callable[[str, dict], ToolHookResult | None])
+"""Fired before each tool call. v1 plugins return None (observer).
+v2 plugins (manifest `api_version = "2"`) may return a
+`ToolHookResult` to block / mutate / inject feedback — see
+"Controlling hooks (v2)" below."""
 
-api.after_tool_call(fn: Callable[[str, dict, str], None])
-"""Fired after each tool call with (name, args, result). Plugin can
-extract entities, update working memory, etc. Observer only."""
+api.after_tool_call(fn: Callable[[str, dict, Any], AfterToolHookResult | None])
+"""Fired after each tool call with (name, args, result). v1 plugins
+return None (observer). v2 plugins may return an
+`AfterToolHookResult` to replace the tool result or inject feedback."""
 ```
 
 Utility (1):
@@ -256,6 +260,126 @@ register_prompt_section (volatile):  read pre-computed embeddings,
 This means recall is **always one turn stale** — the plugin retrieves
 based on what it indexed up to the previous turn. That's the only
 shape that fits Python's no-preemption reality.
+
+## Controlling hooks (v2)
+
+Plugins declaring `api_version = "2"` can promote `before_tool_call`
+and `after_tool_call` from observers to **controllers** by returning
+a result dataclass instead of `None`. The hook signatures don't
+change — the only change is the return type — so v1 plugins keep
+working without edit.
+
+### `before_tool_call` return contract
+
+```python
+from pyagent.plugins import ToolHookResult
+
+@dataclass(frozen=True)
+class ToolHookResult:
+    decision: Literal["allow", "block", "mutate"] = "allow"
+    reason: str = ""                 # required when decision="block"
+    mutated_args: dict | None = None # required when decision="mutate"
+    extra_user_message: str = ""     # injected at next turn boundary
+```
+
+- `None` (or `decision="allow"`) — no change. Pure observer.
+- `decision="block"` — tool not executed; the model sees a synthetic
+  tool result `<blocked by plugin <name>: <reason>>`. Recovery is
+  natural: pyagent already returns errors as data via the `<...>`
+  marker convention, so the LLM can read the marker and adapt on
+  the next turn.
+- `decision="mutate"` — the tool runs with `mutated_args` instead of
+  the original args. The mutated dict also persists into the
+  conversation history (so session replay sees the args the tool
+  actually ran with) and into arg-scrubbing.
+- `extra_user_message` — non-empty strings get prepended to the
+  next assistant turn as a user-role message tagged
+  `[plugin <name> notes]: <text>`. Combinable with any decision.
+  Routed through the same `pending_async_replies` channel the
+  async-subagent reply machinery uses, so the next-turn ordering
+  rule is one rule across the harness.
+
+### `after_tool_call` return contract
+
+```python
+from pyagent.plugins import AfterToolHookResult
+
+@dataclass(frozen=True)
+class AfterToolHookResult:
+    extra_user_message: str = ""
+    replace_result: Any = _SENTINEL  # if set, replaces the tool result
+```
+
+- `extra_user_message` — same shape as in `ToolHookResult`.
+- `replace_result` — overrides the tool result string the model
+  sees on this turn. Useful for secret redaction, summarising a
+  huge log, etc. The sentinel default means "no replacement";
+  `None` is a legal replacement value.
+
+### Conflict resolution across multiple plugins
+
+Hooks fire in **plugin registration order** (i.e. plugin load order;
+see "Discovery").
+
+- `before_tool_call`: `block` short-circuits — once a plugin
+  returns `decision="block"`, no further `before_tool_call` hooks
+  fire on this call. `mutate` chains: each later plugin sees the
+  args the earlier plugin returned. `extra_user_message` from
+  hooks that ran (including the one that blocked) accumulates in
+  registration order, each tagged with its plugin name.
+- `after_tool_call`: `replace_result` chains — each later plugin's
+  hook is invoked with the result the previous plugin replaced.
+  Last-wins on the final result the model sees.
+
+### v1 / v2 dispatch — explicit rule
+
+`SUPPORTED_API_VERSIONS = {"1", "2"}` (set, not a single equality
+check). Plugins declaring any other value are skipped at load time
+with a warn log.
+
+**v1 plugins' return values are ignored unconditionally**, even if
+the plugin happens to return something v2-shaped. The dispatch loop
+checks `record.api_version == "2"` before honoring controller
+semantics. Otherwise a v1 plugin that accidentally `return True`s
+could start blocking tools.
+
+### Hook order vs. permission check
+
+Plugin hooks fire **before** permission checks. The v1 call site at
+`agent.py:_route_tool` runs `call_before_tool_call` before
+`_execute_tool`, and permission checks live inside the tool bodies
+(invoked from `_execute_tool`). v2 preserves this ordering — a
+controller hook returning `block` short-circuits before any
+permission prompt reaches the human. This is the right order: a
+plugin can redact a tool call or substitute a default before the
+human sees a permission prompt they'd otherwise have to dismiss.
+`smoke_controlling_hooks.test_block_short_circuits_before_permission`
+locks this in so a future refactor doesn't accidentally flip it.
+
+### Audit hook for blocks
+
+Every block emits an INFO-level structured log line:
+
+```
+plugin=<name> tool=<name> reason=<text>
+```
+
+The `<blocked by plugin X>` marker the model sees is for the model;
+the log line is for the human running a session audit ("plugin X
+blocked tool Y N times this run") without re-reading the full
+transcript.
+
+### Worked example: `strategic-reevaluation`
+
+The bundled `strategic_reevaluation` plugin (`pyagent/plugins/
+strategic_reevaluation/`) demonstrates the controlling-hook
+pattern. It registers no tools and no prompt sections — purely a
+v2 hook plugin. It tracks consecutive `edit_file` failures **per
+path** and, after three failures on the same path, returns an
+`AfterToolHookResult` with an `extra_user_message` that nudges the
+agent to step back and re-read the file before the next attempt.
+Three failures across *different* paths do not trip the heuristic
+— that's a refactor sweep, not a stuck loop.
 
 ## Cache-breakpoint architecture
 
@@ -530,9 +654,11 @@ that no longer exists. The graceful behavior:
 
 ## Versioning
 
-`api_version` is the pyagent ↔ plugin contract. A single integer-as-
-string ("1"). Pyagent supports exactly one value; plugins declaring a
-different value are skipped.
+`api_version` is the pyagent ↔ plugin contract — an integer-as-
+string. Pyagent supports a **set** of values
+(`SUPPORTED_API_VERSIONS = {"1", "2"}` today); plugins declaring any
+other value are skipped at load time. v1 and v2 plugins coexist in
+the same agent process.
 
 A plugin's *own* on-disk data format is its concern. A plugin that
 persists state should write a `version` file in its data dir on
@@ -575,7 +701,7 @@ The four communication shapes a plugin can use to surface results:
 | **1. Side-effect + log** | plugin → terminal | sync | Plugin did a thing | shipped (`api.log`) |
 | **2. One-way notification** | plugin → terminal *or* session, async | async | "GitHub issue arrived" | v2 (`api.deliver`) |
 | **3. Interactive query** | plugin ↔ human, blocking | sync | "Prompt has a secret; proceed?" | v2 (`api.ask_user`) |
-| **4. Hook return-value control** | controlling hook → pyagent | sync | Reject/modify a turn before LLM call | v2 (controlling hooks) |
+| **4. Hook return-value control** | controlling hook → pyagent | sync | Reject/modify a turn before LLM call | shipped (v2 — `before_tool_call` / `after_tool_call`) |
 
 ### v2 API sketches
 

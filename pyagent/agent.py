@@ -279,20 +279,73 @@ class Agent:
         will dispatch from here without further surgery on `run`. Exceptions
         are caught and returned as strings so the caller never has to
         compose tool results around a half-broken batch.
+
+        Plugin v2 controlling-hook semantics live here:
+
+        - ``before_tool`` runs *before* ``_execute_tool`` (which is
+          where permission checks fire, inside the wrapped tool body),
+          so a ``decision="block"`` short-circuits before any
+          permission prompt reaches the human. Preserve this ordering
+          — ``smoke_controlling_hooks.test_block_short_circuits_before_permission``
+          locks it in.
+        - ``decision="mutate"`` swaps the args dict in place inside
+          the conversation so subsequent turns see the args the tool
+          was actually invoked with (and arg-scrubbing applies to the
+          mutated bytes, not the originals).
+        - ``after_tool`` ``replace_result`` rewrites the bytes that
+          land in the tool_result.
+        - ``extra_user_message`` from either hook is pushed onto
+          ``pending_async_replies`` so the next assistant turn sees it
+          as a user-role message tagged with the originating plugin.
         """
         name = call["name"]
         args = call["args"]
         if on_tool_call:
             on_tool_call(name, args)
         if self.plugins is not None:
-            self.plugins.call_before_tool_call(name, args)
+            before = self.plugins.call_before_tool_call(name, args)
+            for note in before.extra_user_messages:
+                self.pending_async_replies.put(note)
+            if before.mutated and before.args is not args:
+                # Persist the mutated args back into the tool_call
+                # dict in self.conversation so future turns and
+                # session replay see the args the tool actually ran
+                # with. The reference swap matters: arg-scrubbing
+                # below operates on `call["args"]`.
+                call["args"] = before.args
+                args = before.args
+            if before.blocked:
+                content = (
+                    f"<blocked by plugin {before.block_plugin}: "
+                    f"{before.block_reason}>"
+                )
+                logger.info(
+                    "plugin=%s tool=%s reason=%s",
+                    before.block_plugin,
+                    name,
+                    before.block_reason,
+                )
+                if on_tool_result:
+                    on_tool_result(name, content)
+                # No tool ran, so nothing to scrub. Skip the after_tool
+                # hooks — the contract is "after the tool runs"; no
+                # tool ran.
+                return content
         try:
             content = self._execute_tool(name, args)
         except Exception as e:
             logger.exception("tool %s raised", name)
             content = f"Error: {type(e).__name__}: {e}"
         if self.plugins is not None:
-            self.plugins.call_after_tool_call(name, args, content)
+            after = self.plugins.call_after_tool_call(name, args, content)
+            for note in after.extra_user_messages:
+                self.pending_async_replies.put(note)
+            if after.replaced:
+                content = (
+                    after.result
+                    if isinstance(after.result, str)
+                    else str(after.result)
+                )
         if on_tool_result:
             on_tool_result(name, content)
         # Scrub bulky string args from the conversation so they don't

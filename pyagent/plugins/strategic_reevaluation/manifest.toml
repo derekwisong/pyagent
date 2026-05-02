@@ -1,0 +1,16 @@
+name = "strategic-reevaluation"
+version = "0.1.0"
+description = "After 3 consecutive edit_file failures on the same path, inject a 'step back and reconsider' note onto the next turn."
+api_version = "2"
+
+# Hook-only plugin: registers no tools, no prompt sections, no
+# providers. Lives entirely in `after_tool` and uses the v2
+# controlling-hook contract to inject an `extra_user_message` when its
+# heuristic trips.
+[provides]
+
+# Stateless across processes (per-process counter), but only useful
+# in the root agent — subagents have short-lived task scopes where
+# the "you've been spinning, reconsider" framing is rarely apt.
+[load]
+in_subagents = false
