@@ -1,0 +1,17 @@
+name = "ollama"
+version = "0.1.0"
+description = "Ollama LLM provider — talks to a local Ollama server via its native HTTP API."
+api_version = "1"
+
+# Registers the `ollama` provider so `--model ollama/<name>` routes
+# through `/api/chat`, plus a `list_ollama_models` tool the agent can
+# call to see what's been pulled locally.
+[provides]
+providers = ["ollama"]
+tools = ["list_ollama_models"]
+
+# Stateless and lazy — no SDK, no network at load time. A stopped or
+# missing Ollama server only surfaces on first call, so loading this
+# plugin never blocks pyagent startup.
+[load]
+in_subagents = true
