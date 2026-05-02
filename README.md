@@ -153,9 +153,12 @@ The following is a table of the built-in tools.
 
 HTML tools (`html_to_md` / `html_select`) come from the bundled
 `html-tools` plugin and operate on saved attachments (or any local
-HTML file). Memory tools (`read_ledger` / `write_ledger`) come from
-the bundled `memory-markdown` plugin. Both ship default-enabled. See
-"Plugins" below.
+HTML file). Memory tools (`read_ledger`, `write_ledger`, `add_memory`)
+come from the bundled `memory-markdown` plugin; semantic recall
+(`recall_memory`) comes from the bundled `memory-vector` plugin. Other
+bundled plugins (`code-mapper`, `web-search`, `claude-code-cli`)
+register additional tools — all ship default-enabled. See "Plugins"
+below for the full list.
 
 File tools resolve paths and refuse anything outside the workspace unless the
 human approves at a prompt. See `pyagent/permissions.py`. The user's pyagent
@@ -186,15 +189,26 @@ Paths can be overridden with `--soul`, `--tools`, `--primer`.
 
 ### Memory
 
-Long-term memory is provided by the bundled `memory-markdown` plugin
-(see "Plugins" below). It exposes two tools — `read_ledger` and
-`write_ledger` — backed by markdown files at
-`<config-dir>/plugins/memory-markdown/{USER,MEMORY}.md`. The plugin
-also contributes a prompt section that auto-loads USER content into
-every system prompt and a guidance section telling the agent how to
-use the ledgers. Disable the plugin (`built_in_plugins_enabled = []`
-in `config.toml`) to remove memory entirely; the agent will have no
-ledger tools and no ledger prose.
+Long-term memory is provided by two bundled plugins (see "Plugins"
+below). `memory-markdown` is the storage backend and exposes
+`read_ledger`, `write_ledger`, and `add_memory` — backed by markdown
+files under `<config-dir>/plugins/memory-markdown/` (`USER.md`,
+`MEMORY.md`, plus a `memories/` directory of individual entries).
+`add_memory` is the preferred tool for new entries: it writes the
+memory body and updates the MEMORY index in one call.
+
+`memory-vector` layers semantic recall on top via `recall_memory`,
+indexing the same files with fastembed so the agent can find
+memories by meaning rather than by exact filename. The two plugins
+are loosely coupled — `memory-vector` reads from `memory-markdown`'s
+data dir at runtime; if `memory-markdown` is disabled, `recall_memory`
+just reports that nothing is indexed.
+
+`memory-markdown` also contributes prompt sections that auto-load
+USER ledger content and a brief MEMORY index into every system
+prompt. Drop both plugins from `built_in_plugins_enabled` in
+`config.toml` to remove memory entirely — the agent will have no
+memory tools and no memory prose.
 
 Memory work is meant to happen **organically**, mid-conversation: when the
 agent learns a preference, a convention, or something genuinely worth
@@ -248,16 +262,17 @@ agent) just authored shows up on the next call — no restart needed.
 Bundled skills load directly from the package — no install step, no copy on
 disk. Upgrading pyagent updates them for free.
 
-Only **`write-skill`** is enabled out of the box. The rest are opt-in to
-keep the catalog tight. Enable additional bundled skills by listing their
-names in `<config-dir>/config.toml`:
+**`write-skill`** and **`write-plugin`** are enabled out of the box.
+The rest are opt-in to keep the catalog tight. Enable additional
+bundled skills by listing their names in `<config-dir>/config.toml`:
 
 ```toml
-built_in_skills_enabled = ["write-skill", "flight-tracker"]
+built_in_skills_enabled = ["write-skill", "write-plugin", "flight-tracker"]
 ```
 
 Setting `built_in_skills_enabled` replaces the default list, so include
-every bundled skill you want available — `write-skill` included.
+every bundled skill you want available — `write-skill` and
+`write-plugin` included.
 
 Run `pyagent-skills list` to see each bundled skill's name, description,
 and current `[enabled]` / `[disabled]` state.
@@ -265,6 +280,7 @@ and current `[enabled]` / `[disabled]` state.
 | Skill | What it does |
 | --- | --- |
 | `write-skill` | Authoring guide — load this when you want the agent to write a new skill for you. **Enabled by default.** |
+| `write-plugin` | Authoring guide for plugins — manifest schema, PluginAPI surface, hooks. Load when creating or modifying a plugin. **Enabled by default.** |
 | `aviation-weather` | METARs, TAFs, PIREPs, AFD, AIRMETs/SIGMETs around an airport. Uses aviationweather.gov; no key needed. |
 | `flight-tracker` | Live aircraft state vectors near a point or by ICAO24 hex via OpenSky. Anonymous works; OAuth2 client credentials unlock more. |
 | `faa-registry` | Look up FAA aircraft registry records (US tail numbers) by N-number, owner, or make/model. |
@@ -303,12 +319,19 @@ data dir.
 
 ### Bundled plugins
 
-| Plugin | Default enabled? |
-| --- | --- |
-| `memory-markdown` | yes |
+| Plugin | What it provides | Default enabled? |
+| --- | --- | --- |
+| `memory-markdown` | Markdown ledger storage — `read_ledger`, `write_ledger`, `add_memory`, plus USER/MEMORY prompt sections. Root-only (does not load in subagents). See "Memory" above. | yes |
+| `memory-vector` | Semantic recall (`recall_memory`) over `memory-markdown`'s files via fastembed. Root-only. | yes |
+| `html-tools` | `html_to_md` / `html_select` — convert or query saved HTML attachments (or any local HTML file). | yes |
+| `code-mapper` | `map_code` / `probe_grammar` — tree-sitter symbol map for source files (Python in v1; multi-language ready). | yes |
+| `web-search` | `web_search` / `web_search_instant` — DuckDuckGo-backed list search and instant answers. | yes |
+| `claude-code-cli` | `claude_code_cli` — pipe a prompt into Anthropic's `claude -p`. Self-disables when `claude` isn't on PATH. | yes |
+| `echo-plugin` | Test/demo provider that echoes the most recent user message. Exercises the plugin → llm-router wiring without spending tokens. | yes |
 
-`memory-markdown` is the markdown ledger system (see "Memory" above).
-Disable it via `built_in_plugins_enabled = []` in `config.toml`.
+To remove a plugin from the catalog, set `built_in_plugins_enabled`
+in `config.toml` to the list of names you want kept. An empty list
+disables every bundled plugin.
 
 ### Authoring a plugin
 
