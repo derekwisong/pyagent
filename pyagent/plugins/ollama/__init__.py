@@ -23,8 +23,17 @@ prevent loading other providers.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# Capabilities we filter from the per-model tag list before showing
+# them to the user. ``completion`` is reported by every chat model so
+# it carries no information; ``insert`` is fill-in-the-middle
+# infrastructure that pyagent doesn't surface as a feature.
+_BORING_CAPABILITIES = {"completion", "insert"}
 
 
 def _factory(**kw: Any):
@@ -52,6 +61,52 @@ def _format_size(size: Any) -> str:
     return f"{size / (1024**2):.0f} MB"
 
 
+def _list_models():
+    """Live query of `/api/tags` + per-model `/api/show` for the
+    `--list-models` CLI hook.
+
+    Lazy-imports the client so plugin load stays network-free. Raises
+    on the initial `/api/tags` failure so the aggregator can render
+    `(unavailable: <reason>)` — but per-model `/api/show` failures are
+    swallowed: a single 404 from a borked model entry shouldn't blank
+    capability data for every other model. The model still appears,
+    just without capability tags.
+
+    Capabilities come from Ollama's ``capabilities`` array (server
+    0.5+); on older servers that field is absent and `ModelInfo` ends
+    up with empty capabilities — same surface as a built-in provider,
+    which is fine. Per-model calls run sequentially because Ollama
+    tag lists are typically short and localhost-fast; if listings
+    grow we can revisit with a connection pool.
+    """
+    from pyagent.llms import ModelInfo
+    from pyagent.plugins.ollama.client import list_models, show_model
+
+    out: list[ModelInfo] = []
+    for entry in list_models():
+        name = (entry.get("name") or "").strip()
+        if not name:
+            continue
+        caps: tuple[str, ...] = ()
+        try:
+            info = show_model(name)
+            raw = info.get("capabilities") or []
+            if isinstance(raw, list):
+                caps = tuple(
+                    str(c)
+                    for c in raw
+                    if isinstance(c, str) and c not in _BORING_CAPABILITIES
+                )
+        except Exception as e:
+            logger.debug(
+                "ollama: /api/show for %r failed (%s); listing without caps",
+                name,
+                e,
+            )
+        out.append(ModelInfo(name=name, capabilities=caps))
+    return out
+
+
 def register(api):
     # Snapshot the env at register time so `default_model` on the
     # ProviderSpec is stable for the agent process. Reading later
@@ -64,6 +119,7 @@ def register(api):
         _factory,
         default_model=default_model,
         env_vars=(),  # local server, no required env
+        list_models=_list_models,
     )
 
     def list_ollama_models() -> str:
