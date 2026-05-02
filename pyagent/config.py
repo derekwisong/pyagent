@@ -58,6 +58,7 @@ DEFAULTS: dict[str, Any] = {
         "code-mapper",
         "web-search",
         "claude-code-cli",
+        "ollama",
         "echo-plugin",
         "py-dev-toolkit",
     ],
