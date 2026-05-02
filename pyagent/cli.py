@@ -304,6 +304,15 @@ def _update_agents_state(
         # request/response event type.
         slot["checklist_tasks"] = tasks
         return
+    if kind == "notes_unread":
+        # Root-only event from agent_proc (issue #65). Stash on root
+        # so the footer (#67) can render `msgs:N` without polling.
+        slot = agents.setdefault("root", {"status": "thinking"})
+        slot["notes_unread"] = {
+            "count": int(event.get("count", 0) or 0),
+            "by_severity": dict(event.get("by_severity", {})),
+        }
+        return
     if kind == "usage":
         slot = agents.setdefault(key, {"status": "idle"})
         # Use .get(k, 0) + … so old two-key dicts in long-running state
@@ -566,6 +575,22 @@ def _print_event(event: dict) -> None:
             f"{label}[yellow]asks parent (req={req_id}):[/yellow] "
             f"[dim]{question}[/dim]"
         )
+    elif kind == "subagent_note":
+        # A subagent dropped a non-blocking note to its parent
+        # (issue #64). The parent's IO thread also queued it onto
+        # the parent's pending_async_replies; the model sees it
+        # at its next LLM call. Surface in the transcript so the
+        # human can read along.
+        label = _agent_label(agent_id)
+        severity = event.get("severity", "info") or "info"
+        text = event.get("text", "") or ""
+        # Color severity: warn / alert get yellow to draw the eye;
+        # info stays dim.
+        sev_style = "yellow" if severity in ("warn", "alert") else "cyan"
+        console.print(
+            f"{label}[{sev_style}]notes ({severity}):[/{sev_style}] "
+            f"[dim]{text}[/dim]"
+        )
     elif kind == "agent_error":
         if agent_id is not None:
             console.print(
@@ -736,7 +761,7 @@ async def _repl_async(
                     # the error, let the user decide whether to
                     # keep going).
                     state["turn_busy"] = False
-            elif kind in ("usage", "checklist"):
+            elif kind in ("usage", "checklist", "notes_unread"):
                 # State already updated; no inline render. Footer
                 # picks it up on the next bottom_toolbar refresh.
                 pass

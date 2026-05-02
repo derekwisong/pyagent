@@ -24,6 +24,7 @@ registered, so a child can spawn its own children. Bounded by
 
 from __future__ import annotations
 
+import json
 import logging
 import multiprocessing
 import queue
@@ -643,6 +644,283 @@ def make_reply_to_subagent(
     return reply_to_subagent
 
 
+def make_tell_subagent(
+    state: "_ChildState",
+    agent: "Agent",
+) -> Callable[..., str]:
+    """Build the `tell_subagent` tool — registered on agents that
+    can spawn subagents (`allow_meta=True`).
+
+    Counterpart to `notify_parent` (issue #64) for the parent → child
+    direction. Emits a `parent_note` event down the named subagent's
+    pipe; the subagent's IO thread queues the formatted message onto
+    its own `pending_async_replies` so the next LLM call sees it.
+    Issue #65.
+    """
+
+    def tell_subagent(sid: str, text: str) -> str:
+        """Send a non-blocking note down to a running subagent.
+
+        Use this when you've learned something a still-running
+        subagent should know — a new constraint, an upstream
+        decision, an API that just changed. The subagent will see
+        your note as a `[parent says]: <text>` user-role message
+        at its next LLM-call boundary; it can act, defer, or
+        ignore.
+
+        Don't spam. One note should change the subagent's
+        behaviour or understanding. If you have an actual question
+        for the subagent, you don't have a tool for that — most
+        useful patterns are: terminate + respawn with the new
+        framing, or wait for the subagent to finish and brief it
+        next round.
+
+        Args:
+            sid: The subagent id returned from `spawn_subagent`.
+            text: The note text. Plain prose, self-contained.
+
+        Returns:
+            A short status string. Errors come back as `<...>`
+            markers (empty text, unknown sid, dead subagent).
+        """
+        text = (text or "").strip()
+        if not text:
+            return "<refused: empty text>"
+        sid = (sid or "").strip()
+        if not sid:
+            return "<refused: empty sid>"
+        entry: SubagentEntry | None = agent._subagents.get(sid)
+        if entry is None:
+            return f"<unknown subagent {sid!r}>"
+        if not entry.process.is_alive():
+            return f"<subagent {sid} is no longer running>"
+        try:
+            protocol.send(entry.conn, "parent_note", text=text)
+        except (BrokenPipeError, OSError) as e:
+            return f"<send failed to subagent {sid}: {e}>"
+        return f"sent to {sid}"
+
+    return tell_subagent
+
+
+def _collect_subagent_notes(
+    agent: "Agent", sid: str, cursor: int | None
+) -> dict[str, Any]:
+    """Return a structured record of one subagent's notes.
+
+    Data layer for peek_subagent — also intended to be reused by a
+    future CLI `/notes` slash command, which would consume the same
+    structured records via a query event (issue #65 comment).
+
+    `cursor=None` means "no cursor; dump current ring, no
+    missing-marker." `cursor=N` means "entries with seq > N; record
+    `missing` for entries lost to overflow before the ring's
+    earliest seq."
+
+    Returned dict shape:
+      {
+        "sid": str,
+        "name": str,
+        "cursor": int,             # echoed back; 0 if input was None
+        "next_cursor": int,        # seq to pass as `since` next time
+        "missing": int,            # count of overflowed-past-cursor
+        "entries": list[dict],     # {seq, ts, severity, text}
+      }
+    """
+    entry = agent._subagents.get(sid)
+    name = entry.name if entry is not None else sid
+    with agent._notes_lock:
+        ring = list(agent._subagent_notes.get(sid, ()))
+        seq_next = agent._subagent_note_seq.get(sid, 0)
+
+    if not ring:
+        cur_label = 0 if cursor is None else cursor
+        next_cur = max(cur_label, seq_next - 1) if seq_next > 0 else 0
+        return {
+            "sid": sid,
+            "name": name,
+            "cursor": cur_label,
+            "next_cursor": next_cur,
+            "missing": 0,
+            "entries": [],
+        }
+
+    earliest_seq = ring[0][0]
+    latest_seq = ring[-1][0]
+
+    if cursor is None:
+        cur_label = 0
+        visible = ring
+        missing = 0
+    else:
+        cur_label = cursor
+        visible = [e for e in ring if e[0] > cursor]
+        # Missing entries: seqs in (cursor, earliest_seq) were
+        # dropped from the ring before this peek caught up.
+        missing = max(0, earliest_seq - 1 - cursor)
+
+    return {
+        "sid": sid,
+        "name": name,
+        "cursor": cur_label,
+        "next_cursor": latest_seq,
+        "missing": missing,
+        "earliest_seq": earliest_seq,
+        "entries": [
+            {"seq": s, "ts": ts, "severity": sev, "text": txt}
+            for (s, ts, sev, txt) in visible
+        ],
+    }
+
+
+def _format_peek_section(record: dict[str, Any]) -> str:
+    """Render a structured note record (from `_collect_subagent_notes`)
+    as the text-block one section of `peek_subagent`'s output.
+    """
+    name = record["name"]
+    sid = record["sid"]
+    cur = record["cursor"]
+    next_cur = record["next_cursor"]
+    missing = record["missing"]
+    entries = record["entries"]
+    header = f"[subagent {name} ({sid}) notes since cursor={cur}]:"
+    lines = [header]
+    if missing > 0:
+        lines.append(
+            f"  - (... {missing} note(s) before seq="
+            f"{record.get('earliest_seq', '?')} were dropped from ring ...)"
+        )
+    if not entries:
+        if missing == 0:
+            lines.append(f"  - (no new notes; cursor={next_cur})")
+        return "\n".join(lines)
+    for e in entries:
+        ts_label = f"t+{int(e['ts'])}s"
+        lines.append(
+            f"  - ({e['severity']}, {ts_label}) {e['text']}"
+        )
+    return "\n".join(lines)
+
+
+def make_peek_subagent(
+    state: "_ChildState",
+    agent: "Agent",
+) -> Callable[..., str]:
+    """Build the `peek_subagent` tool — registered on agents that
+    can spawn subagents (`allow_meta=True`).
+
+    Reads the per-sid notification ring (issue #64) without
+    blocking. The model calls it between its own tool calls when
+    it has reason to believe a sibling has news that would
+    invalidate the next planned tool call. Issue #65.
+    """
+
+    def peek_subagent(
+        sid: str | None = None, since: str | None = None
+    ) -> str:
+        """Do not call this reflexively.
+
+        Default expectation: subagent notes surface as user-role
+        messages at your next LLM-call boundary on their own. Peek
+        is only for the case where *this turn's next tool call*
+        depends on knowing — e.g., you're about to run a long
+        test that a sibling subagent may have just made obsolete.
+        Each peek costs a tool round-trip; routine "let me check"
+        polling is waste.
+
+        Args:
+            sid: A specific subagent id, or `None` (default) to
+                survey all live subagents.
+            since: Cursor returned by a previous peek. Pass it
+                back to skip notes you've already seen. Format:
+                  - integer string (e.g. `"2"`) — only valid with
+                    `sid`; means "I've seen up through seq 2".
+                  - JSON object string (e.g. `'{"a-1234": 5}'`) —
+                    multi-sid cursor; missing keys treated as 0.
+                  - `None` — return everything currently in the
+                    ring(s).
+
+        Returns:
+            Formatted text with one section per surveyed sid,
+            optionally a `(... N notes dropped ...)` line when
+            cursor falls below the ring's earliest seq, and a
+            trailing `next_cursor: {...}` line (always JSON-shaped)
+            you can pass back as `since` next time. Errors come
+            back as `<...>` markers.
+        """
+        parsed_int: int | None = None
+        parsed_dict: dict[str, int] | None = None
+        if since is not None:
+            since_str = since.strip()
+            if since_str:
+                try:
+                    parsed_int = int(since_str)
+                except ValueError:
+                    try:
+                        obj = json.loads(since_str)
+                    except json.JSONDecodeError as e:
+                        return f"<refused: invalid since: {e}>"
+                    if not isinstance(obj, dict):
+                        return (
+                            "<refused: invalid since: must be int "
+                            f"or JSON object, got {type(obj).__name__}>"
+                        )
+                    try:
+                        parsed_dict = {
+                            str(k): int(v) for k, v in obj.items()
+                        }
+                    except (ValueError, TypeError) as e:
+                        return (
+                            f"<refused: invalid since: cursor values "
+                            f"must be ints ({e})>"
+                        )
+
+        if sid is not None:
+            sid_clean = sid.strip()
+            if not sid_clean:
+                return "<refused: empty sid>"
+            if sid_clean not in agent._subagents:
+                return f"<unknown subagent {sid_clean!r}>"
+            if parsed_int is not None:
+                cursor: int | None = parsed_int
+            elif parsed_dict is not None:
+                cursor = parsed_dict.get(sid_clean, 0)
+            else:
+                cursor = None
+            record = _collect_subagent_notes(agent, sid_clean, cursor)
+            section = _format_peek_section(record)
+            return (
+                f"{section}\n"
+                f"next_cursor: "
+                f"{json.dumps({sid_clean: record['next_cursor']})}"
+            )
+
+        if parsed_int is not None:
+            return (
+                "<refused: integer since requires sid; use a JSON "
+                "object cursor for multi-sid peek>"
+            )
+        sids = list(agent._subagents.keys())
+        if not sids:
+            return "<no live subagents>"
+        sections: list[str] = []
+        next_cursors: dict[str, int] = {}
+        for s in sids:
+            if parsed_dict is not None:
+                cur: int | None = parsed_dict.get(s, 0)
+            else:
+                cur = None
+            record = _collect_subagent_notes(agent, s, cur)
+            sections.append(_format_peek_section(record))
+            next_cursors[s] = record["next_cursor"]
+        return (
+            "\n\n".join(sections)
+            + f"\n\nnext_cursor: {json.dumps(next_cursors)}"
+        )
+
+    return peek_subagent
+
+
 def make_terminate_subagent(
     state: "_ChildState",
     agent: "Agent",
@@ -667,6 +945,10 @@ def make_terminate_subagent(
             return f"<unknown subagent id: {id!r}>"
 
         state.unregister_subagent_pipe(id)
+        # Drop the per-sid notification ring (issue #65). After
+        # terminate, the sid is no longer peekable — late peeks
+        # of dead sids should return the unknown-subagent marker.
+        agent._clear_subagent_notes(id)
 
         if entry.process.is_alive():
             try:

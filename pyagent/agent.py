@@ -112,6 +112,18 @@ class Agent:
         # The IO thread sets this on first note; cleared when the
         # subagent terminates (issue #65).
         self._subagent_note_t0: dict[str, float] = {}
+        # Unread-notes counters surfaced to the CLI footer (issue #67
+        # depends on this). Increment on append, reset on drain;
+        # `_notes_unread_emitter` (wired by agent_proc bootstrap on
+        # the root agent only) ships the deltas as `notes_unread`
+        # events so the CLI can render `msgs:N` without polling.
+        self._unread_notes_total: int = 0
+        self._unread_notes_by_severity: dict[str, int] = {
+            "info": 0, "warn": 0, "alert": 0,
+        }
+        self._notes_unread_emitter: Callable[
+            [int, dict[str, int]], None
+        ] | None = None
 
     def add_tool(
         self,
@@ -485,7 +497,20 @@ class Agent:
             if len(ring) == ring.maxlen:
                 self._subagent_note_drops[sid] += 1
             ring.append((seq, ts, severity, text))
-            return seq, ts
+            # Unread tracking for the CLI footer (issue #67).
+            self._unread_notes_total += 1
+            self._unread_notes_by_severity[severity] = (
+                self._unread_notes_by_severity.get(severity, 0) + 1
+            )
+            unread_total = self._unread_notes_total
+            unread_by_sev = dict(self._unread_notes_by_severity)
+        emitter = self._notes_unread_emitter
+        if emitter is not None:
+            try:
+                emitter(unread_total, unread_by_sev)
+            except Exception:
+                logger.exception("notes_unread emitter raised")
+        return seq, ts
 
     def _clear_subagent_notes(self, sid: str) -> None:
         """Drop a subagent's ring (issue #65 — terminate / pipe close).
@@ -520,6 +545,23 @@ class Agent:
                 break
             self.conversation.append({"role": "user", "content": reply})
             n += 1
+        # Reset unread-notes counters; the LLM is about to see
+        # whatever was queued, including any subagent notes that
+        # arrived since the last turn. Emit the zeroed snapshot to
+        # the CLI footer (issue #67) only if there were unread
+        # notes — avoids spamming the same "0" event every turn.
+        with self._notes_lock:
+            had_unread = self._unread_notes_total > 0
+            self._unread_notes_total = 0
+            for k in self._unread_notes_by_severity:
+                self._unread_notes_by_severity[k] = 0
+        if had_unread:
+            emitter = self._notes_unread_emitter
+            if emitter is not None:
+                try:
+                    emitter(0, {"info": 0, "warn": 0, "alert": 0})
+                except Exception:
+                    logger.exception("notes_unread emitter raised")
         return n
 
     def run(

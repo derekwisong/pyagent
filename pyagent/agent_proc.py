@@ -342,6 +342,11 @@ class _ChildState:
             with self._subagent_lock:
                 unexpected = sid in self._subagent_conns
             self.unregister_subagent_pipe(sid)
+            # Drop the per-sid notification ring (issue #65). The
+            # sid is gone for good — peek_subagent of it should
+            # return <unknown subagent ...> on the next call.
+            if self.agent is not None:
+                self.agent._clear_subagent_notes(sid)
             if unexpected:
                 self._send_dict(
                     {
@@ -634,6 +639,20 @@ def _register_tools(
             subagent_mod.make_reply_to_subagent(state, agent),
             auto_offload=False,
         )
+        # tell_subagent / peek_subagent (issue #65): non-blocking
+        # parent → child push and parent-side read of the per-sid
+        # notification ring. Both are pure tool factories on the
+        # protocol + storage shipped in #64.
+        _add(
+            "tell_subagent",
+            subagent_mod.make_tell_subagent(state, agent),
+            auto_offload=False,
+        )
+        _add(
+            "peek_subagent",
+            subagent_mod.make_peek_subagent(state, agent),
+            auto_offload=False,
+        )
 
 
 def _bootstrap(
@@ -735,6 +754,17 @@ def _bootstrap(
     # Hand the IO thread a reference so it can look up SubagentEntry
     # status (sync vs async mode) when routing turn_complete events.
     state.agent = agent
+
+    # notes_unread event (issue #65 comment, feeds #67 footer): only
+    # fire from the root agent. Deeper notes don't bubble per the
+    # _handle_subagent_event rule, so subagent rings are local-only
+    # and don't need a counter visible to the CLI.
+    if not is_subagent:
+        def _emit_notes_unread(count: int, by_severity: dict[str, int]) -> None:
+            state.send(
+                "notes_unread", count=count, by_severity=by_severity
+            )
+        agent._notes_unread_emitter = _emit_notes_unread
 
     # Checklist tools live on the root agent only — a per-session
     # construct, not per-agent. Subagents that try to track their
