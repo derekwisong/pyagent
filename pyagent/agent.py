@@ -1,6 +1,8 @@
+import collections
 import logging
 import queue
 import threading
+import time
 from typing import Any, Callable
 
 from pyagent.llms import LLMClient
@@ -91,6 +93,25 @@ class Agent:
         # the IO thread is what produces, the main thread (where
         # run() executes) is what consumes.
         self.pending_async_replies: queue.Queue = queue.Queue()
+        # Per-sid notification ring (issue #64). The IO thread
+        # appends a `(seq, ts, severity, text)` tuple per inbound
+        # `subagent_note`. `deque(maxlen=N)` drops the oldest on
+        # overflow; the dropped count is tracked separately on
+        # `_subagent_note_drops` so peek (issue #65) can surface a
+        # synthetic `... (N notes dropped) ...` line covering the
+        # gap between cursor and the smallest seq still in the
+        # ring. Inbox delivery does NOT consume — peek reads
+        # history from this ring, while the inbox surfaces notes
+        # at turn boundaries via `pending_async_replies`.
+        self._subagent_notes: dict[str, "collections.deque"] = {}
+        self._subagent_note_seq: dict[str, int] = {}
+        self._subagent_note_drops: dict[str, int] = {}
+        self._notes_lock = threading.Lock()
+        # Wallclock anchor per subagent so peek output can render
+        # `t+12s` relative to spawn rather than an absolute time.
+        # The IO thread sets this on first note; cleared when the
+        # subagent terminates (issue #65).
+        self._subagent_note_t0: dict[str, float] = {}
 
     def add_tool(
         self,
@@ -376,6 +397,56 @@ class Agent:
                 r["content"] = stub
                 stubbed += 1
         return stubbed
+
+    _NOTES_RING_MAXLEN = 64
+
+    def _append_subagent_note(
+        self, sid: str, severity: str, text: str
+    ) -> tuple[int, float]:
+        """Append a note to a subagent's per-sid ring (issue #64).
+
+        Allocates the ring on first use. Increments the per-sid
+        seq counter — monotonic, never reused even when overflow
+        evicts the entry the seq was paired with. On overflow the
+        deque drops the leftmost entry and `_subagent_note_drops`
+        increments; #65's peek surfaces the gap as a synthetic
+        `... (N notes dropped) ...` line at read time, which keeps
+        the cursor honest without trying to maintain a marker
+        entry inside a self-evicting ring.
+
+        Returns the (seq, ts) of the appended note. ts is
+        monotonic seconds since the first note for this sid so
+        peek output can render `t+Ns` relative to that anchor.
+        """
+        with self._notes_lock:
+            ring = self._subagent_notes.get(sid)
+            if ring is None:
+                ring = collections.deque(maxlen=self._NOTES_RING_MAXLEN)
+                self._subagent_notes[sid] = ring
+                self._subagent_note_seq[sid] = 0
+                self._subagent_note_drops[sid] = 0
+                self._subagent_note_t0[sid] = time.monotonic()
+            seq = self._subagent_note_seq[sid]
+            self._subagent_note_seq[sid] = seq + 1
+            ts = time.monotonic() - self._subagent_note_t0[sid]
+            if len(ring) == ring.maxlen:
+                self._subagent_note_drops[sid] += 1
+            ring.append((seq, ts, severity, text))
+            return seq, ts
+
+    def _clear_subagent_notes(self, sid: str) -> None:
+        """Drop a subagent's ring (issue #65 — terminate / pipe close).
+
+        Called when a subagent is terminated or its pipe closes
+        unexpectedly. Late peeks of the dead sid return the
+        unknown-subagent marker; keeping a ghost ring would risk
+        confusing peek with stale history.
+        """
+        with self._notes_lock:
+            self._subagent_notes.pop(sid, None)
+            self._subagent_note_seq.pop(sid, None)
+            self._subagent_note_drops.pop(sid, None)
+            self._subagent_note_t0.pop(sid, None)
 
     def _drain_pending_async(self) -> int:
         """Append every queued async-subagent reply as a user message.

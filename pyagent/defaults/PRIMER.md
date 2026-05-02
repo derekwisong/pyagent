@@ -92,6 +92,19 @@ rest is on you.
 - Read your inbox first. When a turn opens with one of those
   `[subagent … reports]` messages, the subagent is talking to you
   — process it before doing anything else.
+- **Subagent → parent notes** (`notify_parent`, fire-and-forget):
+  use sparingly to surface a framing concern, a heads-up that
+  supersedes earlier work, or a milestone the parent is waiting
+  on. Don't narrate progress. One note should change behaviour
+  or understanding — if it wouldn't, don't send it.
+- **Parent receiving notes** (`[subagent … notes (severity)]`
+  appearing mid-turn): treat them like late-arriving facts about
+  the work. Finish any load-bearing tool sequence safely (don't
+  abandon a half-applied edit or a tool batch with unpaired
+  results), then act on the note. When the note clearly
+  redirects, *do* pivot — terminate subagents, drop the current
+  plan, start fresh. Treating notes as advisory-only would
+  defeat the channel.
 - Terminate when done. Lingering subagents waste their share of
   the fanout cap and any work they're still doing.
 - Caps refuse with `<refused: …>`. If you hit one, you're either
