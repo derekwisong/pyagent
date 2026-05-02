@@ -246,6 +246,30 @@ def test_lint_on_directory(tools: dict, workdir: Path) -> None:
     _check("finding cites file in directory", "a.py" in out, out[:300])
 
 
+def test_pathutil_shorten() -> None:
+    """`_pathutil.shorten` normalizes path output across tools so
+    `lint` (ruff resolves to absolute) and `typecheck` (mypy
+    preserves caller input) emit the same shape: relative when
+    inside cwd, absolute otherwise. Keeps the calling agent from
+    having to know which tool produced a finding."""
+    from pyagent.plugins.py_dev_toolkit._pathutil import shorten
+
+    cwd = Path.cwd().resolve()
+    inside = cwd / "pyagent" / "plugins" / "__init__.py"
+    _check(
+        "in-cwd path becomes relative",
+        shorten(str(inside)) == "pyagent/plugins/__init__.py",
+        shorten(str(inside)),
+    )
+    _check(
+        "out-of-cwd path stays absolute",
+        shorten("/etc/hosts") == "/etc/hosts",
+        shorten("/etc/hosts"),
+    )
+    _check("placeholder '?' returns unchanged", shorten("?") == "?")
+    _check("empty input returns unchanged", shorten("") == "")
+
+
 def test_pytest_permission_gate_runs_for_nonexistent_paths(
     tools: dict,
 ) -> None:
@@ -305,6 +329,7 @@ def main() -> None:
     test_mypy_text_parser_filters_notes()
     test_mypy_json_parser_filters_notes()
     test_lint_on_directory(tools, workdir)
+    test_pathutil_shorten()
     test_pytest_permission_gate_runs_for_nonexistent_paths(tools)
     test_missing_binary_path(workdir)
     print("\nALL CHECKS PASSED")

@@ -10,6 +10,7 @@ isn't installed, surfaces a clean error pointing the caller at
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -78,10 +79,14 @@ def run(
     if not permissions.require_access(target_path):
         return f"<error: access denied to {target}>"
 
-    with tempfile.NamedTemporaryFile(
-        suffix=".json", delete=False, mode="w"
-    ) as tmp:
-        report_path = Path(tmp.name)
+    # `mkstemp` over `NamedTemporaryFile(delete=False)`: on Windows
+    # the latter can keep handles open across context-manager exit
+    # and races the subprocess that wants to write to the same path.
+    # `mkstemp` returns an fd we close immediately, leaving only the
+    # path for the subprocess.
+    fd, report_name = tempfile.mkstemp(suffix=".json", prefix="pytest_report_")
+    os.close(fd)
+    report_path = Path(report_name)
 
     try:
         cmd = [

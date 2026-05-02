@@ -15,6 +15,7 @@ import subprocess
 from pathlib import Path
 
 from pyagent import permissions
+from pyagent.plugins.py_dev_toolkit._pathutil import shorten as _shorten
 
 _TIMEOUT_S = 60
 
@@ -105,7 +106,7 @@ def _format_findings(findings: list[dict], target: str) -> str:
         if f.get("fix"):
             fixable += 1
             fix_marker = " — fixable"
-        file_rel = f.get("filename", "?")
+        file_rel = _shorten(f.get("filename", "?"))
         lines.append(
             f"- {file_rel}:{line}:{col} [{code}] {message}{fix_marker}"
         )

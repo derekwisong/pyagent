@@ -20,6 +20,7 @@ import subprocess
 from pathlib import Path
 
 from pyagent import permissions
+from pyagent.plugins.py_dev_toolkit._pathutil import shorten as _shorten
 
 _TIMEOUT_S = 120  # typecheckers are slower than linters; bump from 60.
 
@@ -28,6 +29,15 @@ _TIMEOUT_S = 120  # typecheckers are slower than linters; bump from 60.
 # colons — Windows drive letters (`C:\foo\bar.py:3:1: error: …`)
 # being the case that bit us. Earlier `[^:]+` silently dropped
 # every error on Windows, returning a false-clean result.
+#
+# Edge case the non-greedy match doesn't fully cover: a POSIX path
+# with a single colon followed by a digit (e.g. `dir:9file.py`)
+# could in principle confuse the engine. In practice it matches
+# correctly because the trailing `:\s+(error|note|warning):\s+`
+# anchor requires a real severity token after the second colon —
+# the engine backtracks until the file portion is the right shape.
+# Documented because the algorithmic guarantee isn't obvious from
+# the regex alone.
 _MYPY_TEXT_LINE = re.compile(
     r"^(?P<file>.+?):(?P<line>\d+):(?P<col>\d+):\s+"
     r"(?P<sev>error|note|warning):\s+(?P<msg>.*?)"
@@ -117,19 +127,26 @@ def _try_mypy_json(
     except subprocess.TimeoutExpired:
         return [], f"<error: mypy timed out after {_TIMEOUT_S}s>"
 
-    combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    if (
-        "unrecognized arguments: -O" in combined
-        or "invalid choice: 'json'" in combined.lower()
-    ):
+    # Robustly detect "JSON flag not recognized" by inspecting the
+    # *first non-empty stdout line* rather than substring-matching
+    # mypy's error wording. If JSON is producing output, the first
+    # non-empty line is a JSON object (`{...}`); anything else means
+    # mypy printed a usage error or a localized message and we
+    # should fall through to text parsing instead of trusting what
+    # we got. This survives mypy reword / locale changes.
+    first = next(
+        (ln for ln in (proc.stdout or "").splitlines() if ln.strip()),
+        "",
+    ).lstrip()
+    if first and not first.startswith("{"):
         return None  # older mypy — fall back to text parsing
 
     # mypy exits 1 when it finds errors — that's normal. Treat
-    # exit > 1 as failure only if no parseable output came through;
-    # some configurations print a partial result and a non-zero
-    # status (e.g. plugin failures), and we'd rather surface what
-    # we got than swallow it.
-    if proc.returncode > 1 and not (proc.stdout or "").strip():
+    # exit > 1 as failure only if no JSON output came through; some
+    # configurations print partial results plus a non-zero status
+    # (plugin failures, etc.), and we'd rather surface what we got
+    # than swallow it.
+    if proc.returncode > 1 and not first:
         err = (proc.stderr or "").strip() or "(no stderr)"
         return [], f"<error: mypy failed (exit {proc.returncode}): {err}>"
 
@@ -278,7 +295,7 @@ def _format(tool: str, findings: list[dict], target: str) -> str:
         by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
         code_part = f"[{f['code']}] " if f["code"] else ""
         lines.append(
-            f"- {f['filename']}:{f['line']}:{f['col']} "
+            f"- {_shorten(f['filename'])}:{f['line']}:{f['col']} "
             f"{code_part}{f['message']}"
         )
     sev_part = ", ".join(
