@@ -51,8 +51,16 @@ agent → CLI
         Agent, Session, and tool registry. The CLI waits for this
         before accepting user input.
   - assistant_text {text: str}
-        Streamed assistant text from a turn (currently emitted whole
-        per turn, not chunked).
+        The full, completed text of one assistant turn. Always emitted
+        once per turn after any deltas have flowed; the CLI uses this
+        to swap the streamed plain-text buffer for a markdown render.
+  - assistant_text_delta {text: str}
+        Incremental text chunk produced by a streaming provider. Fired
+        zero-or-more times during a turn before the closing
+        `assistant_text` event. Concatenating every delta in order
+        equals the `text` field of the closing `assistant_text`. CLIs
+        that don't care about live rendering can ignore this event
+        entirely; the trailing `assistant_text` is still authoritative.
   - tool_call_started {name: str, args: dict}
         Mirror of the existing `on_tool_call` callback.
   - tool_result {name: str, content: str}

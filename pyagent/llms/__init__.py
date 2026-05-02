@@ -327,7 +327,23 @@ class LLMClient(Protocol):
       - Assistant:    {"role": "assistant", "text": "...",
                        "tool_calls": [{"id", "name", "args"}, ...]}
 
-    The return value is a single assistant message in that same shape.
+    The return value is a single assistant message in that same shape,
+    even when streaming is in use — the contract is "one turn out per
+    call." Streaming is purely a UX channel: incremental text chunks
+    flow through `on_text_delta` while the call is in flight, and the
+    final dict still carries the fully-accumulated text + tool_calls +
+    usage at end-of-stream. The agent loop's tool-dispatch logic
+    relies on the complete tool_calls list, so tool calls are never
+    streamed piecemeal — only text is.
+
+    `on_text_delta` is optional. Providers that haven't implemented
+    streaming ignore the kwarg and behave exactly as before; the
+    callback simply doesn't fire. Providers that do stream call the
+    callback zero-or-more times with a chunk of plain text each
+    (whatever granularity the wire format hands them — tokens,
+    sentences, server-sent-event frames). Implementations must
+    accumulate the same text into the returned dict's `text` field
+    so a non-streaming consumer of the dict sees the full reply.
     """
 
     def respond(
@@ -336,4 +352,5 @@ class LLMClient(Protocol):
         system: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         system_volatile: str | None = None,
+        on_text_delta: Callable[[str], None] | None = None,
     ) -> dict[str, Any]: ...

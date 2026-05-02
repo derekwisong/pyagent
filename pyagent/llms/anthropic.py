@@ -1,7 +1,7 @@
 """Anthropic implementation of the LLM client interface."""
 
 import os
-from typing import Any
+from typing import Any, Callable
 
 from anthropic import Anthropic
 
@@ -39,7 +39,14 @@ class AnthropicClient:
         system: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         system_volatile: str | None = None,
+        on_text_delta: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
+        # `on_text_delta` is the streaming hook on the LLMClient
+        # protocol. The Anthropic client doesn't stream yet — its
+        # follow-up PR will switch to `messages.stream()` and emit
+        # incremental text. For now the kwarg is accepted-and-ignored
+        # so the agent can pass it uniformly to every provider.
+        del on_text_delta
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": self.max_tokens,
