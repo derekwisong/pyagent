@@ -154,6 +154,96 @@ def test_run_pytest_k_filter(tools: dict, workdir: Path) -> None:
     )
 
 
+def test_mypy_text_parser_handles_windows_paths() -> None:
+    """Reviewer-found bug: previous regex used `[^:]+` for the file
+    path, so `C:\\foo\\bar.py:3:1: error: …` never matched and
+    Windows hosts got a false-clean result. New regex uses a
+    non-greedy `.+?` so drive-letter paths parse correctly."""
+    from pyagent.plugins.py_dev_toolkit.typecheck import parse_mypy_text
+
+    sample = (
+        "C:\\src\\proj\\foo.py:3:1: error: Bad arg [arg-type]\n"
+        "/src/proj/foo.py:5:9: error: Other thing [assignment]\n"
+        "relative/foo.py:7:2: warning: Risky [misc]\n"
+    )
+    out = parse_mypy_text(sample)
+    _check("3 findings parsed across path styles", len(out) == 3, repr(out))
+    paths = {f["filename"] for f in out}
+    _check(
+        "windows path captured intact",
+        "C:\\src\\proj\\foo.py" in paths,
+        repr(paths),
+    )
+    _check(
+        "linux abs path captured intact",
+        "/src/proj/foo.py" in paths,
+        repr(paths),
+    )
+    _check(
+        "relative path captured intact",
+        "relative/foo.py" in paths,
+        repr(paths),
+    )
+
+
+def test_mypy_text_parser_filters_notes() -> None:
+    """Reviewer-found bug: `note:` lines were being counted as
+    findings, inflating the summary (e.g. `1 error, 4 notes` shown
+    as 5 findings). They're context for the adjacent error, not
+    separate problems."""
+    from pyagent.plugins.py_dev_toolkit.typecheck import parse_mypy_text
+
+    sample = (
+        "/proj/foo.py:10:5: error: Incompatible overload [misc]\n"
+        "/proj/foo.py:10:5: note: Possible overload variant 1\n"
+        "/proj/foo.py:10:5: note: Possible overload variant 2\n"
+        "/proj/foo.py:11:5: note: Suggested fix: rename param\n"
+    )
+    out = parse_mypy_text(sample)
+    _check("only the error is kept", len(out) == 1, repr(out))
+    _check(
+        "kept finding is the error",
+        out[0]["severity"] == "error",
+        repr(out[0]),
+    )
+
+
+def test_mypy_json_parser_filters_notes() -> None:
+    """Same notes-filtering applied to mypy's JSONL output."""
+    from pyagent.plugins.py_dev_toolkit.typecheck import parse_mypy_json
+
+    sample = (
+        '{"file": "/proj/foo.py", "line": 1, "column": 1, '
+        '"severity": "error", "code": "assignment", "message": "bad"}\n'
+        '{"file": "/proj/foo.py", "line": 1, "column": 1, '
+        '"severity": "note", "code": null, "message": "context"}\n'
+        'Found 1 error in 1 file (checked 1 source file)\n'
+    )
+    out = parse_mypy_json(sample)
+    _check("error kept, note dropped, footer ignored", len(out) == 1, repr(out))
+    _check(
+        "kept finding is the error",
+        out[0]["severity"] == "error" and out[0]["code"] == "assignment",
+        repr(out[0]),
+    )
+
+
+def test_lint_on_directory(tools: dict, workdir: Path) -> None:
+    if shutil.which("ruff") is None:
+        return
+    sub = workdir / "lint_dir"
+    sub.mkdir(exist_ok=True)
+    (sub / "a.py").write_text("import os\n")  # F401
+    (sub / "b.py").write_text("def f():\n    return 42\n")  # clean
+    out = tools["lint"](str(sub))
+    _check(
+        "lint runs on a directory",
+        "ruff:" in out and "finding" in out,
+        out[:200],
+    )
+    _check("finding cites file in directory", "a.py" in out, out[:300])
+
+
 def test_missing_binary_path(workdir: Path) -> None:
     # Spoof PATH to confirm clean error when binary missing. Need a
     # real-on-disk file because the existence check runs before the
@@ -183,6 +273,10 @@ def main() -> None:
     test_typecheck_input_validation(tools)
     test_run_pytest_basic(tools, workdir)
     test_run_pytest_k_filter(tools, workdir)
+    test_mypy_text_parser_handles_windows_paths()
+    test_mypy_text_parser_filters_notes()
+    test_mypy_json_parser_filters_notes()
+    test_lint_on_directory(tools, workdir)
     test_missing_binary_path(workdir)
     print("\nALL CHECKS PASSED")
 

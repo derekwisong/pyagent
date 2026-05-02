@@ -62,6 +62,15 @@ def run(
             "`pip_install pytest pytest-json-report` and retry>"
         )
 
+    # `require_access` gates the target itself, but pytest's
+    # collection phase walks parent directories looking for
+    # `conftest.py` and `pyproject.toml`. Those reads aren't
+    # individually checked against the workspace gate — in practice
+    # only matters for out-of-workspace targets, since conftest
+    # discovery from inside the workspace can't escape it. Caller
+    # who passes `target=/some/abs/path` and approves it implicitly
+    # accepts ancestor reads up to filesystem root; documented
+    # rather than fought.
     target_path = Path(target.split("::", 1)[0])
     if target_path.exists() and not permissions.require_access(target_path):
         return f"<error: access denied to {target}>"

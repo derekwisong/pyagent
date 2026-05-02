@@ -1,10 +1,14 @@
 """Wrap mypy / pyright to return structured type-check findings.
 
-mypy emits text in a stable shape (`file:line:col: severity:
-message [code]`) and we parse that. pyright has native JSON
-(`--outputjson`) and we use that directly. Both feed the same
-output shape so the calling agent sees one format regardless of
-which typechecker is on the host.
+mypy: tries `mypy -O json` first (mypy ≥ 1.11 emits JSONL); falls
+back to text parsing on older mypy. Both paths feed the same output
+shape and both filter `severity == "note"` — notes are context the
+caller may want eventually but they aren't *findings*, and counting
+them inflates the summary ("5 findings: 1 error, 4 notes" reads as
+five problems when there's only one).
+
+pyright: uses native `--outputjson`. Same output shape; "information"
+and "hint" diagnostics are filtered for the same reason.
 """
 
 from __future__ import annotations
@@ -19,11 +23,13 @@ from pyagent import permissions
 
 _TIMEOUT_S = 120  # typecheckers are slower than linters; bump from 60.
 
-# `path:line:col: severity: message [code]` — mypy with
-# --show-column-numbers and default error codes on. The code is the
-# bracketed last token; older mypy versions sometimes omit it.
-_MYPY_LINE = re.compile(
-    r"^(?P<file>[^:]+):(?P<line>\d+):(?P<col>\d+):\s+"
+# Text-format mypy line: `path:line:col: severity: message [code]`.
+# `(?P<file>.+?)` is non-greedy so it accepts paths containing
+# colons — Windows drive letters (`C:\foo\bar.py:3:1: error: …`)
+# being the case that bit us. Earlier `[^:]+` silently dropped
+# every error on Windows, returning a false-clean result.
+_MYPY_TEXT_LINE = re.compile(
+    r"^(?P<file>.+?):(?P<line>\d+):(?P<col>\d+):\s+"
     r"(?P<sev>error|note|warning):\s+(?P<msg>.*?)"
     r"(?:\s+\[(?P<code>[\w-]+)\])?\s*$"
 )
@@ -43,6 +49,9 @@ def run(path: str, tool: str = "mypy") -> str:
         (E errors, W warnings)`) followed by a blank line and a
         `- file:line:col [code] message` bullet per finding.
         On a clean run: `<tool>: clean (no findings on PATH)`.
+        Notes (mypy `note:` lines, pyright "information"/"hint"
+        diagnostics) are excluded from both the count and the bullet
+        list — they're context, not findings.
         Errors come back inline as `<error: ...>`.
     """
     if not path or not str(path).strip():
@@ -71,6 +80,99 @@ def run(path: str, tool: str = "mypy") -> str:
 
 
 def _run_mypy(binary: str, target: Path) -> str:
+    """Run mypy, preferring JSON output. Falls back to text parsing
+    on older mypy that doesn't recognize `-O json`."""
+    json_attempt = _try_mypy_json(binary, target)
+    if json_attempt is not None:
+        findings, error = json_attempt
+        if error:
+            return error
+    else:
+        text_attempt = _run_mypy_text(binary, target)
+        if isinstance(text_attempt, str):
+            return text_attempt
+        findings = text_attempt
+
+    if not findings:
+        return f"mypy: clean (no findings on {target})"
+    return _format("mypy", findings, str(target))
+
+
+def _try_mypy_json(
+    binary: str, target: Path
+) -> tuple[list[dict], str | None] | None:
+    """Try `mypy -O json`. Returns:
+      - `(findings, None)` on success.
+      - `(_, error_string)` when mypy ran but failed.
+      - `None` when the JSON flag isn't recognized (older mypy);
+        caller should fall back to text parsing.
+    """
+    try:
+        proc = subprocess.run(
+            [binary, "-O", "json", "--no-color-output", str(target)],
+            capture_output=True,
+            text=True,
+            timeout=_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return [], f"<error: mypy timed out after {_TIMEOUT_S}s>"
+
+    combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    if (
+        "unrecognized arguments: -O" in combined
+        or "invalid choice: 'json'" in combined.lower()
+    ):
+        return None  # older mypy — fall back to text parsing
+
+    # mypy exits 1 when it finds errors — that's normal. Treat
+    # exit > 1 as failure only if no parseable output came through;
+    # some configurations print a partial result and a non-zero
+    # status (e.g. plugin failures), and we'd rather surface what
+    # we got than swallow it.
+    if proc.returncode > 1 and not (proc.stdout or "").strip():
+        err = (proc.stderr or "").strip() or "(no stderr)"
+        return [], f"<error: mypy failed (exit {proc.returncode}): {err}>"
+
+    findings = parse_mypy_json(proc.stdout or "")
+    return findings, None
+
+
+def parse_mypy_json(text: str) -> list[dict]:
+    """Parse mypy's `-O json` output (JSONL — one JSON object per
+    line). Skips `severity == "note"` for the same reason as the
+    text parser. Lines that aren't JSON (mypy's footer, progress
+    output) are silently skipped.
+
+    Exposed at module scope (no `_` prefix) so tests can exercise
+    the parser without spawning mypy.
+    """
+    findings: list[dict] = []
+    for raw in text.splitlines():
+        raw = raw.strip()
+        if not raw or not raw.startswith("{"):
+            continue
+        try:
+            d = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if d.get("severity") == "note":
+            continue
+        findings.append(
+            {
+                "filename": d.get("file", "?"),
+                "line": int(d.get("line") or 0),
+                "col": int(d.get("column") or 0),
+                "severity": d.get("severity", "error"),
+                "code": d.get("code") or "",
+                "message": d.get("message", ""),
+            }
+        )
+    return findings
+
+
+def _run_mypy_text(binary: str, target: Path) -> list[dict] | str:
+    """Fallback for mypy < 1.11. Returns a list on success or an
+    error string on subprocess failure."""
     try:
         proc = subprocess.run(
             [
@@ -87,31 +189,44 @@ def _run_mypy(binary: str, target: Path) -> str:
     except subprocess.TimeoutExpired:
         return f"<error: mypy timed out after {_TIMEOUT_S}s>"
 
-    # mypy exits 1 when it finds errors — that's normal. exit > 1
-    # means a real failure (couldn't import, internal error).
     if proc.returncode > 1:
         err = (proc.stderr or "").strip() or proc.stdout[:200]
         return f"<error: mypy failed (exit {proc.returncode}): {err}>"
 
+    return parse_mypy_text(proc.stdout or "")
+
+
+def parse_mypy_text(text: str) -> list[dict]:
+    """Parse mypy's text output into the canonical finding shape.
+
+    Skips `note:` lines (they're context for an adjacent error,
+    not a finding in their own right; counting them inflates the
+    summary and confuses the caller). Lines that don't match the
+    expected shape are also skipped — usually mypy's "Found N
+    errors" footer or progress output.
+
+    Exposed at module scope (no `_` prefix) so tests can exercise
+    the parser without spawning mypy.
+    """
     findings: list[dict] = []
-    for raw in (proc.stdout or "").splitlines():
-        m = _MYPY_LINE.match(raw)
+    for raw in text.splitlines():
+        m = _MYPY_TEXT_LINE.match(raw)
         if m is None:
+            continue
+        sev = m.group("sev")
+        if sev == "note":
             continue
         findings.append(
             {
                 "filename": m.group("file"),
                 "line": int(m.group("line")),
                 "col": int(m.group("col")),
-                "severity": m.group("sev"),
+                "severity": sev,
                 "code": m.group("code") or "",
                 "message": m.group("msg"),
             }
         )
-
-    if not findings:
-        return f"mypy: clean (no findings on {target})"
-    return _format("mypy", findings, str(target))
+    return findings
 
 
 def _run_pyright(binary: str, target: Path) -> str:
@@ -135,6 +250,10 @@ def _run_pyright(binary: str, target: Path) -> str:
     diagnostics = data.get("generalDiagnostics") or []
     findings: list[dict] = []
     for d in diagnostics:
+        # "information" / "hint" are pyright's equivalent of mypy
+        # notes — context, not findings. Skip for the same reason.
+        if d.get("severity") in ("information", "hint"):
+            continue
         rng = (d.get("range") or {}).get("start") or {}
         findings.append(
             {
