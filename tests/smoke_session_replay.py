@@ -185,11 +185,89 @@ def _check_render_path_returns_stub() -> None:
     print(f"✓ _render_tool_result(Attachment) → stub: {len(rendered)} chars")
 
 
+def _check_attachment_inline_text_unset_unchanged() -> None:
+    """Regression-guard: Attachment without inline_text uses the same
+    offload-header rendering as before #88. Locks "today's behavior is
+    unchanged when the new field is None"."""
+    tmp = Path(tempfile.mkdtemp(prefix="pyagent-smoke-replay-"))
+    session = Session(session_id="legacy", root=tmp)
+    agent = Agent(client=None, session=session)
+
+    payload = "Z" * 12_000
+    rendered = agent._render_tool_result(
+        "read_file",
+        Attachment(content=payload, preview=payload[:100]),
+    )
+    assert rendered.startswith("[offload "), rendered
+    assert "[also saved:" not in rendered, (
+        "side-data footer must NOT appear when inline_text is None"
+    )
+    assert payload not in rendered
+    print("✓ inline_text=None: legacy offload-header path unchanged")
+
+
+def _check_attachment_inline_text_set() -> None:
+    """When inline_text is set, the rendered output starts with the
+    inline_text and ends with `[also saved: <path>]`. The file lands
+    on disk with the expected `content`."""
+    tmp = Path(tempfile.mkdtemp(prefix="pyagent-smoke-replay-"))
+    session = Session(session_id="inline", root=tmp)
+    agent = Agent(client=None, session=session)
+
+    inline = "## Top hits\n\n- foo (https://a)\n- bar (https://b)\n"
+    structured = '[{"title": "foo", "url": "https://a"}]'
+    rendered = agent._render_tool_result(
+        "web_search",
+        Attachment(
+            content=structured,
+            inline_text=inline,
+            suffix=".json",
+        ),
+    )
+    assert isinstance(rendered, str), type(rendered)
+    assert rendered.startswith(inline), rendered
+    # Footer at the tail; minimal shape "[also saved: <path>]".
+    assert rendered.rstrip().endswith("]"), rendered
+    assert "[also saved: " in rendered, rendered
+    # No offload header: the file is *side data*, not an offloaded big
+    # result whose preview the agent must not re-read.
+    assert "[offload " not in rendered, rendered
+    assert "Do NOT read_file" not in rendered
+
+    # Recover the path from the footer and confirm the bytes landed.
+    footer = rendered.rsplit("[also saved: ", 1)[1].rstrip().rstrip("]")
+    saved_path = Path(footer)
+    assert saved_path.exists(), saved_path
+    assert saved_path.read_text() == structured
+    assert saved_path.suffix == ".json", saved_path
+    print(
+        f"✓ inline_text path: rendered starts with inline_text, "
+        f"ends with [also saved: ...], file on disk = "
+        f"{saved_path.stat().st_size} bytes"
+    )
+
+
+def _check_attachment_inline_text_no_session() -> None:
+    """No session → inline_text wins over preview/content. Plugins that
+    optimistically build both shapes still degrade to the human view."""
+    agent = Agent(client=None, session=None)
+    inline = "## summary\nfoo\n"
+    rendered = agent._render_tool_result(
+        "web_search",
+        Attachment(content="raw", inline_text=inline, preview="ignored"),
+    )
+    assert rendered == inline, rendered
+    print("✓ inline_text path with no session: returns inline_text only")
+
+
 def main() -> None:
     _check_stub_not_content()
     _check_round_trip()
     _check_attachment_construction_sites()
     _check_render_path_returns_stub()
+    _check_attachment_inline_text_unset_unchanged()
+    _check_attachment_inline_text_set()
+    _check_attachment_inline_text_no_session()
     print("\nALL CHECKS PASSED")
 
 

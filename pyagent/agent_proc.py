@@ -829,6 +829,12 @@ def _bootstrap(
             plugin_loader=loaded_plugins,
         )
 
+    # Now that the session exists, expose it to plugins so
+    # PluginAPI.write_session_attachment can resolve a real path.
+    # Bench / no-session contexts skip this step → plugins fall back
+    # to inline-only rendering.
+    loaded_plugins.bind_session(session)
+
     agent = Agent(
         client=client,
         system=system,

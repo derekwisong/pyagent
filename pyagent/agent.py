@@ -234,12 +234,24 @@ class Agent:
     ) -> str:
         if isinstance(result, Attachment):
             if not self.session:
+                # No session → nothing to save. Prefer inline_text if
+                # the tool supplied one (it's the human answer); else
+                # fall back to today's preview-or-content behavior.
+                if result.inline_text is not None:
+                    return result.inline_text
                 if result.preview:
                     return result.preview
                 return result.content if isinstance(result.content, str) else ""
             path = self.session.write_attachment(
                 name, result.content, result.suffix
             )
+            if result.inline_text is not None:
+                # inline_text path: the saved file is *side data*
+                # (structured blob the agent might legitimately re-read
+                # via extract_doc / read_file), not an offloaded big
+                # result. Skip the offload header / "do not read" warn;
+                # just point at the file with a minimal footer.
+                return f"{result.inline_text}\n\n[also saved: {path}]"
             cap = self.session.attachment_threshold
             return self._format_offload_ref(
                 path,
