@@ -353,6 +353,180 @@ def test_no_loader_graceful_degradation() -> None:
     print("✓ no-loader PluginAPI degrades gracefully")
 
 
+def test_called_tool_raises_returns_marker() -> None:
+    """If the called tool body raises, call_tool wraps the exception
+    into the standard marker shape rather than propagating. Plugin
+    authors don't need a try/except around every composition."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        plugin_a = (
+            "def register(api):\n"
+            "    def boom() -> str:\n"
+            '        """Always raises."""\n'
+            "        raise ValueError('upstream broke')\n"
+            '    api.register_tool("boom", boom)\n'
+        )
+        plugin_b = (
+            "def register(api):\n"
+            "    def caller() -> str:\n"
+            '        """Calls boom() and reports what happened."""\n'
+            '        return api.call_tool("boom")\n'
+            '    api.register_tool("caller", caller)\n'
+        )
+        _write_plugin(
+            cfg / "plugins", dirname="01-a", name="plug-boom",
+            provides_tools=["boom"], plugin_py=plugin_a,
+        )
+        _write_plugin(
+            cfg / "plugins", dirname="02-b", name="plug-caller",
+            provides_tools=["caller"], plugin_py=plugin_b,
+        )
+        loaded = plugins_mod.load()
+        _, fn = loaded.tools()["caller"]
+        result = fn()
+        assert result.startswith("<error: tool 'boom' raised: "), result
+        assert "ValueError" in result, result
+        assert "upstream broke" in result, result
+        print("✓ called tool raises → <error: tool ... raised: ValueError: ...>")
+    finally:
+        restore()
+
+
+def test_bad_kwargs_returns_marker() -> None:
+    """Passing kwargs the target tool doesn't accept produces a
+    TypeError, which call_tool wraps the same way as any other raise."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        plugin_a = (
+            "def register(api):\n"
+            "    def takes_x(x: int) -> str:\n"
+            '        """Doubles x."""\n'
+            '        return f"x={x*2}"\n'
+            '    api.register_tool("takes_x", takes_x)\n'
+        )
+        plugin_b = (
+            "def register(api):\n"
+            "    def caller() -> str:\n"
+            '        """Calls takes_x with the wrong kwarg."""\n'
+            '        return api.call_tool("takes_x", y=1)\n'
+            '    api.register_tool("bad_kw_caller", caller)\n'
+        )
+        _write_plugin(
+            cfg / "plugins", dirname="01-a", name="plug-bad-kwargs-target",
+            provides_tools=["takes_x"], plugin_py=plugin_a,
+        )
+        _write_plugin(
+            cfg / "plugins", dirname="02-b", name="plug-bad-kwargs-caller",
+            provides_tools=["bad_kw_caller"], plugin_py=plugin_b,
+        )
+        loaded = plugins_mod.load()
+        _, fn = loaded.tools()["bad_kw_caller"]
+        result = fn()
+        assert result.startswith("<error: tool 'takes_x' raised: "), result
+        assert "TypeError" in result, result
+        print("✓ bad kwargs → <error: tool ... raised: TypeError: ...>")
+    finally:
+        restore()
+
+
+def test_bad_name_input() -> None:
+    """call_tool(name) where name is None / empty / non-string returns
+    a typed marker, never raises."""
+    state = plugins_mod._PluginState(
+        manifest=plugins_mod.Manifest(
+            name="bare", version="0.0.1", description="bad-name",
+            api_version="1", provides_tools=(), provides_prompt_sections=(),
+            provides_providers=(), requires_python="", requires_env=(),
+            requires_binaries=(), in_subagents=True, source=Path("/dev/null"),
+        )
+    )
+    api = plugins_mod.PluginAPI(state, loader=None)
+
+    out = api.call_tool(None)
+    assert out.startswith("<error: name must be a non-empty string"), out
+    assert "NoneType" in out, out
+
+    out = api.call_tool("")
+    assert out.startswith("<error: name must be a non-empty string"), out
+
+    out = api.call_tool("   ")
+    assert out.startswith("<error: name must be a non-empty string"), out
+
+    out = api.call_tool(42)
+    assert out.startswith("<error: name must be a non-empty string"), out
+    assert "int" in out, out
+
+    print("✓ bad name input: None / empty / whitespace / non-string → typed marker")
+
+
+def test_agent_registry_takes_precedence() -> None:
+    """When an Agent is bound, call_tool resolves through the agent's
+    effective registry. A tool that exists in the plugin loader but
+    NOT in agent.tools (because a role-allowlist excluded it, or it
+    was never registered onto the agent) is unreachable via call_tool
+    — closes the role-allowlist bypass flagged in #92's review."""
+    from unittest.mock import MagicMock
+
+    cfg, restore = _isolated_config_dir()
+    try:
+        # Register two plugin tools — `excluded_tool` and `caller`.
+        # caller tries to reach excluded_tool via call_tool. Bind a
+        # mock Agent whose `tools` registry has caller but not
+        # excluded_tool, simulating a role-allowlist that filtered
+        # excluded_tool out of registration.
+        plugin_x = (
+            "def register(api):\n"
+            "    def excluded_tool() -> str:\n"
+            '        """Registered to the plugin loader but not the agent."""\n'
+            '        return "should-not-be-reached"\n'
+            '    api.register_tool("excluded_tool", excluded_tool)\n'
+        )
+        plugin_y = (
+            "def register(api):\n"
+            "    def caller() -> str:\n"
+            '        """Tries to reach the excluded tool."""\n'
+            '        return api.call_tool("excluded_tool")\n'
+            '    api.register_tool("caller", caller)\n'
+        )
+        _write_plugin(
+            cfg / "plugins", dirname="01-x", name="plug-x",
+            provides_tools=["excluded_tool"], plugin_py=plugin_x,
+        )
+        _write_plugin(
+            cfg / "plugins", dirname="02-y", name="plug-y",
+            provides_tools=["caller"], plugin_py=plugin_y,
+        )
+        loaded = plugins_mod.load()
+        # Plugin loader sees BOTH tools.
+        assert "excluded_tool" in loaded.tools(), loaded.tools().keys()
+        assert "caller" in loaded.tools(), loaded.tools().keys()
+
+        # Bind an agent whose registry only has `caller` —
+        # simulates a role allowlist that excluded `excluded_tool`.
+        _, caller_fn = loaded.tools()["caller"]
+        fake_agent = MagicMock()
+        fake_agent.tools = {"caller": caller_fn}
+        loaded.bind_agent(fake_agent)
+
+        # Calling caller() must NOT reach excluded_tool — the agent
+        # registry is the authority.
+        result = caller_fn()
+        assert result.startswith("<error: tool 'excluded_tool' not available"), result
+        assert "should-not-be-reached" not in result, result
+
+        # Sanity: with the agent's registry expanded to include both,
+        # the same call now succeeds.
+        fake_agent.tools = {
+            "caller": caller_fn,
+            "excluded_tool": loaded.tools()["excluded_tool"][1],
+        }
+        result = caller_fn()
+        assert result == "should-not-be-reached", result
+        print("✓ role-allowlist: agent.tools is authoritative over loader.tools()")
+    finally:
+        restore()
+
+
 def main() -> None:
     test_basic_chain()
     test_missing_tool_marker()
@@ -361,6 +535,10 @@ def main() -> None:
     test_depth_resets_between_calls()
     test_permission_inheritance()
     test_no_loader_graceful_degradation()
+    test_called_tool_raises_returns_marker()
+    test_bad_kwargs_returns_marker()
+    test_bad_name_input()
+    test_agent_registry_takes_precedence()
     print("\nALL CHECKS PASSED")
 
 

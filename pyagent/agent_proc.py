@@ -910,6 +910,13 @@ def _bootstrap(
             continue
         agent.add_tool(tool_name, fn)
 
+    # Bind agent into LoadedPlugins so PluginAPI.call_tool resolves
+    # through agent.tools (the effective registry post-role-allowlist),
+    # not the plugin-only registry. Without this, a plugin tool could
+    # call_tool another plugin tool that the role intentionally
+    # excluded — see #92 review feedback.
+    loaded_plugins.bind_agent(agent)
+
     agent.conversation = session.load_history()
     if agent.conversation:
         # JSONL on disk keeps full skill-body content (round-trip

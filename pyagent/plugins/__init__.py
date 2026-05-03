@@ -359,22 +359,37 @@ class PluginAPI:
     # ---- cross-plugin tool composition --------------------------
 
     def call_tool(self, name: str, **kwargs: Any) -> str:
-        """Invoke another plugin's registered tool from inside a tool body.
+        """Invoke another registered tool from inside a tool body.
 
         Returns the called tool's raw output (string convention with
-        ``<… error: …>`` markers — propagated as-is). On failure modes
-        the harness owns, returns one of these marker strings rather
-        than raising:
+        ``<… error: …>`` markers — propagated as-is). All failure
+        modes return string markers; this method does not raise into
+        the caller's tool body.
+
+        Resolution: when the agent is bound (production), the agent's
+        effective tool registry is the source — that's the registry
+        post-role-allowlist filtering, so a role-restricted subagent's
+        ``role_tools`` constraint applies through composition the same
+        way it applies to direct LLM-issued calls. When the agent is
+        *not* bound (test fixtures driving PluginAPI directly), we
+        fall back to the plugin loader's resolved registry; this only
+        matters in unit tests.
+
+        Failure markers:
 
         - ``<error: tool {name!r} not available in this context>`` when
-          the tool isn't in this process's resolved registry. Happens
-          in subagents where the providing plugin is
-          ``in_subagents = false``, when the plugin failed to load,
-          or when the plugin loader simply isn't bound (e.g. unit
-          tests using a hand-rolled fake API).
+          the tool isn't in the effective registry. Causes: subagents
+          where the providing plugin is ``in_subagents = false``;
+          role-restricted subagents whose ``role_tools`` excludes the
+          tool; plugin failed to load; test harness with no loader.
         - ``<error: tool composition depth exceeded>`` when a chain of
           ``call_tool`` invocations would exceed ``CALL_TOOL_DEPTH_CAP``.
           Bounds A → B → A loops without forbidding all recursion.
+        - ``<error: tool {name!r} raised: <ExcType>: <msg>>`` when the
+          called tool body raised. The agent-loop's ``_route_tool``
+          uses a similar shape; ``call_tool`` mirrors it so plugin
+          authors don't need a try/except around every composition.
+        - ``<error: name must be a non-empty string …>`` for bad input.
 
         Permissions: the called tool inherits the calling agent's
         permission scope. ``permissions.require_access(...)`` is
@@ -388,21 +403,29 @@ class PluginAPI:
         plugins must not re-publish wrappers that re-expose it as an
         agent-facing tool.
 
-        If this PluginAPI was constructed without a ``LoadedPlugins``
-        loader (the bench harness, ``_FakeAPI`` in tests), the call
-        gracefully degrades to the "tool not available" marker — same
-        shape callers must already handle for the subagent-filtered
-        case. We deliberately do not raise here so plugin-author code
-        composes the same way in test and production contexts.
+        Available since pyagent runtime that ships ``api_version = "2"``
+        plumbing — older runtimes will ``AttributeError`` if a plugin
+        invokes it. No manifest-version bump required: this is a
+        backwards-compatible addition to the existing v2 API surface.
         """
-        loader = self._loader
-        if loader is None:
+        if not isinstance(name, str) or not name.strip():
             return (
-                f"<error: tool {name!r} not available in this context>"
+                f"<error: name must be a non-empty string, got "
+                f"{type(name).__name__}: {name!r}>"
             )
-        tools = loader.tools()
-        entry = tools.get(name)
-        if entry is None:
+        loader = self._loader
+        # Resolve fn from the most-restrictive registry available.
+        # Production: agent bound → agent.tools (post-allowlist).
+        # Tests: no agent bound → plugin loader registry. Bench
+        # harness with neither: the not-available marker.
+        fn: Callable | None = None
+        if loader is not None and loader.agent is not None:
+            fn = loader.agent.tools.get(name)
+        elif loader is not None:
+            entry = loader.tools().get(name)
+            if entry is not None:
+                _, fn = entry
+        if fn is None:
             return (
                 f"<error: tool {name!r} not available in this context>"
             )
@@ -411,8 +434,12 @@ class PluginAPI:
             return "<error: tool composition depth exceeded>"
         _call_tool_state.depth = depth + 1
         try:
-            _, fn = entry
             return fn(**kwargs)
+        except Exception as e:  # noqa: BLE001 — surface as marker
+            return (
+                f"<error: tool {name!r} raised: "
+                f"{type(e).__name__}: {e}>"
+            )
         finally:
             _call_tool_state.depth = depth
 
@@ -983,6 +1010,15 @@ class LoadedPlugins:
     # `bind_session(session)` to populate this. Stays `None` in
     # bench / no-session contexts; plugins fall back to inline-only.
     session: Any | None = None
+    # Active agent for `PluginAPI.call_tool` resolution. When set,
+    # `call_tool` looks up tool names in `agent.tools` (the effective
+    # registry post-role-allowlist filtering and post-conflict
+    # resolution) rather than the plugin-only registry. This makes
+    # role_tools constraints apply through composition the same way
+    # they apply to direct LLM-issued calls. Stays `None` in test
+    # fixtures driving PluginAPI directly without a real Agent;
+    # `call_tool` then falls back to the plugin registry.
+    agent: Any | None = None
 
     def bind_session(self, session: Any | None) -> None:
         """Attach the active Session so `PluginAPI.write_session_attachment`
@@ -991,6 +1027,15 @@ class LoadedPlugins:
         contexts that don't have a session (the bench harness, certain
         test fixtures)."""
         self.session = session
+
+    def bind_agent(self, agent: Any | None) -> None:
+        """Attach the active Agent so `PluginAPI.call_tool` resolves
+        through the agent's effective tool registry (post-role-
+        allowlist) rather than the plugin-only registry. Called once
+        by the agent bootstrap after the Agent is constructed and all
+        tools are registered (built-ins + plugin tools). Stays unset
+        in test fixtures that don't construct a real Agent."""
+        self.agent = agent
 
     def tools(self) -> Mapping[str, tuple[str, Callable]]:
         """Effective tool name → (plugin_name, fn) after conflict
