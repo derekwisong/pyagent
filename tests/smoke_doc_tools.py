@@ -18,6 +18,9 @@ Six concerns:
   6. **Validation paths return string markers, not raises** —
      missing path, missing query, bogus ``max_chars``, nonexistent
      file, and a sub-LLM that fails all surface as ``<… error: …>``.
+  7. **Env var overrides config but loses to per-call.**
+     ``PYAGENT_DOC_TOOLS_MODEL`` beats ``[plugins.doc-tools] model``
+     and is beaten by an explicit ``model=`` argument.
 
 Run with:
 
@@ -26,6 +29,7 @@ Run with:
 
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -189,6 +193,43 @@ def _check_per_call_model_overrides_config() -> None:
     print("✓ per-call model= overrides plugin config")
 
 
+def _check_env_var_overrides_config() -> None:
+    """``PYAGENT_DOC_TOOLS_MODEL`` beats config; loses to per-call."""
+    cap = _capture_tools()
+    cap["plugin_config"] = {"model": "pyagent/loremipsum"}
+    extract = cap["tools"]["extract"]
+
+    body = "X" * 8000
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".txt", delete=False
+    ) as f:
+        f.write(body)
+        path = f.name
+    permissions.pre_approve(path)
+    try:
+        # Env beats config.
+        with mock.patch.dict(
+            os.environ, {"PYAGENT_DOC_TOOLS_MODEL": "pyagent/echo"}
+        ):
+            out = extract(path, "anything")
+        assert out.startswith("[extracted via pyagent/echo]\n"), out
+
+        # Per-call still beats env. Both are set; explicit wins.
+        with mock.patch.dict(
+            os.environ, {"PYAGENT_DOC_TOOLS_MODEL": "pyagent/loremipsum"}
+        ):
+            out = extract(path, "anything", model="pyagent/echo")
+        assert out.startswith("[extracted via pyagent/echo]\n"), out
+
+        # Empty / whitespace env var falls through to config.
+        with mock.patch.dict(os.environ, {"PYAGENT_DOC_TOOLS_MODEL": "   "}):
+            out = extract(path, "anything")
+        assert out.startswith("[extracted via pyagent/loremipsum]\n"), out
+    finally:
+        Path(path).unlink()
+    print("✓ env var: beats config, loses to per-call, empty falls through")
+
+
 def _check_configured_model_is_honored() -> None:
     cap = _capture_tools()
     cap["plugin_config"] = {"model": "pyagent/echo"}
@@ -272,12 +313,17 @@ def _check_subllm_failure_wrapped() -> None:
 
 
 def main() -> None:
+    # Ensure the env var isn't bleeding in from the runner's shell —
+    # several checks assume "no env override" as their baseline.
+    os.environ.pop("PYAGENT_DOC_TOOLS_MODEL", None)
+
     _check_register_publishes_both_tools()
     _check_size_floor_extract()
     _check_size_floor_summarize()
     _check_extract_invokes_subllm_via_echo_stub()
     _check_summarize_invokes_subllm_via_echo_stub()
     _check_per_call_model_overrides_config()
+    _check_env_var_overrides_config()
     _check_configured_model_is_honored()
     _check_input_validation()
     _check_nonexistent_file_marker()
