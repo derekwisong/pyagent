@@ -29,11 +29,21 @@ class Attachment:
     truncating `content`. `suffix` is the filename extension to use
     when saving (e.g. `".png"`); defaults pick `.txt` for str, `.bin`
     for bytes.
+
+    `inline_text`, when set, decouples "what the agent sees inline"
+    from "what's saved on disk". The agent renders ``inline_text``
+    followed by a minimal ``[also saved: <path>]`` footer instead of
+    the offload header + preview. Use this when the saved file is
+    structured side data (e.g. a JSON blob a downstream tool will
+    read) and ``content`` is no longer a candidate for inline preview.
+    When ``None`` (default), behavior is unchanged: the saved bytes
+    drive the inline preview through the offload header path.
     """
 
     content: str | bytes
     preview: str = ""
     suffix: str = ""
+    inline_text: str | None = None
 
 
 class Session:

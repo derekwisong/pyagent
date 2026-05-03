@@ -271,8 +271,17 @@ class PluginAPI:
     contributes.
     """
 
-    def __init__(self, plugin_state: _PluginState) -> None:
+    def __init__(
+        self,
+        plugin_state: _PluginState,
+        loader: "LoadedPlugins | None" = None,
+    ) -> None:
         self._state = plugin_state
+        # Back-reference to the LoadedPlugins instance so
+        # `write_session_attachment` can find the active session that
+        # the agent binds via `LoadedPlugins.bind_session()` after
+        # session construction.
+        self._loader = loader
         self._frozen = False
 
     # ---- read-only attributes -----------------------------------
@@ -303,6 +312,37 @@ class PluginAPI:
     @property
     def plugin_name(self) -> str:
         return self._state.manifest.name
+
+    # ---- session-scoped writes ----------------------------------
+
+    def write_session_attachment(
+        self,
+        tool_name: str,
+        content: str | bytes,
+        suffix: str = "",
+    ) -> Path | None:
+        """Write to the current session's attachments dir.
+
+        Returns ``None`` if no session is active (e.g. the bench
+        harness or a no-session test run). Plugins should fall back
+        gracefully — render inline-only when the path is ``None``.
+
+        Most plugins should prefer returning
+        ``Attachment(content=..., inline_text=..., suffix=...)`` from
+        a tool — the agent's render path writes the file *and* glues
+        the inline rendering with the ``[also saved: <path>]`` footer
+        in one shot. Use this method directly when the plugin wants
+        explicit control over file layout (e.g. multiple files per
+        call) or wants to write before constructing the inline
+        rendering.
+        """
+        loader = self._loader
+        if loader is None:
+            return None
+        session = loader.session
+        if session is None:
+            return None
+        return session.write_attachment(tool_name, content, suffix)
 
     # ---- registration -------------------------------------------
 
@@ -865,6 +905,20 @@ class LoadedPlugins:
     _resolved_providers: dict[str, _RegisteredProvider] = field(
         default_factory=dict
     )
+    # Active session for plugin-side writes via
+    # `PluginAPI.write_session_attachment`. The agent's bootstrap
+    # constructs the session after `load()` returns, then calls
+    # `bind_session(session)` to populate this. Stays `None` in
+    # bench / no-session contexts; plugins fall back to inline-only.
+    session: Any | None = None
+
+    def bind_session(self, session: Any | None) -> None:
+        """Attach the active Session so `PluginAPI.write_session_attachment`
+        can resolve a path. Called once by the agent bootstrap after
+        load() returns and the session is constructed; stays unset in
+        contexts that don't have a session (the bench harness, certain
+        test fixtures)."""
+        self.session = session
 
     def tools(self) -> Mapping[str, tuple[str, Callable]]:
         """Effective tool name → (plugin_name, fn) after conflict
@@ -1164,7 +1218,7 @@ def load(*, is_subagent: bool = False) -> LoadedPlugins:
             )
             continue
         state = _PluginState(manifest=record.manifest)
-        api = PluginAPI(state)
+        api = PluginAPI(state, loader=loaded)
         try:
             register_fn(api)
         except Exception:

@@ -956,6 +956,109 @@ def test_insert_index_bullet_unit() -> None:
     print("✓ _insert_index_bullet: placement edge cases")
 
 
+def test_write_session_attachment_no_session() -> None:
+    """`PluginAPI.write_session_attachment` returns None when no session
+    has been bound. Plugins fall back to inline-only rendering in this
+    branch (bench harness, certain test fixtures)."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        plugin_py = (
+            "_state = {'path': 'unset'}\n"
+            "def get_state(): return _state\n"
+            "def register(api):\n"
+            "    def go() -> str:\n"
+            '        """Smoke: try to write."""\n'
+            '        path = api.write_session_attachment(\n'
+            '            "go", "side-data", suffix=".json"\n'
+            "        )\n"
+            "        _state['path'] = path\n"
+            "        return 'ok'\n"
+            '    api.register_tool("go", go)\n'
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="wsa-none",
+            name="wsa-none",
+            provides_tools=["go"],
+            plugin_py=plugin_py,
+        )
+        loaded = plugins_mod.load()
+        # No bind_session() call → loader.session is None.
+        _, fn = loaded.tools()["go"]
+        assert fn() == "ok"
+        import sys
+        plugin_module = next(
+            mod
+            for mod_name, mod in sys.modules.items()
+            if mod_name.startswith("pyagent_plugin_wsa_none")
+        )
+        assert plugin_module.get_state()["path"] is None, (
+            "expected None when no session is bound"
+        )
+        print("✓ write_session_attachment returns None with no bound session")
+    finally:
+        restore()
+
+
+def test_write_session_attachment_with_session() -> None:
+    """After `bind_session(session)`, `write_session_attachment` writes
+    bytes into the session's attachments dir and returns the Path."""
+    from pyagent.session import Session
+
+    cfg, restore = _isolated_config_dir()
+    try:
+        plugin_py = (
+            "_state = {'path': 'unset'}\n"
+            "def get_state(): return _state\n"
+            "def register(api):\n"
+            "    def go() -> str:\n"
+            '        """Smoke: write side-data."""\n'
+            '        p = api.write_session_attachment(\n'
+            '            "go", \'{"k": 1}\', suffix=".json"\n'
+            "        )\n"
+            "        _state['path'] = p\n"
+            "        return 'ok'\n"
+            '    api.register_tool("go", go)\n'
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="wsa-real",
+            name="wsa-real",
+            provides_tools=["go"],
+            plugin_py=plugin_py,
+        )
+        loaded = plugins_mod.load()
+        sess_root = Path(tempfile.mkdtemp(prefix="pyagent-wsa-"))
+        try:
+            session = Session(session_id="t", root=sess_root)
+            session._ensure_dirs()
+            loaded.bind_session(session)
+
+            _, fn = loaded.tools()["go"]
+            assert fn() == "ok"
+
+            import sys
+            plugin_module = next(
+                mod
+                for mod_name, mod in sys.modules.items()
+                if mod_name.startswith("pyagent_plugin_wsa_real")
+            )
+            saved = plugin_module.get_state()["path"]
+            assert saved is not None, "expected a Path"
+            assert saved.exists(), saved
+            assert saved.parent == session.attachments_dir, saved
+            assert saved.read_text() == '{"k": 1}'
+            assert saved.suffix == ".json"
+            print(
+                f"✓ write_session_attachment with session: "
+                f"wrote {saved.stat().st_size} bytes to {saved.name}"
+            )
+        finally:
+            shutil.rmtree(sess_root, ignore_errors=True)
+    finally:
+        restore()
+
+
 def test_graceful_degradation_when_memory_disabled() -> None:
     """With built_in_plugins_enabled=[], the agent has no ledger
     tools and no ledger prose, but its declared_tool_provenance
@@ -1010,6 +1113,8 @@ def main() -> None:
     test_memory_vector_recall()
     test_add_memory_tool()
     test_insert_index_bullet_unit()
+    test_write_session_attachment_no_session()
+    test_write_session_attachment_with_session()
     test_graceful_degradation_when_memory_disabled()
     print("\nALL CHECKS PASSED")
 
