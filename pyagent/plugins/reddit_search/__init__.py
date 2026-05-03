@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,6 +42,12 @@ from typing import Any
 from pyagent.session import Attachment
 
 logger = logging.getLogger(__name__)
+
+
+# Reddit subreddit names: alphanumeric + underscore, 1-21 chars.
+# Validating up front catches typos like "Python/comments/abc" that
+# would otherwise produce a 404 URL after path concatenation.
+_SUBREDDIT_RE = re.compile(r"^[A-Za-z0-9_]{1,21}$")
 
 
 _DEFAULT_TIMEOUT_S = 10
@@ -311,6 +318,11 @@ def register(api):
                     f"set, got {subreddit!r}>"
                 )
             subreddit = subreddit.strip().lstrip("/").removeprefix("r/")
+            if not _SUBREDDIT_RE.match(subreddit):
+                return (
+                    f"<error: subreddit must be alphanumeric / "
+                    f"underscore, max 21 chars; got {subreddit!r}>"
+                )
         if time_window not in _VALID_TIME_WINDOWS:
             return (
                 f"<error: time_window must be one of "
@@ -339,10 +351,13 @@ def register(api):
             )
         except urllib.error.HTTPError as e:
             if e.code == 429:
+                # 429 from Reddit usually means pacing or OAuth, not
+                # User-Agent shape — earlier wording overstated the
+                # UA fix per #94 review.
                 return (
                     f"<reddit-search error: rate limited (HTTP 429); "
-                    f"pause and try again later — set a more "
-                    f"identifying user_agent in config if persistent>"
+                    f"back off — persistent 429s usually need pacing "
+                    f"or OAuth, not user_agent changes>"
                 )
             return f"<reddit-search error: HTTP {e.code}: {e.reason}>"
         except urllib.error.URLError as e:

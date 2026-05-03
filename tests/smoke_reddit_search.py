@@ -282,7 +282,24 @@ def _check_validation_paths() -> None:
     assert bad_window.startswith("<error: time_window must be one of"), bad_window
     bad_sort = reddit_search("hi", sort="confusion")
     assert bad_sort.startswith("<error: sort must be one of"), bad_sort
-    print("✓ validation: empty / bad n / bad subreddit / bad window / bad sort")
+    # Subreddit shape validation — typos like "Python/comments/abc"
+    # used to silently produce a 404 URL. Reject up front per #94 review.
+    bad_shape = reddit_search("hi", subreddit="Python/comments/abc")
+    assert bad_shape.startswith(
+        "<error: subreddit must be alphanumeric"
+    ), bad_shape
+    bad_long = reddit_search("hi", subreddit="x" * 22)
+    assert bad_long.startswith(
+        "<error: subreddit must be alphanumeric"
+    ), bad_long
+    bad_punct = reddit_search("hi", subreddit="r-with-dashes")
+    assert bad_punct.startswith(
+        "<error: subreddit must be alphanumeric"
+    ), bad_punct
+    print(
+        "✓ validation: empty / bad n / bad subreddit / bad window / "
+        "bad sort / bad subreddit-shape"
+    )
 
 
 def _check_subreddit_normalization() -> None:
@@ -322,6 +339,12 @@ def _check_http_failures_translate() -> None:
         out = reddit_search("anything")
     assert out.startswith("<reddit-search error: rate limited"), out
     assert "429" in out, out
+    # Message wording per #94 review: drop the misleading
+    # "set a more identifying user_agent" suggestion. New wording
+    # explicitly says UA *isn't* the fix, so we assert on the
+    # corrective shape, not on the literal token "user_agent".
+    assert "set a more identifying" not in out, out
+    assert "pacing or OAuth" in out, out
 
     def _http_500(*a, **kw):
         raise urllib.error.HTTPError(

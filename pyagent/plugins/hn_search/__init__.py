@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -43,17 +44,31 @@ _DEFAULT_TIMEOUT_S = 10
 _DEFAULT_SAVE_STRUCTURED = True
 _MAX_RESULTS = 50  # Algolia's per-page max; HN search results are short, no need to cap lower
 _VALID_KINDS = {"story", "comment", "poll", "any"}
-# Algolia "search by date" path narrows time windows. Map our
-# user-facing windows to (endpoint_path, numericFilters) pairs.
-_TIME_WINDOW_FILTERS: dict[str, str] = {
-    "all": "",
-    "hour": "created_at_i>now-1h",
-    "day": "created_at_i>now-1d",
-    "week": "created_at_i>now-1w",
-    "month": "created_at_i>now-1M",
-    "year": "created_at_i>now-1y",
+# Time-window seconds. Algolia's numericFilters take literal numeric
+# epochs, NOT relative-time strings — earlier `now-1d`-style values
+# returned HTTP 400 and silently broke every non-`all` filter
+# (caught in #94 review). The filter is computed at call time as
+# ``int(time.time()) - <seconds>`` so the agent always asks about
+# "the last N from this moment." 0 means "no filter."
+_TIME_WINDOW_SECONDS: dict[str, int] = {
+    "all": 0,
+    "hour": 3600,
+    "day": 86400,
+    "week": 604800,
+    "month": 2592000,    # 30 days, by convention
+    "year": 31536000,    # 365 days
 }
-_VALID_TIME_WINDOWS = set(_TIME_WINDOW_FILTERS.keys())
+_VALID_TIME_WINDOWS = set(_TIME_WINDOW_SECONDS.keys())
+
+
+def _time_window_filter(window: str) -> str:
+    """Build the Algolia ``created_at_i>EPOCH`` filter for a time
+    window. Returns ``""`` for ``all`` (skip the filter entirely)."""
+    seconds = _TIME_WINDOW_SECONDS.get(window, 0)
+    if seconds <= 0:
+        return ""
+    cutoff = int(time.time()) - seconds
+    return f"created_at_i>{cutoff}"
 
 
 @dataclass(frozen=True)
@@ -114,23 +129,20 @@ def _build_url(
     min_points: int | None,
 ) -> str:
     base = "https://hn.algolia.com/api/v1/search"
-    filters: list[str] = []
-    if kind != "any":
-        # tag values: story, comment, poll, pollopt, show_hn, ask_hn,
-        # front_page, job, user
-        filters.append(f"tags={kind}")
-    numeric: list[str] = []
-    if min_points is not None and min_points > 0:
-        numeric.append(f"points>={min_points}")
-    win = _TIME_WINDOW_FILTERS.get(time_window, "")
-    if win:
-        numeric.append(win)
     params: dict[str, str] = {
         "query": query,
         "hitsPerPage": str(n),
     }
-    if filters:
-        params["tags"] = ",".join(f.split("=", 1)[1] for f in filters)
+    # Algolia tag values: story, comment, poll, pollopt, show_hn,
+    # ask_hn, front_page, job, user. ``any`` removes the filter.
+    if kind != "any":
+        params["tags"] = kind
+    numeric: list[str] = []
+    if min_points is not None and min_points > 0:
+        numeric.append(f"points>={min_points}")
+    win = _time_window_filter(time_window)
+    if win:
+        numeric.append(win)
     if numeric:
         params["numericFilters"] = ",".join(numeric)
     return f"{base}?{urllib.parse.urlencode(params)}"

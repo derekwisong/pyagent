@@ -54,15 +54,25 @@ deliverable. ``mainfont`` accepts any installed system font — pick
 one the platform actually has (DejaVu Sans is a safe default on
 Linux; ``Helvetica`` on macOS).
 
-### Academic — LaTeX styling, two-column-friendly
+### Academic — LaTeX styling with explicit document-class settings
 
 ```
-pandoc <input.md> -o <output.pdf> --pdf-engine=pdflatex
+pandoc <input.md> -o <output.pdf> \
+    --pdf-engine=pdflatex \
+    -V documentclass=article \
+    -V geometry:margin=1in \
+    -V fontsize=11pt \
+    -V linestretch=1.15
 ```
 
-Crisp serif typography, justified text, classic LaTeX article look.
-Use for research writeups, papers, anything where the user expects
-academic formatting.
+Crisp serif typography, justified text, classic LaTeX article look
+with comfortable line spacing and standard margins. Use for research
+writeups, papers, anything where the user expects formal formatting.
+The default invocation also lands on pdflatex on most platforms;
+this one differs by pinning ``documentclass``, ``geometry``,
+``fontsize``, and ``linestretch`` so the result is reproducible
+across machines instead of inheriting whatever defaults the local
+pandoc + LaTeX install ships with.
 
 ## Where to save the output
 

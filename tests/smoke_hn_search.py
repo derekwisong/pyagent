@@ -167,6 +167,41 @@ def _check_parse_hits_tolerates_weird_payloads() -> None:
     print("✓ _parse_hits: tolerates missing fields; type tag picked correctly")
 
 
+def _check_parse_hits_type_tag_precedence() -> None:
+    """Lock the chosen precedence on `_tags = [story, ask_hn, ...]`.
+    The first non-author/non-id tag wins — currently `story` over
+    `ask_hn`. If that flips, the smoke fails loudly and the reviewer
+    can decide whether the new precedence is intentional."""
+    payload = {
+        "hits": [
+            {
+                "title": "Ask HN: …",
+                "objectID": "1",
+                "_tags": ["story", "ask_hn", "author_a", "story_1"],
+            },
+            {
+                "title": "Show HN: …",
+                "objectID": "2",
+                "_tags": ["story", "show_hn", "author_b", "story_2"],
+            },
+            {
+                "title": "Job posting",
+                "objectID": "3",
+                "_tags": ["job", "author_c"],
+            },
+        ]
+    }
+    stories = _parse_hits(payload)
+    # `story` precedes `ask_hn` / `show_hn` in the list → it wins.
+    # That's the chosen design: every Ask/Show HN is fundamentally a
+    # story; the kind tag is what `kind=story` filtered on. If a
+    # consumer wanted to differentiate, they'd inspect the title.
+    assert stories[0].type == "story", stories[0]
+    assert stories[1].type == "story", stories[1]
+    assert stories[2].type == "job", stories[2]
+    print("✓ _parse_hits: type precedence — story wins over ask_hn/show_hn")
+
+
 def _check_url_builder() -> None:
     url = _build_url(
         "postgres sqlite", n=10, kind="story", time_window="all", min_points=None,
@@ -178,14 +213,41 @@ def _check_url_builder() -> None:
     # No min_points and time_window=all → no numericFilters.
     assert "numericFilters" not in url, url
 
-    url = _build_url("rust", n=5, kind="any", time_window="month", min_points=50)
+    # Mock time so the epoch cutoff is deterministic.
+    fake_now = 1_750_000_000  # arbitrary fixed instant
+    with mock.patch.object(hn_mod.time, "time", return_value=fake_now):
+        url = _build_url("rust", n=5, kind="any", time_window="month", min_points=50)
     assert "hitsPerPage=5" in url, url
     # kind=any drops the tags filter.
     assert "tags=story" not in url, url
     assert "numericFilters" in url, url
     assert "points%3E%3D50" in url, url  # urlencoded ">=50"
-    assert "created_at_i%3Enow-1M" in url, url
-    print("✓ URL builder: kind / time_window / min_points all flow through")
+    # NEW: time window resolves to a literal numeric epoch (not the
+    # broken `now-1M` syntax that Algolia rejects with HTTP 400).
+    expected_cutoff = fake_now - 2_592_000  # month = 30 days
+    assert f"created_at_i%3E{expected_cutoff}" in url, url
+    assert "now-" not in url, (
+        "regression: time window must resolve to a literal epoch, "
+        "not the relative-time string Algolia rejects"
+    )
+    print("✓ URL builder: kind / time_window (numeric epoch) / min_points flow through")
+
+
+def _check_time_window_filter_helper() -> None:
+    """`_time_window_filter` produces literal-epoch filters that
+    Algolia accepts. Locks in the #94 review fix — the previous
+    `now-1d`-style strings returned HTTP 400 from Algolia."""
+    fake_now = 1_750_000_000
+    with mock.patch.object(hn_mod.time, "time", return_value=fake_now):
+        assert hn_mod._time_window_filter("all") == ""
+        assert hn_mod._time_window_filter("hour") == f"created_at_i>{fake_now - 3600}"
+        assert hn_mod._time_window_filter("day") == f"created_at_i>{fake_now - 86400}"
+        assert hn_mod._time_window_filter("week") == f"created_at_i>{fake_now - 604800}"
+        assert hn_mod._time_window_filter("month") == f"created_at_i>{fake_now - 2_592_000}"
+        assert hn_mod._time_window_filter("year") == f"created_at_i>{fake_now - 31_536_000}"
+        # Unknown window → empty (defensive; the tool layer validates first)
+        assert hn_mod._time_window_filter("century") == ""
+    print("✓ time_window: produces literal numeric epochs Algolia accepts")
 
 
 def _check_tool_returns_attachment() -> None:
@@ -321,7 +383,9 @@ def main() -> None:
     _check_format_results()
     _check_format_results_empty()
     _check_parse_hits_tolerates_weird_payloads()
+    _check_parse_hits_type_tag_precedence()
     _check_url_builder()
+    _check_time_window_filter_helper()
     _check_tool_returns_attachment()
     _check_save_structured_disabled_returns_string()
     _check_empty_results_returns_string()
