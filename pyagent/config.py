@@ -59,13 +59,19 @@ LOCAL_CONFIG_DIR = Path(".pyagent")
 
 DEFAULTS: dict[str, Any] = {
     "default_model": "",
-    "built_in_skills_enabled": ["write-skill", "write-plugin"],
+    "built_in_skills_enabled": [
+        "write-skill",
+        "write-plugin",
+        "pdf-from-markdown",
+    ],
     "built_in_plugins_enabled": [
         "memory-markdown",
         "memory-vector",
         "html-tools",
         "code-mapper",
         "web-search",
+        "reddit-search",
+        "hn-search",
         "claude-code-cli",
         "ollama",
         "echo-plugin",

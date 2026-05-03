@@ -1,0 +1,25 @@
+name = "reddit-search"
+version = "0.1.0"
+description = "Search Reddit posts via the public reddit.com/search.json endpoint."
+api_version = "1"
+
+# One stateless tool:
+#
+#   reddit_search(query, n=10, subreddit=None, time_window="all", sort="relevance")
+#       Search Reddit. Returns the same shape as web_search:
+#       Attachment(inline_text=<markdown summary>, content=<JSON list>)
+#       so the agent gets a human view inline AND the structured
+#       result for chaining via extract_doc / future tool composition.
+#
+# Reddit's search endpoint is public — no OAuth needed, no API key
+# — but it gates anonymous traffic on a sensible User-Agent. The
+# plugin sets a UA identifying pyagent. If Reddit rate-limits us,
+# the request raises and the wrapper surfaces the standard
+# <search error: ...> markers.
+
+[provides]
+tools = ["reddit_search"]
+
+# Stateless and read-only — fine to load in subagents.
+[load]
+in_subagents = true
