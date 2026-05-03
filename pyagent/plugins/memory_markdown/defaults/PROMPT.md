@@ -49,9 +49,31 @@ across the filesystem.
     file="filename.md")` once you've spotted it in the index or
     located it with `recall_memory(query)`.
 
-  Pick filenames that read like the topic (`stack_choices.md`,
-  `client_naming_convention.md`); the hook beside the link is what
-  future-you reads when deciding whether to fetch.
+  **Filenames are search-friendly** — `recall_memory` embeds the
+  filename's tokens alongside the title and hook, so descriptive
+  filenames pull their weight at recall time. Use lowercase
+  snake_case ASCII with the `.md` suffix
+  (`stack_choices.md`, `client_naming_convention.md`,
+  `incident_2026_04_22_payment_pool.md`) — `add_memory` rejects
+  anything else. Compound names age better than bare topics:
+  `python_style.md` survives the next "style.md" attempt.
+
+  **Hooks drive recall accuracy.** The hook is the line beside
+  the link in the index, and it's what future-you (or `recall_memory`)
+  reads to decide whether to fetch. A good hook:
+  - Names the *problem* the memory solves, not the solution. "Why
+    we picked uv over poetry" beats "Notes on uv".
+  - Uses words future-you would search for. If the memory is about
+    a specific library, function, error code, or service — say so
+    by name. Distinctive tokens in the hook (`uv`, `pgbouncer`,
+    `429-from-Algolia`) drive recall when general phrasing
+    misses.
+  - Stays under ~120 chars. Pointers in an index that scrolls
+    on the prompt should be a glance, not a read.
+
+  An empty hook is allowed but it costs you — recall has only
+  the title to work with. Write the hook unless the title alone
+  is genuinely self-explanatory.
 - **`read_ledger` + `write_ledger` are for consolidation, not
   creation.** Reach for them when you're *editing* what's already
   there — revising a body that's gone stale, pruning a memory you

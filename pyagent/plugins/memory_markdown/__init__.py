@@ -21,17 +21,28 @@ Companion files in this directory:
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
 _LEDGERS = {"USER": "USER.md", "MEMORY": "MEMORY.md"}
 _MEMORIES_DIRNAME = "memories"
 
+# Memory filenames must be lowercase snake_case with a .md suffix.
+# Why this strict: filenames are now embedded into recall_memory's
+# searchable text (memory_vector._filename_search_terms), so a
+# consistent shape keeps recall predictable. Also stops the agent
+# from drifting into mixed-case or spaced filenames that look
+# inconsistent in the index.
+_FILENAME_RE = re.compile(r"^[a-z0-9][a-z0-9_]*\.md$")
+
 
 def _validate_memory_filename(file: str) -> str | None:
     """Return None if `file` is a safe bare memory filename, else an
     error string suitable to return to the LLM. Rejects path traversal,
-    absolute paths, hidden files, and non-`.md` extensions."""
+    absolute paths, hidden files, non-`.md` extensions, and anything
+    that isn't lowercase snake_case + ASCII (filenames feed into
+    recall search; convention keeps results predictable)."""
     if not file:
         return "<memory filename is empty>"
     p = Path(file)
@@ -41,6 +52,12 @@ def _validate_memory_filename(file: str) -> str | None:
         return f"<invalid memory filename: {file!r}>"
     if not file.endswith(".md"):
         return f"<memory filename must end with .md: {file!r}>"
+    if not _FILENAME_RE.match(file):
+        return (
+            f"<memory filename must be lowercase snake_case ASCII "
+            f"(matching {_FILENAME_RE.pattern!r}): {file!r}; "
+            f"e.g. 'stack_choices.md', 'client_naming_convention.md'>"
+        )
     return None
 
 

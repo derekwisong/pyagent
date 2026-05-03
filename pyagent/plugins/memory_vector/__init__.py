@@ -33,6 +33,20 @@ _INDEX_LINE_RE = re.compile(
     r"(?:\s*[—\-:]\s*(?P<hook>.+))?\s*$"
 )
 
+
+def _filename_search_terms(filename: str) -> str:
+    """Convert a memory filename into search-friendly tokens.
+
+    ``stack_choices.md`` → ``stack choices``. The ``.md`` suffix
+    and ``_`` / ``-`` separators carry no semantic content;
+    replacing them with spaces lets the embedding pick up the
+    descriptive tokens the agent chose when naming the file. A
+    query like "stack choices" now scores against the filename
+    even when the title and hook use different wording.
+    """
+    stem = filename.removesuffix(".md")
+    return stem.replace("_", " ").replace("-", " ").strip()
+
 # Module-level cache so multiple recalls in one session don't reload.
 _model = None
 
@@ -97,19 +111,36 @@ def register(api):
 
     def _gather_chunks() -> list[dict]:
         """Walk MEMORY.md + memories/*.md; return list of chunks
-        ready to embed. Each chunk has {kind, filename, text}."""
+        ready to embed. Each chunk has {kind, filename, text}.
+
+        Filename tokens are prepended to both hook and body chunks
+        so descriptive filenames the agent chose (``stack_choices.md``
+        → "stack choices") contribute to recall match — searches
+        for the filename's words now hit even when the title and
+        hook use different wording.
+        """
         chunks: list[dict] = []
         for _category, title, filename, hook in _parse_index_entries():
-            text = f"{title}: {hook}" if hook else title
+            fn_terms = _filename_search_terms(filename)
+            text = (
+                f"{fn_terms} {title}: {hook}"
+                if hook
+                else f"{fn_terms} {title}"
+            )
             chunks.append({"kind": "hook", "filename": filename, "text": text})
         memories_dir = source / "memories"
         if memories_dir.exists():
             for body_path in sorted(memories_dir.glob("*.md")):
+                fn_terms = _filename_search_terms(body_path.name)
+                # Filename tokens prepended on their own line so the
+                # body text is preserved as-is for the embedder; the
+                # double newline keeps them as a "topic anchor"
+                # rather than fusing with the body's first sentence.
                 chunks.append(
                     {
                         "kind": "body",
                         "filename": body_path.name,
-                        "text": body_path.read_text(),
+                        "text": f"{fn_terms}\n\n{body_path.read_text()}",
                     }
                 )
         return chunks
