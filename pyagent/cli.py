@@ -607,6 +607,18 @@ def _update_agents_state(
         for k in ("input", "output", "cache_creation", "cache_read"):
             tokens[k] = tokens.get(k, 0) + int(event.get(k, 0) or 0)
         return
+    if kind == "context_status":
+        # Root-emitted (subagents could too in principle, but the
+        # warning that matters for footer real estate is the root's
+        # context). Stash the latest reading; `_context_segment`
+        # reads from here on every footer redraw.
+        slot = agents.setdefault(key, {"status": "thinking"})
+        slot["context"] = {
+            "pct": int(event.get("pct", 0) or 0),
+            "used": int(event.get("used", 0) or 0),
+            "window": int(event.get("window", 0) or 0),
+        }
+        return
 
 
 def _build_input_history(conversation: list[Any]) -> InMemoryHistory:
@@ -742,6 +754,39 @@ def _prompt_message(busy: bool) -> ANSI:
 
 
 _PERMS_HEAD_PREVIEW_MAX = 30
+
+
+_CTX_WARN_PCT = 80
+_CTX_DANGER_PCT = 95
+
+
+def _context_segment(agents: dict) -> str:
+    """Render the footer's context-utilization segment (' · ctx: NN%')
+    or empty.
+
+    Reads the most recent `context_status` reading stashed on the
+    root agent by `_update_agents_state`. Hidden when no reading
+    has arrived yet (first turn before usage flows) or when the
+    model's window is unknown (stub clients, older Ollama). Color
+    escalates yellow at 80%, red at 95% — matches the chat info
+    thresholds emitted by `agent_proc._emit_context_status` so the
+    footer signal and the chat warning are visually consistent.
+    """
+    slot = agents.get("root")
+    if not isinstance(slot, dict):
+        return ""
+    ctx = slot.get("context")
+    if not isinstance(ctx, dict):
+        return ""
+    window = int(ctx.get("window", 0) or 0)
+    if window <= 0:
+        return ""
+    pct = int(ctx.get("pct", 0) or 0)
+    if pct >= _CTX_DANGER_PCT:
+        return f" · [red]ctx: {pct}%[/red]"
+    if pct >= _CTX_WARN_PCT:
+        return f" · [yellow]ctx: {pct}%[/yellow]"
+    return f" · ctx: {pct}%"
 
 
 def _perms_segment(
@@ -957,6 +1002,12 @@ def _compose_footer(
         if not drop_msgs:
             msgs_text, _ = _msgs_segment(agents, drop_severity_tag=drop_msgs_severity)
             center += msgs_text
+        # Context utilization sits at the tail of the center zone:
+        # less load-bearing than checklist/perms/msgs (those are
+        # action items), but still worth a glance. No degradation
+        # path — it's a single short atom that drops itself when the
+        # window is unknown.
+        center += _context_segment(agents)
         return center
 
     # Degradation pipeline. Each step makes one targeted concession
@@ -1063,7 +1114,10 @@ def _compose_footer(
         else:
             msgs_text, sev = _msgs_segment(agents, drop_severity_tag=dms)
             msgs_markup = _style_msgs(msgs_text, sev) if msgs_text else ""
-        left_markup = f"{center_markup}{perms_markup}{msgs_markup}"
+        # Context segment carries its own (yellow / red) styling at
+        # threshold so we don't pipe it through `_style_left`.
+        ctx_markup = _context_segment(agents)
+        left_markup = f"{center_markup}{perms_markup}{msgs_markup}{ctx_markup}"
 
     left_ansi = _markup_to_ansi(left_markup, max(cols, 1))
     left_w = _visible_width(left_ansi)

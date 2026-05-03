@@ -29,6 +29,12 @@ class EchoClient:
         self.model = model
         self.provider_model = f"pyagent/{model}"
 
+    # Stub clients have no real context budget; reporting 0 makes the
+    # CLI's context-warning machinery treat them as "window unknown"
+    # and skip the footer segment entirely. They're for harness/UX
+    # testing where the budget question doesn't apply.
+    context_window: int = 0
+
     def respond(
         self,
         conversation: list[dict[str, Any]],
@@ -101,6 +107,8 @@ class LoremClient:
     def __init__(self, model: str = "loremipsum") -> None:
         self.model = model
         self.provider_model = f"pyagent/{model}"
+
+    context_window: int = 0
 
     def respond(
         self,

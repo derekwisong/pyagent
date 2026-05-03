@@ -7,6 +7,18 @@ from google import genai
 from google.genai import types
 
 
+# Hardcoded context windows per model. Gemini 2.5 family ships with
+# 2M tokens; Gemini 2.0 has the older 1M ceiling. Default to the
+# more conservative 1M for any unknown model so we don't over-promise
+# on a name we haven't catalogued.
+_CONTEXT_WINDOWS = {
+    "gemini-2.5-flash": 2_000_000,
+    "gemini-2.5-pro": 2_000_000,
+    "gemini-2.0-flash": 1_000_000,
+}
+_DEFAULT_CONTEXT_WINDOW = 1_000_000
+
+
 def _to_plain(value: Any) -> Any:
     """Recursively coerce protobuf composite types (MapComposite,
     RepeatedComposite) into plain dict/list so json.dumps doesn't choke
@@ -46,6 +58,13 @@ class GeminiClient:
         if not key:
             raise ValueError("GEMINI_API_KEY (or GOOGLE_API_KEY) is not set")
         self._client = genai.Client(api_key=key)
+
+    @property
+    def context_window(self) -> int:
+        """Maximum prompt-token capacity for this model. See module
+        docstring for the mapping; falls back to the conservative
+        1M default for unknown model names."""
+        return _CONTEXT_WINDOWS.get(self.model, _DEFAULT_CONTEXT_WINDOW)
 
     def respond(
         self,

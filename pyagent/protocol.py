@@ -78,6 +78,16 @@ agent → CLI
         accumulates these per-agent in its `agents_state` dict and
         renders the running total (and a USD cost estimate when
         the model is in the pricing table) in the status footer.
+  - context_status {pct: int, used: int, window: int}
+        Current context utilization, emitted after every LLM call
+        right after `usage`. `pct` is `used / window * 100` clamped
+        to [0, 100]; `used` is the most recent turn's `usage.input`;
+        `window` is the model's hardcoded or backend-reported
+        context size. Hidden by the CLI when `window` is 0 (stub
+        clients, older Ollama servers without `model_info`). On
+        crossing a 60/80/95% threshold for the first time this
+        session, the agent_proc also emits a corresponding `info`
+        event so the warning lands in the chat surface.
   - checklist {tasks: list[dict]}
         Snapshot of the agent's current task list. Emitted after
         every add_task / update_task call. `tasks` is a list of
