@@ -1,0 +1,26 @@
+name = "doc-tools"
+version = "0.1.0"
+description = "Sub-LLM document tools: extract structured data, summarize prose."
+api_version = "1"
+
+# Two stateless tools that wrap a single sub-LLM call:
+#
+#   extract(path, query, schema=None, model=None)
+#       Pull structured fields / lists / tables from a document.
+#       Use when the agent wants specific information out of a doc
+#       larger than ~4KB, where read_file + reasoning would burn
+#       turns paginating through previews.
+#
+#   summarize(path, focus=None, max_chars=1500, model=None)
+#       Compress a document to prose. Same scale guidance.
+#
+# The configured model is a fixed default; per-call `model=` overrides
+# it. A fallback chain across providers is intentionally out of scope
+# for v0.1 — see the issue on doc_tools fallback for the design.
+
+[provides]
+tools = ["extract", "summarize"]
+
+# Stateless and read-only — fine to load in subagents.
+[load]
+in_subagents = true
