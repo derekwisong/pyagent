@@ -49,6 +49,22 @@ across the filesystem.
     file="filename.md")` once you've spotted it in the index or
     located it with `recall_memory(query)`.
 
+  **Categories: prefer existing over new.** Before picking a
+  `category`, scan the `## <heading>` lines already in MEMORY.md
+  (visible above your conversation; when 5+ categories exist a
+  one-line *Categories in use:* summary is rendered up top). Use
+  the closest existing heading rather than spawning a near-
+  duplicate; `add_memory` will refuse a close-but-not-equal new
+  category and point at the existing one. Common shapes that
+  recur across users: **Architecture** (system shape, deployment,
+  service boundaries), **Database** (schema, migrations, query
+  notes), **Style** (code conventions, formatting, idioms),
+  **Gotchas** (non-obvious failure modes worth remembering),
+  **Decisions** (the *why* behind a choice, especially the ones
+  that surprised future-you), **References** (links, dashboards,
+  channels). New categories are fine when nothing fits — but
+  ask "is this really not Decisions / Gotchas?" first.
+
   **Filenames are search-friendly** — `recall_memory` embeds the
   filename's tokens alongside the title and hook, so descriptive
   filenames pull their weight at recall time. Use lowercase
