@@ -20,14 +20,38 @@ topic toggle, etc.) lives in __init__.py.
 from __future__ import annotations
 
 import json
+import logging
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from typing import Sequence
+
+logger = logging.getLogger(__name__)
 
 
 _INSTANT_ANSWER_URL = "https://api.duckduckgo.com/"
 _USER_AGENT = "Mozilla/5.0 (compatible; pyagent-web-search)"
 _INSTANT_TIMEOUT = 10
+
+
+# Retry policy defaults. These are overridable via [plugins.web-search]
+# in config.toml — see web_search/__init__.py for the resolver.
+_DEFAULT_ATTEMPTS = 3
+_DEFAULT_BACKOFF_S: tuple[float, ...] = (1.0, 3.0)
+_DEFAULT_BACKEND = "auto"
+
+
+class SearchRateLimited(Exception):
+    """Raised when the upstream signals rate-limiting. Don't retry —
+    the agent should pause and / or change strategy."""
+
+
+class SearchBackoffExhausted(Exception):
+    """Raised when every retry attempt failed with retryable errors.
+    Distinct from a generic ``<search error: ...>`` so the agent can
+    reason about the failure mode (transient backend trouble vs.
+    programmer error)."""
 
 
 @dataclass(frozen=True)
@@ -61,29 +85,103 @@ class InstantAnswer:
     related: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
 
-def ddg_text_search(query: str, n: int = 10) -> list[SearchResult]:
-    """Run a DDG text search and return up to `n` results.
+def ddg_text_search(
+    query: str,
+    n: int = 10,
+    *,
+    attempts: int = _DEFAULT_ATTEMPTS,
+    backoff_s: Sequence[float] = _DEFAULT_BACKOFF_S,
+    backend: str = _DEFAULT_BACKEND,
+) -> list[SearchResult]:
+    """Run a DDG text search with retry/backoff; return up to `n` results.
 
-    Uses the `ddgs` library (DuckDuckGo HTML endpoint scraper). May
-    raise on network failure or parser breakage — callers translate
-    those into a tool-result error string rather than letting them
-    bubble to the agent loop.
+    Uses the `ddgs` library, which fans out across ~10 backend engines
+    (DuckDuckGo, Bing, Brave, Google, Yandex, Yahoo, Mojeek,
+    Wikipedia, Grokipedia) in a parallel ThreadPoolExecutor and
+    aggregates results. The library only raises when *every* engine
+    failed or returned empty. Each attempt re-shuffles the engine
+    order, so a retry effectively samples a different subset of
+    engines.
+
+    Retry behavior:
+      - ``RatelimitException`` → no retry. Raises ``SearchRateLimited``
+        immediately so the caller can surface a distinct marker.
+      - ``TimeoutException`` / generic ``DDGSException`` → retry with
+        backoff. After ``attempts-1`` failures, raises
+        ``SearchBackoffExhausted`` carrying the last error.
+      - Any other exception (programmer error, ImportError, etc.)
+        propagates as today — caller's catch-all handles them.
+
+    Args:
+        query: Search query.
+        n: Number of results (max applied upstream by caller).
+        attempts: Total attempts including the initial. ``1`` disables
+            retry. Defaults to 3 (initial + 2 retries).
+        backoff_s: Per-retry sleep durations. ``backoff_s[i]`` is the
+            sleep before attempt ``i+1`` (the (i+1)-th retry). Length
+            is expected to be ``attempts-1``; if shorter, the last
+            value is reused for any subsequent retries.
+        backend: Comma-delimited engine names or ``"auto"`` for the
+            full set. Defaults to ``"auto"``.
+
+    Returns:
+        A list of SearchResult dataclasses. Empty list means the
+        engines all returned no results (a successful empty result;
+        not a retried failure).
     """
     # Local import so an environment missing `ddgs` still loads the
     # plugin module (the tool will return a clean error when called).
     from ddgs import DDGS
+    from ddgs.exceptions import (
+        DDGSException,
+        RatelimitException,
+        TimeoutException,
+    )
 
-    results = DDGS().text(query, max_results=n)
-    out: list[SearchResult] = []
-    for r in results or []:
-        out.append(
-            SearchResult(
-                title=str(r.get("title") or "").strip(),
-                url=str(r.get("href") or "").strip(),
-                snippet=str(r.get("body") or "").strip(),
+    if attempts < 1:
+        attempts = 1
+
+    last_err: Exception | None = None
+    for i in range(attempts):
+        try:
+            results = DDGS().text(query, max_results=n, backend=backend)
+        except RatelimitException as e:
+            # Don't retry — the upstream is explicitly throttling.
+            # The caller surfaces a distinct marker so the agent can
+            # back off rather than re-fire the same query.
+            raise SearchRateLimited(str(e)) from e
+        except (TimeoutException, DDGSException) as e:
+            last_err = e
+            logger.info(
+                "web_search attempt %d/%d failed: %s", i + 1, attempts, e
             )
-        )
-    return out
+            if i < attempts - 1:
+                # Sleep before the next attempt. backoff_s shorter
+                # than attempts-1 reuses the last value.
+                if backoff_s:
+                    delay = backoff_s[min(i, len(backoff_s) - 1)]
+                else:
+                    delay = 0.0
+                if delay > 0:
+                    time.sleep(delay)
+            continue
+        else:
+            out: list[SearchResult] = []
+            for r in results or []:
+                out.append(
+                    SearchResult(
+                        title=str(r.get("title") or "").strip(),
+                        url=str(r.get("href") or "").strip(),
+                        snippet=str(r.get("body") or "").strip(),
+                    )
+                )
+            return out
+
+    # All attempts exhausted. last_err is set because we only land
+    # here if the loop body raised on every iteration.
+    raise SearchBackoffExhausted(
+        f"after {attempts} attempt(s): {last_err}"
+    )
 
 
 def _parse_instant_payload(data: dict) -> InstantAnswer:

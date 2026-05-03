@@ -14,6 +14,22 @@ than search-as-default — most queries the model thinks "I should
 search" can be answered from training data, and a network round trip
 costs the user real time and money.
 
+Configuration (all optional, all read at call time):
+
+  ``[plugins.web-search]`` table in pyagent's config TOML
+    ``retry_attempts`` — total attempts including the initial.
+        Defaults to 3 (initial + 2 retries). Set to 1 to disable
+        retry. The metasearch backend reshuffles engine order each
+        call, so a retry samples a different engine subset.
+    ``retry_backoff_s`` — list of per-retry sleep durations.
+        Defaults to ``[1.0, 3.0]`` for the standard 3-attempt run.
+        Length is expected to match ``retry_attempts - 1``; if
+        shorter, the last value is reused.
+    ``backend`` — comma-delimited engine names or ``"auto"`` for
+        the full set. Defaults to ``"auto"``. Use to pin to a known
+        subset (e.g. ``"duckduckgo,brave,yahoo,mojeek"``) if a
+        particular engine stays flaky.
+
 Lifted from the user-scope `web-search` skill at
 ~/.config/pyagent/skills/web-search/. The skill is left in place so
 older installs still work; the plugin shadows it in the catalog
@@ -22,6 +38,8 @@ because plugin tools call directly while skill scripts go through
 """
 
 from __future__ import annotations
+
+from typing import Sequence
 
 from pyagent.plugins.web_search import search as _search
 
@@ -32,7 +50,99 @@ from pyagent.plugins.web_search import search as _search
 _MAX_RESULTS = 25
 
 
+def _resolve_attempts(plugin_cfg: dict) -> int:
+    raw = plugin_cfg.get("retry_attempts")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+        return raw
+    return _search._DEFAULT_ATTEMPTS
+
+
+def _resolve_backoff_s(plugin_cfg: dict) -> Sequence[float]:
+    raw = plugin_cfg.get("retry_backoff_s")
+    if isinstance(raw, list) and raw:
+        clean: list[float] = []
+        for v in raw:
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0:
+                clean.append(float(v))
+        if clean:
+            return clean
+    return _search._DEFAULT_BACKOFF_S
+
+
+def _resolve_backend(plugin_cfg: dict) -> str:
+    raw = plugin_cfg.get("backend")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return _search._DEFAULT_BACKEND
+
+
+def _config_warnings(plugin_cfg: dict) -> list[str]:
+    """Sanity-check the [plugins.web-search] table at register time.
+
+    Bogus values still fall through to defaults via the resolvers — this
+    surfaces typos at startup so they don't sit silent. No network
+    probes; the default backend "auto" is intentionally not validated
+    against the live engine list since the ddgs library handles
+    unknown-backend fallback internally.
+    """
+    out: list[str] = []
+
+    if "retry_attempts" in plugin_cfg:
+        raw = plugin_cfg["retry_attempts"]
+        if not isinstance(raw, int) or isinstance(raw, bool):
+            out.append(
+                f"retry_attempts must be a positive integer, got "
+                f"{type(raw).__name__}: {raw!r} — using default "
+                f"{_search._DEFAULT_ATTEMPTS}"
+            )
+        elif raw < 1:
+            out.append(
+                f"retry_attempts must be >= 1, got {raw} — using "
+                f"default {_search._DEFAULT_ATTEMPTS}"
+            )
+
+    if "retry_backoff_s" in plugin_cfg:
+        raw = plugin_cfg["retry_backoff_s"]
+        if not isinstance(raw, list):
+            out.append(
+                f"retry_backoff_s must be a list of numbers, got "
+                f"{type(raw).__name__}: {raw!r} — using default "
+                f"{list(_search._DEFAULT_BACKOFF_S)}"
+            )
+        else:
+            bad = [
+                v for v in raw
+                if not isinstance(v, (int, float))
+                or isinstance(v, bool)
+                or v < 0
+            ]
+            if bad:
+                out.append(
+                    f"retry_backoff_s contains invalid entries "
+                    f"(must be non-negative numbers): {bad!r}"
+                )
+
+    if "backend" in plugin_cfg:
+        raw = plugin_cfg["backend"]
+        if not isinstance(raw, str):
+            out.append(
+                f"backend must be a string, got {type(raw).__name__}: "
+                f"{raw!r} — using default {_search._DEFAULT_BACKEND!r}"
+            )
+        elif not raw.strip():
+            out.append("backend is set but empty — using default 'auto'")
+
+    return out
+
+
 def register(api):
+    # Lightweight register-time validation of the [plugins.web-search]
+    # table. Bogus values still fall through to defaults at call time
+    # via the _resolve_* helpers — this is purely about surfacing
+    # config typos at startup instead of letting them sit silent.
+    for warning in _config_warnings(api.plugin_config or {}):
+        api.log("warning", warning)
+
     def web_search(query: str, n: int = 10) -> str:
         """Search the web via DuckDuckGo; return up to `n` results.
 
@@ -44,6 +154,14 @@ def register(api):
         `fetch_url` on the most promising URL rather than reading every
         snippet.
 
+        Transient backend failures are retried with backoff
+        automatically (default 3 attempts, 1s+3s backoff). Persistent
+        failures return distinct markers so you can branch on what
+        happened: ``rate limited`` (back off), ``backend unavailable``
+        (try a different query or fall back to ``fetch_url`` with a
+        known URL), or a generic ``<search error: ...>`` for
+        programmer/parser issues.
+
         Args:
             query: Search query. Plain text; DDG handles quoting and
                 operators.
@@ -52,9 +170,12 @@ def register(api):
 
         Returns:
             A markdown numbered list of `title — url` lines with
-            snippets. `<no results ...>` if DDG returned nothing;
-            `<search error: ...>` on network/parser failure. Large
-            outputs auto-offload via the standard tool-result path.
+            snippets. ``<no results ...>`` if every backend returned
+            empty; ``<search error: rate limited; ...>`` if the upstream
+            is explicitly throttling; ``<search error: backend
+            unavailable after N attempts; ...>`` if all retries failed
+            with transient errors; ``<search error: ...>`` for other
+            failures.
         """
         if not query or not query.strip():
             return "<query is empty>"
@@ -66,12 +187,34 @@ def register(api):
             return "<error: n must be >= 1>"
         if n_int > _MAX_RESULTS:
             n_int = _MAX_RESULTS
+
+        cfg = api.plugin_config or {}
+        attempts = _resolve_attempts(cfg)
+        backoff_s = _resolve_backoff_s(cfg)
+        backend = _resolve_backend(cfg)
+
         try:
-            results = _search.ddg_text_search(query, n=n_int)
+            results = _search.ddg_text_search(
+                query,
+                n=n_int,
+                attempts=attempts,
+                backoff_s=backoff_s,
+                backend=backend,
+            )
         except ImportError:
             return (
                 "<search error: ddgs package not installed — "
                 "run: pip install ddgs>"
+            )
+        except _search.SearchRateLimited as e:
+            return (
+                f"<search error: rate limited; pause and try again "
+                f"later ({e})>"
+            )
+        except _search.SearchBackoffExhausted as e:
+            return (
+                f"<search error: backend unavailable {e}; try a "
+                f"different query or use fetch_url with a known URL>"
             )
         except Exception as e:
             return f"<search error: {e}>"

@@ -1,6 +1,6 @@
 """End-to-end smoke for the web-search plugin.
 
-Four concerns:
+Concerns covered:
 
   1. **Plugin loads under the default config.** With "web-search" in
      `built_in_plugins_enabled`, `discover()` and `load()` produce
@@ -14,10 +14,20 @@ Four concerns:
      `<no instant answer ...>` marker; `related=True` appends
      related-topic links.
   4. **Tool wrappers translate exceptions and return string shape.**
-     The agent's auto-offload path expects strings; both tools must
-     return `str` on success and on every error path. A `web_search`
-     network failure becomes `<search error: ...>` rather than
-     bubbling out of the tool.
+     Both tools must return `str` on success and on every error path,
+     never raise into the agent loop.
+  5. **Retry / backoff classifies failures.** Transient
+     `DDGSException` / `TimeoutException` get retried with the
+     configured backoff (default ``[1.0, 3.0]``); `RatelimitException`
+     short-circuits with no retry; non-network exceptions skip the
+     retry loop entirely and hit the existing catch-all marker.
+  6. **Distinct error markers** — `<search error: rate limited; ...>`
+     vs. `<search error: backend unavailable after N attempts; ...>`
+     vs. the generic `<search error: ...>` so the agent can branch.
+  7. **Configuration flows through.** ``retry_attempts``,
+     ``retry_backoff_s``, and ``backend`` reach the DDGS call site;
+     bogus values produce register-time warnings but tools still
+     register and fall back to defaults.
 
 Run with:
 
@@ -32,7 +42,36 @@ from pathlib import Path
 from unittest import mock
 
 from pyagent import config as config_mod, paths as paths_mod, plugins
+from pyagent.plugins.web_search import register as web_search_register
 from pyagent.plugins.web_search import search as web_search_mod
+
+
+def _make_fake_api(plugin_config: dict | None = None) -> dict:
+    """Build a fake plugin API and register the web-search plugin
+    against it. Returns ``{"tools": {...}, "logs": [...], "plugin_config": ...}``.
+
+    The captured ``logs`` list lets register-time-warning checks
+    assert what the plugin emitted.
+    """
+    captured: dict = {
+        "tools": {},
+        "logs": [],
+        "plugin_config": plugin_config if plugin_config is not None else {},
+    }
+
+    class _FakeAPI:
+        @property
+        def plugin_config(self):
+            return captured["plugin_config"]
+
+        def register_tool(self, name, fn):
+            captured["tools"][name] = fn
+
+        def log(self, level, message):
+            captured["logs"].append((level, message))
+
+    web_search_register(_FakeAPI())
+    return captured
 
 
 _FIXTURE_RESULTS_RAW = [
@@ -186,19 +225,9 @@ def _check_plugin_loads_under_default_config() -> None:
 def _check_tool_wrapper_returns_string() -> None:
     """`web_search` returns str on success — no Attachment construction
     in the plugin (the auto-offload path handles large outputs)."""
-    # Re-register through a fake API so we can capture the tool fn.
-    captured: dict[str, callable] = {}
-
-    class _FakeAPI:
-        def register_tool(self, name, fn):
-            captured[name] = fn
-
-    from pyagent.plugins.web_search import register
-
-    register(_FakeAPI())
-    assert set(captured.keys()) == {"web_search", "web_search_instant"}, captured
-
-    web_search = captured["web_search"]
+    cap = _make_fake_api()
+    assert set(cap["tools"].keys()) == {"web_search", "web_search_instant"}, cap["tools"]
+    web_search = cap["tools"]["web_search"]
 
     fixture = [
         web_search_mod.SearchResult(
@@ -210,7 +239,13 @@ def _check_tool_wrapper_returns_string() -> None:
         web_search_mod, "ddg_text_search", return_value=fixture
     ) as m:
         out = web_search("python http", n=3)
-    m.assert_called_once_with("python http", n=3)
+    # The wrapper now passes retry/backoff/backend kwargs through —
+    # check the positional and the new kwargs ride together.
+    assert m.call_count == 1, m.call_args_list
+    args, kwargs = m.call_args
+    assert args == ("python http",), args
+    assert kwargs.get("n") == 3, kwargs
+    assert "attempts" in kwargs and "backoff_s" in kwargs and "backend" in kwargs, kwargs
     assert isinstance(out, str), type(out)
     assert "Best Python HTTP libraries 2025" in out, out
     print("✓ web_search tool returns str (auto-offload path)")
@@ -218,17 +253,9 @@ def _check_tool_wrapper_returns_string() -> None:
 
 def _check_tool_wrapper_translates_errors() -> None:
     """Network/parser failure → `<search error: ...>`, not a raise."""
-    captured: dict[str, callable] = {}
-
-    class _FakeAPI:
-        def register_tool(self, name, fn):
-            captured[name] = fn
-
-    from pyagent.plugins.web_search import register
-
-    register(_FakeAPI())
-    web_search = captured["web_search"]
-    web_search_instant = captured["web_search_instant"]
+    cap = _make_fake_api()
+    web_search = cap["tools"]["web_search"]
+    web_search_instant = cap["tools"]["web_search_instant"]
 
     def _boom(*a, **kw):
         raise RuntimeError("network down")
@@ -250,17 +277,9 @@ def _check_tool_wrapper_translates_errors() -> None:
 
 def _check_tool_wrapper_validates_inputs() -> None:
     """Empty query, bad `n` → tool-result error string, not a raise."""
-    captured: dict[str, callable] = {}
-
-    class _FakeAPI:
-        def register_tool(self, name, fn):
-            captured[name] = fn
-
-    from pyagent.plugins.web_search import register
-
-    register(_FakeAPI())
-    web_search = captured["web_search"]
-    web_search_instant = captured["web_search_instant"]
+    cap = _make_fake_api()
+    web_search = cap["tools"]["web_search"]
+    web_search_instant = cap["tools"]["web_search_instant"]
 
     assert web_search("") == "<query is empty>"
     assert web_search("   ") == "<query is empty>"
@@ -270,6 +289,244 @@ def _check_tool_wrapper_validates_inputs() -> None:
     bad_n2 = web_search("hi", n=0)
     assert bad_n2 == "<error: n must be >= 1>", bad_n2
     print("✓ tool wrappers reject empty query / bad n cleanly")
+
+
+# ---- Retry / backoff / classified-failure markers ----------------
+
+
+def _check_retry_succeeds_after_transient_failure() -> None:
+    """A single ``DDGSException`` then success: 2 calls, sleep once,
+    return the success markdown."""
+    from ddgs.exceptions import DDGSException
+
+    fixture_results = [
+        {"title": "ok", "href": "https://ok.example.com", "body": "ok body"}
+    ]
+
+    class _DDGS:
+        calls = 0
+
+        def text(self, query, max_results=10, backend="auto"):
+            type(self).calls += 1
+            if type(self).calls == 1:
+                raise DDGSException("transient: 502 from upstream")
+            return fixture_results
+
+    cap = _make_fake_api()
+    web_search = cap["tools"]["web_search"]
+
+    with mock.patch("ddgs.DDGS", _DDGS), mock.patch.object(
+        web_search_mod.time, "sleep"
+    ) as m_sleep:
+        out = web_search("anything")
+
+    assert _DDGS.calls == 2, f"expected 2 attempts, got {_DDGS.calls}"
+    assert m_sleep.call_count == 1, m_sleep.call_args_list
+    # Default backoff is (1.0, 3.0) — first retry sleeps 1.0s.
+    assert m_sleep.call_args == mock.call(1.0), m_sleep.call_args
+    assert "ok.example.com" in out, out
+    assert not out.startswith("<search error"), out
+    print("✓ retry: transient DDGSException → succeed on retry, slept 1.0s")
+
+
+def _check_retry_exhausted_marker() -> None:
+    """All attempts fail → distinct ``backend unavailable`` marker."""
+    from ddgs.exceptions import DDGSException
+
+    class _DDGS:
+        calls = 0
+
+        def text(self, query, max_results=10, backend="auto"):
+            type(self).calls += 1
+            raise DDGSException("upstream still flaking")
+
+    cap = _make_fake_api()
+    web_search = cap["tools"]["web_search"]
+
+    with mock.patch("ddgs.DDGS", _DDGS), mock.patch.object(
+        web_search_mod.time, "sleep"
+    ) as m_sleep:
+        out = web_search("anything")
+
+    assert _DDGS.calls == 3, f"expected 3 attempts (default), got {_DDGS.calls}"
+    assert m_sleep.call_count == 2, m_sleep.call_args_list
+    assert m_sleep.call_args_list == [mock.call(1.0), mock.call(3.0)]
+    assert out.startswith("<search error: backend unavailable"), out
+    assert "after 3 attempt(s)" in out, out
+    assert "upstream still flaking" in out, out
+    assert "fetch_url" in out, out
+    print("✓ retry: exhausted → <search error: backend unavailable after 3 attempt(s); ...>")
+
+
+def _check_rate_limited_marker_no_retry() -> None:
+    """``RatelimitException`` → distinct marker, NO retry."""
+    from ddgs.exceptions import RatelimitException
+
+    class _DDGS:
+        calls = 0
+
+        def text(self, query, max_results=10, backend="auto"):
+            type(self).calls += 1
+            raise RatelimitException("429 too many requests")
+
+    cap = _make_fake_api()
+    web_search = cap["tools"]["web_search"]
+
+    with mock.patch("ddgs.DDGS", _DDGS), mock.patch.object(
+        web_search_mod.time, "sleep"
+    ) as m_sleep:
+        out = web_search("anything")
+
+    assert _DDGS.calls == 1, f"rate-limit must not retry, got {_DDGS.calls} calls"
+    assert m_sleep.call_count == 0, m_sleep.call_args_list
+    assert out.startswith("<search error: rate limited"), out
+    assert "429" in out, out
+    print("✓ rate-limit: <search error: rate limited; ...>, no retry, no sleep")
+
+
+def _check_timeout_is_retried() -> None:
+    """``TimeoutException`` is retryable like ``DDGSException``."""
+    from ddgs.exceptions import TimeoutException
+
+    fixture = [{"title": "t", "href": "https://t.example.com", "body": ""}]
+
+    class _DDGS:
+        calls = 0
+
+        def text(self, query, max_results=10, backend="auto"):
+            type(self).calls += 1
+            if type(self).calls == 1:
+                raise TimeoutException("timed out fetching upstream")
+            return fixture
+
+    cap = _make_fake_api()
+    web_search = cap["tools"]["web_search"]
+
+    with mock.patch("ddgs.DDGS", _DDGS), mock.patch.object(
+        web_search_mod.time, "sleep"
+    ):
+        out = web_search("anything")
+    assert _DDGS.calls == 2, _DDGS.calls
+    assert "t.example.com" in out, out
+    print("✓ retry: TimeoutException retried like DDGSException")
+
+
+def _check_attempts_1_disables_retry() -> None:
+    """``retry_attempts = 1`` config → exactly one attempt, no sleep."""
+    from ddgs.exceptions import DDGSException
+
+    class _DDGS:
+        calls = 0
+
+        def text(self, query, max_results=10, backend="auto"):
+            type(self).calls += 1
+            raise DDGSException("flake")
+
+    cap = _make_fake_api(plugin_config={"retry_attempts": 1})
+    web_search = cap["tools"]["web_search"]
+
+    with mock.patch("ddgs.DDGS", _DDGS), mock.patch.object(
+        web_search_mod.time, "sleep"
+    ) as m_sleep:
+        out = web_search("anything")
+    assert _DDGS.calls == 1, _DDGS.calls
+    assert m_sleep.call_count == 0, m_sleep.call_args_list
+    assert out.startswith("<search error: backend unavailable"), out
+    print("✓ retry_attempts=1 disables retry entirely")
+
+
+def _check_backend_config_passes_through() -> None:
+    """``backend = "duckduckgo,brave"`` config reaches DDGS().text(...)."""
+    fixture = [{"title": "t", "href": "https://t.example.com", "body": ""}]
+
+    class _DDGS:
+        captured_backend: str | None = None
+
+        def text(self, query, max_results=10, backend="auto"):
+            type(self).captured_backend = backend
+            return fixture
+
+    cap = _make_fake_api(plugin_config={"backend": "duckduckgo,brave"})
+    web_search = cap["tools"]["web_search"]
+
+    with mock.patch("ddgs.DDGS", _DDGS):
+        web_search("anything")
+    assert _DDGS.captured_backend == "duckduckgo,brave", _DDGS.captured_backend
+    print("✓ backend config flows through to DDGS().text(backend=...)")
+
+
+def _check_non_network_exception_not_retried() -> None:
+    """A programmer error (TypeError) bypasses the retry loop and
+    surfaces via the existing catch-all ``<search error: ...>`` path."""
+    class _DDGS:
+        calls = 0
+
+        def text(self, query, max_results=10, backend="auto"):
+            type(self).calls += 1
+            raise TypeError("oops, programmer bug")
+
+    cap = _make_fake_api()
+    web_search = cap["tools"]["web_search"]
+
+    with mock.patch("ddgs.DDGS", _DDGS), mock.patch.object(
+        web_search_mod.time, "sleep"
+    ) as m_sleep:
+        out = web_search("anything")
+    assert _DDGS.calls == 1, f"non-network error must not retry, got {_DDGS.calls}"
+    assert m_sleep.call_count == 0, m_sleep.call_args_list
+    assert out.startswith("<search error:"), out
+    assert "programmer bug" in out, out
+    # NOT the typed markers — just the catch-all.
+    assert "rate limited" not in out, out
+    assert "backend unavailable" not in out, out
+    print("✓ non-network exceptions skip retry, hit the catch-all marker")
+
+
+# ---- Register-time config validation ------------------------------
+
+
+def _check_register_warnings_on_bogus_config() -> None:
+    cap = _make_fake_api(plugin_config={"retry_attempts": "three"})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert any("retry_attempts must be a positive integer" in m for m in msgs), msgs
+
+    cap = _make_fake_api(plugin_config={"retry_attempts": 0})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert any("retry_attempts must be >= 1" in m for m in msgs), msgs
+
+    cap = _make_fake_api(plugin_config={"retry_backoff_s": "not-a-list"})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert any("retry_backoff_s must be a list" in m for m in msgs), msgs
+
+    cap = _make_fake_api(plugin_config={"retry_backoff_s": [1.0, -1.0, "bad"]})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert any("retry_backoff_s contains invalid entries" in m for m in msgs), msgs
+
+    cap = _make_fake_api(plugin_config={"backend": 42})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert any("backend must be a string" in m for m in msgs), msgs
+
+    cap = _make_fake_api(plugin_config={"backend": "   "})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert any("backend is set but empty" in m for m in msgs), msgs
+
+    print("✓ register-time warnings: bogus retry/backoff/backend config flagged")
+
+
+def _check_register_silent_on_clean_config() -> None:
+    cap = _make_fake_api(plugin_config={
+        "retry_attempts": 4,
+        "retry_backoff_s": [0.5, 1.0, 2.0],
+        "backend": "duckduckgo,brave,yahoo",
+    })
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert msgs == [], f"expected no warnings, got: {msgs}"
+
+    # Empty config too.
+    cap = _make_fake_api(plugin_config={})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert msgs == [], f"expected no warnings on empty config, got: {msgs}"
+    print("✓ register-time silent on clean and empty config")
 
 
 def _check_instant_answer_uses_fixture_http() -> None:
@@ -317,6 +574,15 @@ def main() -> None:
     _check_tool_wrapper_returns_string()
     _check_tool_wrapper_translates_errors()
     _check_tool_wrapper_validates_inputs()
+    _check_retry_succeeds_after_transient_failure()
+    _check_retry_exhausted_marker()
+    _check_rate_limited_marker_no_retry()
+    _check_timeout_is_retried()
+    _check_attempts_1_disables_retry()
+    _check_backend_config_passes_through()
+    _check_non_network_exception_not_retried()
+    _check_register_warnings_on_bogus_config()
+    _check_register_silent_on_clean_config()
     _check_instant_answer_uses_fixture_http()
     print("smoke_web_search: all checks passed")
 
