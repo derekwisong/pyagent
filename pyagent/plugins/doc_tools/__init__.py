@@ -2,11 +2,11 @@
 
 Two stateless tools, both single-shot sub-LLM calls over one document:
 
-  - ``extract(path, query, schema=None, model=None)`` — pull structured
-    fields / lists / tables out of a document. Use when the agent wants
-    specific information from a doc larger than ~4KB; for smaller docs,
-    ``read_file`` is strictly cheaper.
-  - ``summarize(path, focus=None, max_chars=1500, model=None)`` —
+  - ``extract_doc(path, query, schema=None, model=None)`` — pull
+    structured fields / lists / tables out of a document. Use when
+    the agent wants specific information from a doc larger than ~4KB;
+    for smaller docs, ``read_file`` is strictly cheaper.
+  - ``summarize_doc(path, focus=None, max_chars=1500, model=None)`` —
     compress a document to prose. Same scale guidance.
 
 The motivation: the main agent reasoning over a 40KB markdown file via
@@ -22,16 +22,20 @@ Configuration (all optional, all read at call time):
         tool-capable. Local users can switch to ollama with e.g.
         ``model = "ollama/llama3.2:latest"`` (the empirical winner
         of an 8-model eval; see PR #84 for the table).
+    ``min_size_chars`` — files smaller than this trigger a "just
+        read it directly" response instead of spinning up a sub-LLM.
+        Defaults to 4000.
+    ``timeout_s`` — wall-clock cap on a single sub-LLM call.
+        Defaults to 300 (5 minutes). Hung daemons / wedged remote
+        providers surface as ``<… error: sub-LLM call timed out …>``
+        instead of blocking the agent loop indefinitely.
+    ``cache_size`` — number of cached results to retain
+        (process-local, LRU). Defaults to 64. Set to 0 to disable.
 
   ``PYAGENT_DOC_TOOLS_MODEL`` env var
     Same shape as the config ``model`` value. Useful for
     per-shell overrides without touching config.toml — testing,
     CI, ad-hoc invocation.
-
-  ``min_size_chars`` (config only)
-    Files smaller than this trigger a "just read it directly"
-    response instead of spinning up a sub-LLM. Defaults to 4000 —
-    below that the round-trip cost beats ``read_file`` + reasoning.
 
 Resolution order, highest priority first:
   1. Per-call ``model=`` argument.
@@ -46,8 +50,11 @@ issue for the design.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +65,8 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "anthropic/claude-haiku-4-5-20251001"
 _DEFAULT_MIN_SIZE_CHARS = 4000
+_DEFAULT_TIMEOUT_S = 300
+_DEFAULT_CACHE_SIZE = 64
 _MODEL_ENV_VAR = "PYAGENT_DOC_TOOLS_MODEL"
 
 # Cap how much of the document we send to the sub-LLM in one call.
@@ -67,6 +76,11 @@ _MODEL_ENV_VAR = "PYAGENT_DOC_TOOLS_MODEL"
 # extract from a megabyte of text, that's a different shape (chunk +
 # map-reduce) we can build later.
 _MAX_DOC_CHARS = 200_000
+
+# Schema strings get embedded in the user prompt verbatim. Cap so a
+# pathological caller can't blow up the context window from this
+# argument alone. Real JSON Schemas are rarely larger than a few KB.
+_MAX_SCHEMA_CHARS = 16_000
 
 
 _EXTRACT_SYSTEM = (
@@ -83,6 +97,13 @@ _SUMMARIZE_SYSTEM = (
     "document. No preamble, no meta-commentary. If a focus is given, "
     "lead with that aspect. Stay under the requested character budget."
 )
+
+
+# Process-local LRU cache. Keys are tuples that include path
+# + mtime_ns + size, so a touched/edited file naturally invalidates.
+# Errors are *not* cached — a flaky network shouldn't poison repeats.
+_cache: "OrderedDict[tuple, str]" = OrderedDict()
+_cache_lock = threading.Lock()
 
 
 def _read_doc(path: str) -> tuple[str, str | None]:
@@ -104,7 +125,9 @@ def _read_doc(path: str) -> tuple[str, str | None]:
     except PermissionError:
         return "", f"<permission denied: {path}>"
     except UnicodeDecodeError:
-        return "", f"<binary file (not text): {path}>"
+        # Could be Latin-1, UTF-16, or genuinely binary. We can't
+        # tell from one decode failure, so don't claim "binary."
+        return "", f"<could not decode as text (not utf-8): {path}>"
     except OSError as e:
         return "", f"<could not read {path}: {e}>"
     return text, None
@@ -136,11 +159,97 @@ def _resolve_min_size(plugin_cfg: dict) -> int:
     return _DEFAULT_MIN_SIZE_CHARS
 
 
-def _call_subllm(model: str, system: str, user: str) -> tuple[str, str]:
+def _resolve_timeout(plugin_cfg: dict) -> int:
+    raw = plugin_cfg.get("timeout_s")
+    if isinstance(raw, int) and raw > 0:
+        return raw
+    return _DEFAULT_TIMEOUT_S
+
+
+def _resolve_cache_size(plugin_cfg: dict) -> int:
+    raw = plugin_cfg.get("cache_size")
+    if isinstance(raw, int) and raw >= 0:
+        return raw
+    return _DEFAULT_CACHE_SIZE
+
+
+def _validate_schema(schema: Any) -> tuple[str, str | None]:
+    """Validate the optional schema arg. Returns (clean, error).
+
+    Bad inputs return (empty, marker). A None / empty / whitespace
+    schema is treated as "no schema" and returns ("", None) — caller
+    skips the schema block entirely.
+    """
+    if schema is None:
+        return "", None
+    if not isinstance(schema, str):
+        return (
+            "",
+            f"<error: schema must be a string, got {type(schema).__name__}>",
+        )
+    s = schema.strip()
+    if not s:
+        return "", None
+    if len(s) > _MAX_SCHEMA_CHARS:
+        return (
+            "",
+            f"<error: schema is {len(s)} chars (max {_MAX_SCHEMA_CHARS})>",
+        )
+    try:
+        json.loads(s)
+    except json.JSONDecodeError as e:
+        return "", f"<error: schema is not valid JSON: {e}>"
+    return s, None
+
+
+def _file_signature(path: str) -> tuple[str, int, int] | None:
+    """Return (resolved_path, mtime_ns, size) or None if the file
+    can't be stat'd. Used as the file-content slice of the cache key
+    — touch / edit invalidates naturally because mtime changes."""
+    try:
+        p = Path(path).resolve()
+        st = p.stat()
+    except OSError:
+        return None
+    return str(p), st.st_mtime_ns, st.st_size
+
+
+def _cache_get(key: tuple) -> str | None:
+    with _cache_lock:
+        if key in _cache:
+            _cache.move_to_end(key)
+            return _cache[key]
+    return None
+
+
+def _cache_put(key: tuple, value: str, max_size: int) -> None:
+    if max_size <= 0:
+        return
+    with _cache_lock:
+        _cache[key] = value
+        _cache.move_to_end(key)
+        while len(_cache) > max_size:
+            _cache.popitem(last=False)
+
+
+def _cache_clear() -> None:
+    """Drop all cached entries. Test hook; not exposed as a tool."""
+    with _cache_lock:
+        _cache.clear()
+
+
+def _call_subllm(
+    model: str, system: str, user: str, timeout_s: int
+) -> tuple[str, str]:
     """Run one sub-LLM turn. Returns (text, error).
 
     Error is empty on success. On any failure, text is empty and
     error is a short reason the tool wraps in its own marker.
+
+    Timeout is enforced via a daemon thread we join with a deadline.
+    This is not concurrency — it's a kill-able wrapper around one
+    blocking I/O call. Daemon=True so a stalled call doesn't block
+    Python's exit handlers when the user Ctrl-C's the agent.
     """
     # Deferred import: keeps pyagent.llms out of plugin-load critical
     # path for users who never invoke doc-tools.
@@ -150,13 +259,33 @@ def _call_subllm(model: str, system: str, user: str) -> tuple[str, str]:
         client = llms.get_client(model)
     except Exception as e:
         return "", f"could not load model {model!r}: {e}"
-    try:
-        result = client.respond(
-            conversation=[{"role": "user", "content": user}],
-            system=system,
-        )
-    except Exception as e:
-        return "", f"sub-LLM call failed ({model!r}): {e}"
+
+    box: dict[str, Any] = {}
+
+    def _do_call() -> None:
+        try:
+            box["result"] = client.respond(
+                conversation=[{"role": "user", "content": user}],
+                system=system,
+            )
+        except Exception as e:  # noqa: BLE001 — surface to the tool result
+            box["error"] = e
+
+    t = threading.Thread(target=_do_call, daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+
+    if t.is_alive():
+        # The daemon thread is still running. We can't cancel it —
+        # Python doesn't have safe thread-kill — but daemon=True means
+        # the orphaned worker won't block process exit. The user's
+        # call gets a clean timeout marker; the LLM client's own HTTP
+        # connection will time out on its own schedule.
+        return "", f"sub-LLM call timed out after {timeout_s}s ({model!r})"
+    if "error" in box:
+        return "", f"sub-LLM call failed ({model!r}): {box['error']}"
+
+    result = box.get("result")
     text = result.get("text") if isinstance(result, dict) else None
     if not isinstance(text, str) or not text.strip():
         return "", f"sub-LLM returned no text ({model!r})"
@@ -164,9 +293,7 @@ def _call_subllm(model: str, system: str, user: str) -> tuple[str, str]:
 
 
 def register(api):
-    plugin_cfg_getter = lambda: api.plugin_config
-
-    def extract(
+    def extract_doc(
         path: str,
         query: str,
         schema: str | None = None,
@@ -181,6 +308,11 @@ def register(api):
         (<4KB by default), this tool refuses and tells you to read
         directly.
 
+        Results are cached process-locally by (path + mtime + size,
+        query, schema, resolved-model), so identical re-queries of an
+        unchanged document return instantly without re-spending a
+        sub-LLM call. Touching or editing the file invalidates.
+
         Args:
             path: File to extract from. Subject to the standard
                 permission gate.
@@ -189,7 +321,8 @@ def register(api):
                 about the horses". Vague queries produce vague results.
             schema: Optional JSON schema string. When provided, the
                 extractor is told to return strict JSON conforming
-                to the schema.
+                to the schema. Validated as parseable JSON (rejected
+                on parse error) and capped at 16K chars.
             model: Optional ``provider/model`` override. Defaults to
                 the configured model
                 (``[plugins.doc-tools] model`` in config.toml).
@@ -202,8 +335,11 @@ def register(api):
             return "<error: path is required>"
         if not isinstance(query, str) or not query.strip():
             return "<error: query is required — describe what to extract>"
+        clean_schema, schema_err = _validate_schema(schema)
+        if schema_err is not None:
+            return schema_err
 
-        plugin_cfg = plugin_cfg_getter() or {}
+        plugin_cfg = api.plugin_config or {}
         min_size = _resolve_min_size(plugin_cfg)
         text, err = _read_doc(path)
         if err is not None:
@@ -218,24 +354,39 @@ def register(api):
             return (
                 f"<file is {len(text)} chars (over {_MAX_DOC_CHARS}-char "
                 f"limit); slice with read_file or grep first, then "
-                f"call extract on a narrower range>"
+                f"call extract_doc on a narrower range>"
             )
 
         resolved_model = _resolve_model(plugin_cfg, model)
+        sig = _file_signature(path)
+        cache_size = _resolve_cache_size(plugin_cfg)
+        cache_key: tuple | None = None
+        if sig is not None and cache_size > 0:
+            cache_key = ("extract_doc", sig, query, clean_schema, resolved_model)
+            cached = _cache_get(cache_key)
+            if cached is not None:
+                return cached
+
         user_parts = [f"Document path: {path}", "Document content:", text, ""]
-        if schema:
+        if clean_schema:
             user_parts.append(
-                f"Return JSON matching this schema:\n{schema}"
+                f"Return JSON matching this schema:\n{clean_schema}"
             )
         user_parts.append(f"Extraction request: {query}")
         user = "\n".join(user_parts)
 
-        out, err_str = _call_subllm(resolved_model, _EXTRACT_SYSTEM, user)
+        timeout_s = _resolve_timeout(plugin_cfg)
+        out, err_str = _call_subllm(
+            resolved_model, _EXTRACT_SYSTEM, user, timeout_s
+        )
         if err_str:
             return f"<extract error: {err_str}>"
-        return f"[extracted via {resolved_model}]\n{out}"
+        result_str = f"[extracted via {resolved_model}]\n{out}"
+        if cache_key is not None:
+            _cache_put(cache_key, result_str, cache_size)
+        return result_str
 
-    def summarize(
+    def summarize_doc(
         path: str,
         focus: str | None = None,
         max_chars: int = 1500,
@@ -246,6 +397,11 @@ def register(api):
         Use this when you want the gist of a doc larger than a few
         KB without dragging the whole text through your context.
         For small files, ``read_file`` directly is cheaper.
+
+        Results are cached process-locally by (path + mtime + size,
+        focus, max_chars, resolved-model). Identical re-queries of an
+        unchanged document return instantly. Touching or editing the
+        file invalidates.
 
         Args:
             path: File to summarize. Subject to the standard
@@ -276,7 +432,7 @@ def register(api):
                 f"minimum 100>"
             )
 
-        plugin_cfg = plugin_cfg_getter() or {}
+        plugin_cfg = api.plugin_config or {}
         min_size = _resolve_min_size(plugin_cfg)
         text, err = _read_doc(path)
         if err is not None:
@@ -294,6 +450,18 @@ def register(api):
             )
 
         resolved_model = _resolve_model(plugin_cfg, model)
+        sig = _file_signature(path)
+        cache_size = _resolve_cache_size(plugin_cfg)
+        cache_key: tuple | None = None
+        focus_norm = (focus or "").strip()
+        if sig is not None and cache_size > 0:
+            cache_key = (
+                "summarize_doc", sig, focus_norm, max_chars_int, resolved_model,
+            )
+            cached = _cache_get(cache_key)
+            if cached is not None:
+                return cached
+
         user_parts = [
             f"Document path: {path}",
             "Document content:",
@@ -301,15 +469,21 @@ def register(api):
             "",
             f"Summary budget: under {max_chars_int} characters.",
         ]
-        if focus:
-            user_parts.append(f"Focus on: {focus}")
+        if focus_norm:
+            user_parts.append(f"Focus on: {focus_norm}")
         user_parts.append("Produce the summary now.")
         user = "\n".join(user_parts)
 
-        out, err_str = _call_subllm(resolved_model, _SUMMARIZE_SYSTEM, user)
+        timeout_s = _resolve_timeout(plugin_cfg)
+        out, err_str = _call_subllm(
+            resolved_model, _SUMMARIZE_SYSTEM, user, timeout_s
+        )
         if err_str:
             return f"<summarize error: {err_str}>"
-        return f"[summarized via {resolved_model}]\n{out}"
+        result_str = f"[summarized via {resolved_model}]\n{out}"
+        if cache_key is not None:
+            _cache_put(cache_key, result_str, cache_size)
+        return result_str
 
-    api.register_tool("extract", extract)
-    api.register_tool("summarize", summarize)
+    api.register_tool("extract_doc", extract_doc)
+    api.register_tool("summarize_doc", summarize_doc)
