@@ -1,6 +1,6 @@
 """Smoke for the per-session attachments LRU cap (issue #86).
 
-Locks five behaviors:
+Locks these behaviors:
 
   1. **Under cap → no eviction.** Several small writes keep total
      under cap; every file remains.
@@ -17,6 +17,17 @@ Locks five behaviors:
      temp config flows through to a `Session(attachment_dir_cap_mb=5)`
      when constructed via the CLI startup pattern (mirrors
      `pyagent/cli.py` Session construction).
+  6. **Class default unchanged.** Sessions constructed without an
+     explicit cap inherit the class-level 25 MB.
+  7. **Config validation.** Bogus values (float, negative, bool,
+     non-numeric) emit warnings and resolve sanely — closes the
+     "TOML float silently disables eviction" hole flagged in #93
+     review.
+  8. **Path A contract.** When the LRU evicts a file that's still
+     referenced by the agent's prior conversation, a future
+     `read_file` against the saved path lands on the standard
+     `<file not found: ...>` marker. Locks the behavior the LRU
+     implementation explicitly relies on.
 
 No subprocess, no network. Run with:
     .venv/bin/python -m tests.smoke_attachment_lru
@@ -24,11 +35,14 @@ No subprocess, no network. Run with:
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 from pathlib import Path
 
 from pyagent import config as config_mod
+from pyagent import permissions
+from pyagent import tools as agent_tools
 from pyagent.session import Session
 
 
@@ -180,6 +194,97 @@ def _check_class_default_unchanged() -> None:
     print("✓ class default = 25 MB; instance without kwarg inherits it")
 
 
+def _check_validation_warns_and_falls_back() -> None:
+    """`resolve_attachment_dir_cap_mb` must warn-and-resolve for the
+    cases that bit users in the #93 review: TOML floats silently
+    disabling, negatives silently disabling, booleans, non-numerics."""
+
+    class _CaptureHandler(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.records: list[logging.LogRecord] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.records.append(record)
+
+    handler = _CaptureHandler()
+    cfg_logger = logging.getLogger("pyagent.config")
+    cfg_logger.addHandler(handler)
+    cfg_logger.setLevel(logging.WARNING)
+
+    try:
+        # Missing → silent default.
+        handler.records.clear()
+        assert config_mod.resolve_attachment_dir_cap_mb(None) == 25
+        assert handler.records == [], handler.records
+
+        # Plain int → silent passthrough.
+        handler.records.clear()
+        assert config_mod.resolve_attachment_dir_cap_mb(10) == 10
+        assert handler.records == [], handler.records
+
+        # Float 25.0 → warn, round to 25.
+        handler.records.clear()
+        assert config_mod.resolve_attachment_dir_cap_mb(25.0) == 25
+        assert any("float" in r.getMessage() for r in handler.records), handler.records
+
+        # Float 0.5 → warn, round to 0 (the surprise case from review).
+        handler.records.clear()
+        assert config_mod.resolve_attachment_dir_cap_mb(0.5) == 0
+        msgs = [r.getMessage() for r in handler.records]
+        assert any("float" in m for m in msgs), msgs
+
+        # Negative → warn, clamp to 0.
+        handler.records.clear()
+        assert config_mod.resolve_attachment_dir_cap_mb(-5) == 0
+        assert any(">= 0" in r.getMessage() for r in handler.records), handler.records
+
+        # Bool (TOML allows it; True is int(1) silently otherwise) → warn, default.
+        handler.records.clear()
+        assert config_mod.resolve_attachment_dir_cap_mb(True) == 25
+        assert any("bool" in r.getMessage() for r in handler.records), handler.records
+
+        # Non-numeric → warn, default.
+        handler.records.clear()
+        assert config_mod.resolve_attachment_dir_cap_mb("a lot") == 25
+        assert any("integer" in r.getMessage() for r in handler.records), handler.records
+    finally:
+        cfg_logger.removeHandler(handler)
+    print("✓ validation: float / negative / bool / non-numeric warn and resolve sanely")
+
+
+def _check_path_a_contract() -> None:
+    """When the LRU evicts a file, the saved path is gone — a future
+    `read_file` against it returns the standard
+    `<file not found: ...>` marker. The agent has no special "evicted"
+    semantics; the existing not-found contract is the signal."""
+    with tempfile.TemporaryDirectory(prefix="pyagent-lru-") as t:
+        # 1 MB cap, 700 KB writes — second write triggers eviction of first.
+        session = Session(
+            session_id="path-a", root=Path(t), attachment_dir_cap_mb=1
+        )
+        first = session.write_attachment("read_file", "F" * 700_000)
+        second = session.write_attachment("read_file", "S" * 700_000)
+        # First should be evicted; second is the just-written and stays.
+        assert not first.exists(), f"expected {first} to be evicted"
+        assert second.exists(), f"just-written {second} must remain"
+
+        # Pre-approve the temp path so read_file's permission gate
+        # passes (the path is outside the workspace).
+        permissions.pre_approve(first)
+        result = agent_tools.read_file(str(first))
+        assert isinstance(result, str), type(result)
+        assert result == f"<file not found: {first}>", result
+
+        # And the just-written file IS readable — confirms read_file
+        # is working in this test, the failure above is genuinely
+        # the eviction (not a permission/path issue).
+        permissions.pre_approve(second)
+        result = agent_tools.read_file(str(second))
+        assert "S" in result, result[:100]
+    print("✓ path A: evicted file → <file not found: ...> from read_file")
+
+
 def main() -> None:
     _check_under_cap_no_eviction()
     _check_over_cap_oldest_atime_evicted()
@@ -187,6 +292,8 @@ def main() -> None:
     _check_cap_zero_disables_eviction()
     _check_config_wiring()
     _check_class_default_unchanged()
+    _check_validation_warns_and_falls_back()
+    _check_path_a_contract()
     print("\nALL CHECKS PASSED")
 
 

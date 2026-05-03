@@ -38,6 +38,7 @@ from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any
 
+from pyagent import config as config_mod
 from pyagent import paths
 from pyagent import permissions
 from pyagent import plugins as plugins_mod
@@ -799,7 +800,9 @@ def _bootstrap(
     # value down through agent_config). Subagents inherit the same cap;
     # they each have their own attachments dir under their own session
     # subtree, so eviction is per-subagent-session.
-    cap_mb = int(config.get("attachment_dir_cap_mb", 25))
+    cap_mb = config_mod.resolve_attachment_dir_cap_mb(
+        config.get("attachment_dir_cap_mb")
+    )
 
     if is_subagent:
         session = Session(

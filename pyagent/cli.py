@@ -1763,7 +1763,9 @@ def main(
     model = _resolve_model(model)
 
     cfg = config.load()
-    cap_mb = int(cfg.get("session", {}).get("attachment_dir_cap_mb", 25))
+    cap_mb = config.resolve_attachment_dir_cap_mb(
+        cfg.get("session", {}).get("attachment_dir_cap_mb")
+    )
 
     if resume_id:
         session = Session(session_id=resume_id, attachment_dir_cap_mb=cap_mb)
