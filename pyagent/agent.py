@@ -250,8 +250,16 @@ class Agent:
                 # (structured blob the agent might legitimately re-read
                 # via extract_doc / read_file), not an offloaded big
                 # result. Skip the offload header / "do not read" warn;
-                # just point at the file with a minimal footer.
-                return f"{result.inline_text}\n\n[also saved: {path}]"
+                # use a footer that's explicit about both halves —
+                # "inline above is complete" so the agent doesn't
+                # reflexively re-read for missing content, and
+                # "for downstream tools" so the LLM knows when reading
+                # IS appropriate (chaining, structured-input consumers).
+                return (
+                    f"{result.inline_text}\n\n[also saved: {path} — "
+                    f"inline answer above is complete; attachment is "
+                    f"for downstream tools]"
+                )
             cap = self.session.attachment_threshold
             return self._format_offload_ref(
                 path,

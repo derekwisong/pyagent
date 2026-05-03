@@ -222,9 +222,13 @@ def _check_plugin_loads_under_default_config() -> None:
     print(f"✓ plugin loads by default; web-search tools present")
 
 
-def _check_tool_wrapper_returns_string() -> None:
-    """`web_search` returns str on success — no Attachment construction
-    in the plugin (the auto-offload path handles large outputs)."""
+def _check_tool_wrapper_returns_attachment() -> None:
+    """On a successful search, `web_search` returns an Attachment
+    whose inline_text is the markdown and whose content is the
+    structured JSON. The agent layer renders the markdown inline
+    with an [also saved: ...] footer."""
+    from pyagent.session import Attachment as _Attachment
+
     cap = _make_fake_api()
     assert set(cap["tools"].keys()) == {"web_search", "web_search_instant"}, cap["tools"]
     web_search = cap["tools"]["web_search"]
@@ -239,16 +243,134 @@ def _check_tool_wrapper_returns_string() -> None:
         web_search_mod, "ddg_text_search", return_value=fixture
     ) as m:
         out = web_search("python http", n=3)
-    # The wrapper now passes retry/backoff/backend kwargs through —
-    # check the positional and the new kwargs ride together.
+    # The wrapper passes retry/backoff/backend kwargs through —
+    # confirm the positional and new kwargs ride together.
     assert m.call_count == 1, m.call_args_list
     args, kwargs = m.call_args
     assert args == ("python http",), args
     assert kwargs.get("n") == 3, kwargs
     assert "attempts" in kwargs and "backoff_s" in kwargs and "backend" in kwargs, kwargs
+
+    # Returned shape is now an Attachment by default (save_structured
+    # is on). inline_text carries the human markdown; content is the
+    # structured JSON list.
+    assert isinstance(out, _Attachment), type(out)
+    assert out.suffix == ".json", out.suffix
+    assert isinstance(out.inline_text, str), type(out.inline_text)
+    assert "Best Python HTTP libraries 2025" in out.inline_text, out.inline_text
+
+    parsed = json.loads(out.content)
+    assert isinstance(parsed, list) and len(parsed) == 3, parsed
+    assert {"title", "url", "snippet"} <= set(parsed[0].keys()), parsed[0]
+    assert parsed[0]["title"] == "Best Python HTTP libraries 2025", parsed[0]
+    assert parsed[0]["url"] == "https://example.com/python-http", parsed[0]
+    print("✓ web_search returns Attachment(inline_text=md, content=json, suffix='.json')")
+
+
+def _check_save_structured_disabled_returns_string() -> None:
+    """With save_structured=false the legacy markdown-only string
+    return shape is preserved verbatim."""
+    cap = _make_fake_api(plugin_config={"save_structured": False})
+    web_search = cap["tools"]["web_search"]
+
+    fixture = [
+        web_search_mod.SearchResult(
+            title=r["title"], url=r["href"], snippet=r["body"]
+        )
+        for r in _FIXTURE_RESULTS_RAW
+    ]
+    with mock.patch.object(
+        web_search_mod, "ddg_text_search", return_value=fixture
+    ):
+        out = web_search("python http", n=3)
     assert isinstance(out, str), type(out)
     assert "Best Python HTTP libraries 2025" in out, out
-    print("✓ web_search tool returns str (auto-offload path)")
+    assert "[also saved:" not in out, out
+    print("✓ save_structured=false: legacy markdown-only string return")
+
+
+def _check_empty_results_returns_string_marker() -> None:
+    """An empty result list returns the <no results ...> string
+    marker — no point spinning up a JSON attachment for nothing."""
+    cap = _make_fake_api()
+    web_search = cap["tools"]["web_search"]
+    with mock.patch.object(
+        web_search_mod, "ddg_text_search", return_value=[]
+    ):
+        out = web_search("nonsense query no hits")
+    assert isinstance(out, str), type(out)
+    assert out.startswith("<no results "), out
+    print("✓ empty results: <no results ...> string marker, no attachment")
+
+
+def _check_full_agent_render_path() -> None:
+    """Wire the plugin through a real Agent + Session, run the tool,
+    and confirm the rendered output starts with the markdown and ends
+    with the explicit-wording [also saved: ...] footer. Also confirms
+    the JSON file landed on disk and round-trips."""
+    from pathlib import Path as _Path
+    import tempfile as _tempfile
+    from pyagent.agent import Agent as _Agent
+    from pyagent.session import Session as _Session
+
+    cap = _make_fake_api()
+    web_search = cap["tools"]["web_search"]
+
+    fixture = [
+        web_search_mod.SearchResult(
+            title=r["title"], url=r["href"], snippet=r["body"]
+        )
+        for r in _FIXTURE_RESULTS_RAW
+    ]
+    tmp = _Path(_tempfile.mkdtemp(prefix="pyagent-smoke-websearch-render-"))
+    session = _Session(session_id="render", root=tmp)
+    agent = _Agent(client=None, session=session)
+
+    with mock.patch.object(
+        web_search_mod, "ddg_text_search", return_value=fixture
+    ):
+        result = web_search("anything")
+    rendered = agent._render_tool_result("web_search", result)
+
+    assert isinstance(rendered, str), type(rendered)
+    assert "Best Python HTTP libraries 2025" in rendered, rendered
+    assert "[also saved: " in rendered, rendered
+    # Footer is explicit about both halves so the agent doesn't
+    # reflexively re-read the attachment for "missing" content.
+    assert "inline answer above is complete" in rendered, rendered
+    assert "for downstream tools" in rendered, rendered
+    # No offload header — this is side data, not an offloaded big result.
+    assert "[offload " not in rendered, rendered
+    assert "Do NOT read_file" not in rendered
+
+    # JSON file landed and round-trips.
+    footer_chunk = rendered.rsplit("[also saved: ", 1)[1]
+    saved_path = _Path(footer_chunk.split(" — ", 1)[0])
+    assert saved_path.exists(), saved_path
+    parsed = json.loads(saved_path.read_text())
+    assert len(parsed) == 3, parsed
+    assert parsed[0]["url"] == "https://example.com/python-http", parsed[0]
+    print(f"✓ full agent render: markdown inline + footer + JSON on disk ({saved_path.stat().st_size}B)")
+
+
+def _check_register_warnings_on_bogus_save_structured() -> None:
+    """save_structured must be a bool — strings, ints, etc. flagged."""
+    cap = _make_fake_api(plugin_config={"save_structured": "yes"})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert any("save_structured must be a bool" in m for m in msgs), msgs
+
+    cap = _make_fake_api(plugin_config={"save_structured": 1})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert any("save_structured must be a bool" in m for m in msgs), msgs
+
+    # True bool values silent.
+    cap = _make_fake_api(plugin_config={"save_structured": True})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert msgs == [], msgs
+    cap = _make_fake_api(plugin_config={"save_structured": False})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert msgs == [], msgs
+    print("✓ register-time warning: save_structured non-bool flagged, bools silent")
 
 
 def _check_tool_wrapper_translates_errors() -> None:
@@ -324,8 +446,10 @@ def _check_retry_succeeds_after_transient_failure() -> None:
     assert m_sleep.call_count == 1, m_sleep.call_args_list
     # Default backoff is (1.0, 3.0) — first retry sleeps 1.0s.
     assert m_sleep.call_args == mock.call(1.0), m_sleep.call_args
-    assert "ok.example.com" in out, out
-    assert not out.startswith("<search error"), out
+    # Successful searches now return an Attachment with markdown
+    # inline_text and structured JSON content.
+    inline = out.inline_text if hasattr(out, "inline_text") else out
+    assert "ok.example.com" in inline, inline
     print("✓ retry: transient DDGSException → succeed on retry, slept 1.0s")
 
 
@@ -407,7 +531,8 @@ def _check_timeout_is_retried() -> None:
     ):
         out = web_search("anything")
     assert _DDGS.calls == 2, _DDGS.calls
-    assert "t.example.com" in out, out
+    inline = out.inline_text if hasattr(out, "inline_text") else out
+    assert "t.example.com" in inline, inline
     print("✓ retry: TimeoutException retried like DDGSException")
 
 
@@ -571,7 +696,11 @@ def main() -> None:
     _check_instant_formatter_answer_beats_abstract()
     _check_instant_formatter_no_data()
     _check_plugin_loads_under_default_config()
-    _check_tool_wrapper_returns_string()
+    _check_tool_wrapper_returns_attachment()
+    _check_save_structured_disabled_returns_string()
+    _check_empty_results_returns_string_marker()
+    _check_full_agent_render_path()
+    _check_register_warnings_on_bogus_save_structured()
     _check_tool_wrapper_translates_errors()
     _check_tool_wrapper_validates_inputs()
     _check_retry_succeeds_after_transient_failure()
