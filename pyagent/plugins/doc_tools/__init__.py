@@ -173,6 +173,111 @@ def _resolve_cache_size(plugin_cfg: dict) -> int:
     return _DEFAULT_CACHE_SIZE
 
 
+def _config_warnings(plugin_cfg: dict) -> list[str]:
+    """Sanity-check the ``[plugins.doc-tools]`` table at register time.
+
+    Returns a list of human-readable warning strings — the caller logs
+    them via ``api.log("warning", ...)``. None of these warnings block
+    registration: the silent-fallback resolvers (``_resolve_*``) still
+    promote bogus values to defaults at call time. The point is fast
+    feedback at startup so a typo in config.toml doesn't sit unnoticed
+    until the agent next invokes the tool.
+
+    Network probes (e.g. "is the configured ollama daemon reachable?")
+    are deliberately *not* done here — the configured model is one of
+    four resolution sources, so an unreachable default doesn't
+    necessarily mean the tool will fail. See the discussion in PR #84.
+    """
+    out: list[str] = []
+
+    # Model: must be a non-empty string. If it has a `/`, both halves
+    # must be non-empty. If it's a bare name (the "shorthand" form,
+    # e.g. ``--model anthropic`` → defaults applied), it must match a
+    # built-in provider — bare strings that look like model names
+    # without a provider prefix are the most common config typo.
+    raw_model = plugin_cfg.get("model")
+    if raw_model is not None:
+        if not isinstance(raw_model, str):
+            out.append(
+                f"model must be a string, got "
+                f"{type(raw_model).__name__}: {raw_model!r}"
+            )
+        else:
+            stripped = raw_model.strip()
+            if not stripped:
+                out.append("model is set but empty / whitespace-only")
+            elif "/" in stripped:
+                provider, _, name = stripped.partition("/")
+                if not provider.strip() or not name.strip():
+                    out.append(
+                        f"model {raw_model!r} has empty provider or "
+                        f"model name (expected 'provider/model')"
+                    )
+            else:
+                # Bare provider name. We can only verify against
+                # built-ins here because plugin-registered providers
+                # (e.g. ``ollama``) populate after every plugin's
+                # register() runs. Accept silently for shorthand the
+                # user may be using on purpose (rare in config), warn
+                # only when it's clearly off.
+                from pyagent import llms
+
+                builtins = {p.name for p in llms.PROVIDERS}
+                if stripped not in builtins and stripped != "ollama":
+                    out.append(
+                        f"model {raw_model!r} has no '/' separator and "
+                        f"doesn't match a known provider; expected "
+                        f"'provider/model' form"
+                    )
+
+    # timeout_s: positive integer.
+    if "timeout_s" in plugin_cfg:
+        raw = plugin_cfg["timeout_s"]
+        if not isinstance(raw, int) or isinstance(raw, bool):
+            out.append(
+                f"timeout_s must be a positive integer, got "
+                f"{type(raw).__name__}: {raw!r} — using default "
+                f"{_DEFAULT_TIMEOUT_S}"
+            )
+        elif raw <= 0:
+            out.append(
+                f"timeout_s must be > 0, got {raw} — using default "
+                f"{_DEFAULT_TIMEOUT_S}"
+            )
+
+    # cache_size: non-negative integer (0 disables).
+    if "cache_size" in plugin_cfg:
+        raw = plugin_cfg["cache_size"]
+        if not isinstance(raw, int) or isinstance(raw, bool):
+            out.append(
+                f"cache_size must be a non-negative integer, got "
+                f"{type(raw).__name__}: {raw!r} — using default "
+                f"{_DEFAULT_CACHE_SIZE}"
+            )
+        elif raw < 0:
+            out.append(
+                f"cache_size must be >= 0, got {raw} — using default "
+                f"{_DEFAULT_CACHE_SIZE}"
+            )
+
+    # min_size_chars: non-negative integer.
+    if "min_size_chars" in plugin_cfg:
+        raw = plugin_cfg["min_size_chars"]
+        if not isinstance(raw, int) or isinstance(raw, bool):
+            out.append(
+                f"min_size_chars must be a non-negative integer, got "
+                f"{type(raw).__name__}: {raw!r} — using default "
+                f"{_DEFAULT_MIN_SIZE_CHARS}"
+            )
+        elif raw < 0:
+            out.append(
+                f"min_size_chars must be >= 0, got {raw} — using "
+                f"default {_DEFAULT_MIN_SIZE_CHARS}"
+            )
+
+    return out
+
+
 def _validate_schema(schema: Any) -> tuple[str, str | None]:
     """Validate the optional schema arg. Returns (clean, error).
 
@@ -293,6 +398,13 @@ def _call_subllm(
 
 
 def register(api):
+    # Lightweight register-time validation of the [plugins.doc-tools]
+    # table. Bogus values still fall through to defaults at call time
+    # (via the _resolve_* helpers) — this is purely about surfacing
+    # config typos at startup instead of letting them sit silent.
+    for warning in _config_warnings(api.plugin_config or {}):
+        api.log("warning", warning)
+
     def extract_doc(
         path: str,
         query: str,

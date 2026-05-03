@@ -50,16 +50,26 @@ from pyagent import permissions
 from pyagent.plugins import doc_tools as dt_mod
 
 
-def _capture_tools() -> dict:
-    """Run ``register()`` against a fake API; return the captured tools.
+def _capture_tools(plugin_config: dict | None = None) -> dict:
+    """Run ``register()`` against a fake API; return captured state.
 
-    The fake also lets us stub out ``plugin_config`` so individual
-    checks can drive config-driven behavior without touching the real
-    config.toml on disk. Each call to _capture_tools also clears the
-    module-level LRU cache so checks don't bleed into each other.
+    The fake stubs out ``plugin_config`` (driven by the optional arg
+    or assigned to the returned dict before `register()` re-runs) and
+    captures any ``api.log()`` calls so register-time warnings can be
+    asserted. Each call also clears the module-level LRU cache so
+    checks don't bleed into each other.
+
+    Pass ``plugin_config`` for the single-call shape used by warning
+    checks. For multi-step tests that mutate config between calls,
+    omit the arg, mutate ``captured["plugin_config"]``, and re-run
+    ``dt_mod.register()`` if needed.
     """
     dt_mod._cache_clear()
-    captured: dict = {"tools": {}, "plugin_config": {}}
+    captured: dict = {
+        "tools": {},
+        "plugin_config": plugin_config if plugin_config is not None else {},
+        "logs": [],
+    }
 
     class _FakeAPI:
         @property
@@ -68,6 +78,9 @@ def _capture_tools() -> dict:
 
         def register_tool(self, name, fn):
             captured["tools"][name] = fn
+
+        def log(self, level, message):
+            captured["logs"].append((level, message))
 
     dt_mod.register(_FakeAPI())
     return captured
@@ -466,6 +479,85 @@ def _check_subllm_timeout_marker() -> None:
     print(f"✓ sub-LLM timeout: <extract error: ... timed out> in {elapsed:.2f}s")
 
 
+def _check_register_warns_on_bogus_model() -> None:
+    """A malformed model string in config logs a warning at register
+    time and still publishes the tools."""
+    cap = _capture_tools(plugin_config={"model": "claude-haiku-no-slash"})
+    assert "extract_doc" in cap["tools"], cap["tools"]
+    assert "summarize_doc" in cap["tools"], cap["tools"]
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert any("'claude-haiku-no-slash'" in m for m in msgs), msgs
+    assert any("provider/model" in m for m in msgs), msgs
+
+    # Empty-half model: ``"anthropic/"`` shouldn't slip through.
+    cap = _capture_tools(plugin_config={"model": "anthropic/"})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert any("empty provider or model name" in m for m in msgs), msgs
+
+    # Non-string model.
+    cap = _capture_tools(plugin_config={"model": 42})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert any("model must be a string" in m for m in msgs), msgs
+    print("✓ register-time warning: bogus model values flagged, tools still register")
+
+
+def _check_register_warns_on_bogus_timeout() -> None:
+    cap = _capture_tools(plugin_config={"timeout_s": "not-an-int"})
+    assert "extract_doc" in cap["tools"], cap["tools"]
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert any("timeout_s must be a positive integer" in m for m in msgs), msgs
+
+    cap = _capture_tools(plugin_config={"timeout_s": 0})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert any("timeout_s must be > 0" in m for m in msgs), msgs
+
+    cap = _capture_tools(plugin_config={"timeout_s": -5})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert any("timeout_s must be > 0, got -5" in m for m in msgs), msgs
+    print("✓ register-time warning: bogus timeout_s values flagged")
+
+
+def _check_register_warns_on_bogus_cache_size() -> None:
+    cap = _capture_tools(plugin_config={"cache_size": "huge"})
+    assert "extract_doc" in cap["tools"], cap["tools"]
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert any("cache_size must be a non-negative integer" in m for m in msgs), msgs
+
+    cap = _capture_tools(plugin_config={"cache_size": -1})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert any("cache_size must be >= 0, got -1" in m for m in msgs), msgs
+    print("✓ register-time warning: bogus cache_size values flagged")
+
+
+def _check_register_silent_on_valid_config() -> None:
+    """A clean config produces zero warnings."""
+    cap = _capture_tools(plugin_config={
+        "model": "anthropic/claude-haiku-4-5-20251001",
+        "timeout_s": 60,
+        "cache_size": 32,
+        "min_size_chars": 4000,
+    })
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert msgs == [], f"expected no warnings on clean config, got: {msgs}"
+
+    # Empty config also produces zero warnings (every key is optional).
+    cap = _capture_tools(plugin_config={})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert msgs == [], f"expected no warnings on empty config, got: {msgs}"
+
+    # Plugin-provider shorthand (``ollama``) is accepted silently —
+    # we can't verify plugin providers at register time, so we don't
+    # warn on them.
+    cap = _capture_tools(plugin_config={"model": "ollama"})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert msgs == [], f"ollama shorthand should not warn, got: {msgs}"
+
+    cap = _capture_tools(plugin_config={"model": "ollama/llama3.2:latest"})
+    msgs = [m for level, m in cap["logs"] if level == "warning"]
+    assert msgs == [], f"ollama/<model> should not warn, got: {msgs}"
+    print("✓ register-time silent on valid config and plugin-provider shorthand")
+
+
 def _check_lru_cache_returns_cached_result() -> None:
     """Identical re-query of an unchanged file returns the cached
     result without re-invoking the sub-LLM."""
@@ -643,6 +735,10 @@ def main() -> None:
     _check_nonexistent_file_marker()
     _check_subllm_failure_wrapped()
     _check_subllm_timeout_marker()
+    _check_register_warns_on_bogus_model()
+    _check_register_warns_on_bogus_timeout()
+    _check_register_warns_on_bogus_cache_size()
+    _check_register_silent_on_valid_config()
     _check_lru_cache_returns_cached_result()
     _check_lru_cache_invalidates_on_file_change()
     _check_lru_cache_disabled_at_size_zero()
