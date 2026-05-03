@@ -430,7 +430,14 @@ def list_directory(path: str) -> list[str]:
     return sorted(f"{e.name}/" if e.is_dir() else e.name for e in entries)
 
 
-def grep(pattern: str, path: str) -> list[str]:
+def grep(
+    pattern: str,
+    path: str,
+    *,
+    before: int = 0,
+    after: int = 0,
+    context: int = 0,
+) -> list[str]:
     """Search for a regex pattern in a file or directory tree.
 
     First reach for any "where does X appear?" question — cheaper than
@@ -439,13 +446,50 @@ def grep(pattern: str, path: str) -> list[str]:
     Output line numbers match `read_file`'s `start`/`end` so you can
     pipe a hit into a targeted read.
 
+    With `before` / `after` / `context` set, surrounding lines come
+    back in the same call so you don't need a follow-up `read_file`.
+    Semantics mirror GNU `grep`'s `-B` / `-A` / `-C`: `context=N` is
+    shorthand for `before=N, after=N`; an explicit non-zero `before`
+    or `after` overrides the corresponding side of `context`.
+
+    Output uses GNU-grep's separator convention: matched lines stay
+    `path:lineno:line` (colon), while context lines use a dash —
+    `path:lineno-line`. Adjacent matches whose context windows touch
+    or overlap collapse into one contiguous excerpt with no duplicate
+    lines. When context is non-zero, runs of output from the same
+    file are separated by a `--` line.
+
     Args:
         pattern: Regex pattern to search for.
         path: File or directory to search.
+        before: Number of lines of leading context per match.
+        after: Number of lines of trailing context per match.
+        context: Shorthand for `before=N, after=N`. Explicit `before`
+            / `after` win when both are non-zero.
 
     Returns:
-        List of matches formatted as "path:lineno:line".
+        List of matches. Without context: `path:lineno:line` per match.
+        With context: matches keep the colon, surrounding lines use a
+        dash, and same-file runs are separated by `--`.
     """
+    try:
+        before_i = int(before)
+        after_i = int(after)
+        context_i = int(context)
+    except (TypeError, ValueError):
+        return [
+            f"<error: before/after/context must be integers, got "
+            f"before={before!r}, after={after!r}, context={context!r}>"
+        ]
+    if before_i < 0 or after_i < 0 or context_i < 0:
+        return [
+            f"<error: before/after/context must be non-negative, got "
+            f"before={before_i}, after={after_i}, context={context_i}>"
+        ]
+    # Explicit before/after override the matching side of context.
+    eff_before = before_i if before_i > 0 else context_i
+    eff_after = after_i if after_i > 0 else context_i
+
     if not permissions.require_access(path):
         return [_denied(path)]
     regex = re.compile(pattern)
@@ -453,17 +497,50 @@ def grep(pattern: str, path: str) -> list[str]:
     if not root.exists():
         return [f"<path not found: {path}>"]
     candidates = [root] if root.is_file() else root.rglob("*")
+    use_context = eff_before > 0 or eff_after > 0
     results: list[str] = []
-    for f in candidates:
+    for f in sorted(candidates):
         if not f.is_file():
             continue
         try:
             text = f.read_text()
         except (UnicodeDecodeError, PermissionError):
             continue
-        for i, line in enumerate(text.splitlines(), start=1):
-            if regex.search(line):
-                results.append(f"{f}:{i}:{line}")
+        lines = text.splitlines()
+        match_idxs = [
+            i for i, line in enumerate(lines) if regex.search(line)
+        ]
+        if not match_idxs:
+            continue
+        if not use_context:
+            for i in match_idxs:
+                results.append(f"{f}:{i + 1}:{lines[i]}")
+            continue
+        # Build collapsed groups: a new group starts when the next
+        # match's leading context window doesn't touch the previous
+        # group's trailing context window.
+        match_set = set(match_idxs)
+        groups: list[tuple[int, int]] = []  # inclusive (start, end) line idx
+        cur_start = max(0, match_idxs[0] - eff_before)
+        cur_end = min(len(lines) - 1, match_idxs[0] + eff_after)
+        for m in match_idxs[1:]:
+            m_start = max(0, m - eff_before)
+            m_end = min(len(lines) - 1, m + eff_after)
+            if m_start <= cur_end + 1:
+                # Windows touch or overlap — extend.
+                if m_end > cur_end:
+                    cur_end = m_end
+            else:
+                groups.append((cur_start, cur_end))
+                cur_start, cur_end = m_start, m_end
+        groups.append((cur_start, cur_end))
+
+        for gi, (g_start, g_end) in enumerate(groups):
+            if gi > 0:
+                results.append("--")
+            for li in range(g_start, g_end + 1):
+                sep = ":" if li in match_set else "-"
+                results.append(f"{f}:{li + 1}{sep}{lines[li]}")
     return results
 
 
