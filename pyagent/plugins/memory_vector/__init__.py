@@ -307,9 +307,21 @@ def register(api):
     #
     # Spells out the index→read_ledger / fishing→recall_memory
     # decision tree so the agent isn't left to infer it from two
-    # disconnected tool docstrings.
+    # disconnected tool docstrings. Skipped entirely when MEMORY.md
+    # is empty — there's nothing to recall, and the recall_memory
+    # tool's own docstring covers the choice for when the index
+    # later fills. Saves ~459 tokens on every cache miss for fresh
+    # installs / users who don't actively curate memories.
 
     def render_guidance(ctx) -> str:
+        try:
+            if not _parse_index_entries():
+                return ""
+        except OSError:
+            # Filesystem hiccup → render the guidance anyway. Better
+            # to keep the prose than to lose it on a transient read
+            # error.
+            pass
         return (
             "## Recalling memories by similarity\n"
             "\n"
