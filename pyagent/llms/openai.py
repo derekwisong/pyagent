@@ -7,6 +7,21 @@ from typing import Any, Callable
 from openai import OpenAI
 
 
+# Hardcoded context windows per model. OpenAI's lineup splits between
+# 128K-context flagship chat models and 200K-context o-series reasoning
+# models, so the table is real-data, not a uniform default. Default
+# of 128_000 catches gpt-4-turbo / gpt-4o variants that ship with that
+# size; o-series get an explicit override.
+_CONTEXT_WINDOWS = {
+    "gpt-4o": 128_000,
+    "gpt-4o-mini": 128_000,
+    "o1": 200_000,
+    "o1-mini": 128_000,
+    "o3-mini": 200_000,
+}
+_DEFAULT_CONTEXT_WINDOW = 128_000
+
+
 class OpenAIClient:
     """Wraps the OpenAI SDK in our standardized client interface.
 
@@ -30,6 +45,13 @@ class OpenAIClient:
         self.provider_model = f"openai/{model}"
         self.max_tokens = max_tokens
         self._client = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY"))
+
+    @property
+    def context_window(self) -> int:
+        """Maximum prompt-token capacity for this model. See module
+        docstring for the mapping; falls back to the chat-model
+        default for unknown names."""
+        return _CONTEXT_WINDOWS.get(self.model, _DEFAULT_CONTEXT_WINDOW)
 
     def respond(
         self,

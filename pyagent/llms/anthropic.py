@@ -6,6 +6,20 @@ from typing import Any, Callable
 from anthropic import Anthropic
 
 
+# Hardcoded context windows per model family. Built-in providers ship
+# these inline because they don't change often and avoid an API round
+# trip just to know "how big is this model's context." Bumping a model
+# is a one-line edit. Default of 200_000 (the modern Claude family
+# baseline) covers any unknown model name conservatively — better to
+# under-warn than over-warn for a model we haven't catalogued yet.
+_CONTEXT_WINDOWS = {
+    "claude-opus-4-7": 200_000,
+    "claude-sonnet-4-6": 200_000,
+    "claude-haiku-4-5-20251001": 200_000,
+}
+_DEFAULT_CONTEXT_WINDOW = 200_000
+
+
 class AnthropicClient:
     """Wraps the Anthropic SDK in our standardized client interface.
 
@@ -32,6 +46,18 @@ class AnthropicClient:
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY is not set")
         self._client = Anthropic(api_key=api_key)
+
+    @property
+    def context_window(self) -> int:
+        """Maximum prompt-token capacity for this model.
+
+        Used by the agent_proc context-warning machinery to compute
+        utilization vs the window. The lookup falls back to the
+        family default for any model name not in the catalogue —
+        better to under-warn than over-warn on a model we haven't
+        catalogued yet.
+        """
+        return _CONTEXT_WINDOWS.get(self.model, _DEFAULT_CONTEXT_WINDOW)
 
     def respond(
         self,

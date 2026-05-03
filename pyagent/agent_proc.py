@@ -116,6 +116,12 @@ class _ChildState:
     # mid-turn inbox (turn active) or be promoted to a fresh
     # `user_prompt` (idle window). Issue #68.
     turn_active: threading.Event = field(default_factory=threading.Event)
+    # Highest context-utilization tier we've already warned about
+    # this session. Drives "warn once per crossing" behavior so the
+    # 80% chat warning doesn't repeat on every turn that stays above
+    # the line. Reset to -1 (no tier yet) at construction; tiers are
+    # the integers 0/1/2 corresponding to the 60/80/95% thresholds.
+    _context_warn_tier: int = -1
 
     def send(self, event_type: str, **payload: Any) -> None:
         """Send a typed event upstream (CLI for root, parent agent for sub).
@@ -917,6 +923,75 @@ def _bootstrap(
     return agent, session, loaded_plugins
 
 
+# Context-utilization warning thresholds. List of (percent, label,
+# message_template). Tier index in this list IS the integer stored
+# in `_ChildState._context_warn_tier`; new entries should be added
+# in ascending percent order. Crossing a tier emits an `info` event
+# to the chat once; the per-turn `context_status` event still flows
+# unconditionally so the footer always reflects current state.
+_CONTEXT_WARN_TIERS = (
+    (60, "info", "context: {pct}% of {window:,} tokens used"),
+    (
+        80,
+        "warn",
+        "context: {pct}% of {window:,} tokens used — approaching the limit",
+    ),
+    (
+        95,
+        "warn",
+        "context: {pct}% of {window:,} tokens used — next turn likely to fail",
+    ),
+)
+
+
+def _emit_context_status(
+    state: _ChildState, agent: Agent
+) -> None:
+    """After each turn, compute context utilization vs the model's
+    window and emit one `context_status` event for the footer plus,
+    on a tier crossing, one `info` event for the chat.
+
+    Token counting strategy: we use the *previous turn's*
+    ``usage.input`` as a stand-in for "current context size."
+    That's what the provider just paid attention to; the next
+    turn's input will be roughly that plus output plus any new
+    user/tool messages. It under-counts the not-yet-sent next
+    prompt slightly, but over-warns rather than missing the limit.
+
+    Window=0 means the client doesn't know its own context size
+    (older Ollama, pyagent stubs); skip the emission entirely so the
+    footer hides the segment instead of showing a useless 0%.
+    """
+    client = getattr(agent, "client", None)
+    if client is None:
+        return
+    window = int(getattr(client, "context_window", 0) or 0)
+    if window <= 0:
+        return
+    used = int(agent.token_usage.get("input", 0) or 0)
+    if used <= 0:
+        return
+    pct = max(0, min(100, int(used * 100 / window)))
+    state.send("context_status", pct=pct, used=used, window=window)
+
+    # Emit a chat info on the highest tier we've crossed but not yet
+    # warned about. We track the highest tier reached, not just the
+    # immediate crossing, so a turn that jumps multiple tiers at once
+    # (e.g. 50% → 90%) still surfaces the most-severe warning.
+    new_tier = -1
+    for i, (threshold, _level, _msg) in enumerate(_CONTEXT_WARN_TIERS):
+        if pct >= threshold:
+            new_tier = i
+    if new_tier > state._context_warn_tier:
+        state._context_warn_tier = new_tier
+        threshold, level, template = _CONTEXT_WARN_TIERS[new_tier]
+        state.send(
+            "info",
+            level=level,
+            message=template.format(pct=pct, window=window),
+        )
+
+
 def _run_turn(
     state: _ChildState,
     agent: Agent,
@@ -943,12 +1018,21 @@ def _run_turn(
             on_tool_result=lambda n, c: state.send(
                 "tool_result", name=n, content=c
             ),
-            on_usage=lambda u: state.send(
-                "usage",
-                input=int(u.get("input", 0) or 0),
-                output=int(u.get("output", 0) or 0),
-                cache_creation=int(u.get("cache_creation", 0) or 0),
-                cache_read=int(u.get("cache_read", 0) or 0),
+            on_usage=lambda u: (
+                state.send(
+                    "usage",
+                    input=int(u.get("input", 0) or 0),
+                    output=int(u.get("output", 0) or 0),
+                    cache_creation=int(u.get("cache_creation", 0) or 0),
+                    cache_read=int(u.get("cache_read", 0) or 0),
+                ),
+                # Right after the per-LLM-call usage update is
+                # forwarded, recompute context utilization. Doing it
+                # here (rather than at turn_complete) means the
+                # footer gauge updates between tool batches in a
+                # multi-call turn, matching the rest of the gutter
+                # which is already mid-turn-aware.
+                _emit_context_status(state, agent),
             ),
             cancel_event=state.cancel_event,
         )

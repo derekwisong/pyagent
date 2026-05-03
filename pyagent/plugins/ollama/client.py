@@ -155,6 +155,42 @@ class OllamaClient:
         # contract holds — the cost is exactly one extra failed
         # request the first time a no-tools model is used.
         self._skip_tools = False
+        # Cached context-window lookup. None = not yet asked; 0 =
+        # asked-and-unknown (server pre-0.5 / model lacks the field).
+        # Populated by the `context_window` property on first read.
+        self._context_window: int | None = None
+
+    @property
+    def context_window(self) -> int:
+        """Maximum prompt-token capacity for this model, looked up
+        live from the server's `/api/show` payload.
+
+        Cached after first read so the agent loop's per-turn check
+        doesn't redo the HTTP call. Returns 0 when the lookup fails
+        (server unreachable / older Ollama without `model_info`) —
+        the CLI's context-warning machinery treats that as "window
+        unknown" and hides the footer segment, matching the built-in
+        stubs.
+        """
+        if self._context_window is not None:
+            return self._context_window
+        try:
+            info = show_model(self.model, host=self.host)
+        except Exception:
+            self._context_window = 0
+            return 0
+        # Ollama's /api/show puts the architecture's context length
+        # under model_info["<family>.context_length"]. The family
+        # name varies (llama, qwen2, mistral, ...), so scan all keys
+        # ending with `.context_length` and take the first hit.
+        model_info = info.get("model_info") or {}
+        if isinstance(model_info, dict):
+            for key, val in model_info.items():
+                if key.endswith(".context_length") and isinstance(val, int):
+                    self._context_window = val
+                    return val
+        self._context_window = 0
+        return 0
 
     def respond(
         self,
