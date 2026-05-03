@@ -18,9 +18,18 @@ Schema (current):
     max_depth  = 3   # maximum spawn-tree height; root is depth 0
     max_fanout = 5   # max simultaneous children any single agent can hold
 
+    [session]
+    attachment_dir_cap_mb = 25   # soft cap; LRU evict over this. 0 = off.
+
 The subagent caps exist to mitigate fork-bomb behavior — a confused
 turn could spawn unboundedly otherwise, amplifying cost per process
 and outpacing the human's ability to hit Esc.
+
+`session.attachment_dir_cap_mb` is a soft cap on the per-session
+`attachments/` directory size. After each new attachment write,
+files are evicted in least-recently-accessed order (atime, mtime
+fallback) until the dir total is back under cap. The just-written
+file is never a candidate for eviction. Set to 0 to disable.
 
 `default_model` pins the provider/model used when `--model` is not
 passed. Empty string means auto-detect from API-key env vars.
@@ -65,6 +74,9 @@ DEFAULTS: dict[str, Any] = {
     "subagents": {
         "max_depth": 3,
         "max_fanout": 5,
+    },
+    "session": {
+        "attachment_dir_cap_mb": 25,
     },
 }
 
