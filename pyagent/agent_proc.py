@@ -38,6 +38,7 @@ from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any
 
+from pyagent import config as config_mod
 from pyagent import paths
 from pyagent import permissions
 from pyagent import plugins as plugins_mod
@@ -794,10 +795,20 @@ def _bootstrap(
     # spawn is misleading prose.
     catalog_for_roles = roles_mod.catalog if allow_meta else ""
 
+    # Sessions inherit the attachment cap from the parent's config dict
+    # (cli.py reads config.toml once at startup and threads the resolved
+    # value down through agent_config). Subagents inherit the same cap;
+    # they each have their own attachments dir under their own session
+    # subtree, so eviction is per-subagent-session.
+    cap_mb = config_mod.resolve_attachment_dir_cap_mb(
+        config.get("attachment_dir_cap_mb")
+    )
+
     if is_subagent:
         session = Session(
             session_id=config["session_id"],
             root=Path(config["session_root"]),
+            attachment_dir_cap_mb=cap_mb,
         )
         # Plant a small breadcrumb so the on-disk tree is self-describing.
         session.dir.mkdir(parents=True, exist_ok=True)
@@ -819,7 +830,10 @@ def _bootstrap(
             plugin_loader=loaded_plugins,
         )
     else:
-        session = Session(session_id=config["session_id"])
+        session = Session(
+            session_id=config["session_id"],
+            attachment_dir_cap_mb=cap_mb,
+        )
         system = SystemPromptBuilder(
             soul=Path(config["soul_path"]),
             tools=Path(config["tools_path"]),

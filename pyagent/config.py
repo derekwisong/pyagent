@@ -18,9 +18,18 @@ Schema (current):
     max_depth  = 3   # maximum spawn-tree height; root is depth 0
     max_fanout = 5   # max simultaneous children any single agent can hold
 
+    [session]
+    attachment_dir_cap_mb = 25   # soft cap; LRU evict over this. 0 = off.
+
 The subagent caps exist to mitigate fork-bomb behavior — a confused
 turn could spawn unboundedly otherwise, amplifying cost per process
 and outpacing the human's ability to hit Esc.
+
+`session.attachment_dir_cap_mb` is a soft cap on the per-session
+`attachments/` directory size. After each new attachment write,
+files are evicted in least-recently-accessed order (atime, mtime
+fallback) until the dir total is back under cap. The just-written
+file is never a candidate for eviction. Set to 0 to disable.
 
 `default_model` pins the provider/model used when `--model` is not
 passed. Empty string means auto-detect from API-key env vars.
@@ -66,6 +75,9 @@ DEFAULTS: dict[str, Any] = {
         "max_depth": 3,
         "max_fanout": 5,
     },
+    "session": {
+        "attachment_dir_cap_mb": 25,
+    },
 }
 
 
@@ -108,6 +120,68 @@ def load() -> dict[str, Any]:
     user = _read_toml(paths.config_dir() / CONFIG_FILENAME)
     project = _read_toml(LOCAL_CONFIG_DIR / CONFIG_FILENAME)
     return _deep_merge(_deep_merge(DEFAULTS, user), project)
+
+
+_DEFAULT_ATTACHMENT_CAP_MB = 25
+
+
+def resolve_attachment_dir_cap_mb(value: Any) -> int:
+    """Validate a `[session] attachment_dir_cap_mb` value into a
+    non-negative int, warning on type/range surprises.
+
+    Why this exists: the bare ``int(value)`` coercion that older call
+    sites used silently rounds floats (``25.0`` → 25 is fine, but
+    ``0.5`` → 0 silently disables eviction) and quietly accepts
+    negative ints as "off" without explanation. Both paths bit users
+    in the original LRU PR review (#93).
+
+    Resolution rules:
+      - Missing / None → default 25 MB, no warning.
+      - bool (TOML allows it; ``True`` is ``1``, ``False`` is ``0``)
+        → warn, fall back to default.
+      - float → warn, round to ``int`` (preserving the user's intent
+        — they typed a number, just wrong type).
+      - int >= 0 → return as-is.
+      - int < 0 → warn, clamp to 0 (eviction disabled — same effect
+        as the user's likely "off" intent, but explicit).
+      - any other type (str, list, dict, …) → warn, default.
+
+    All warnings go through the module logger so cli.py and
+    agent_proc.py share the same surface.
+    """
+    if value is None:
+        return _DEFAULT_ATTACHMENT_CAP_MB
+    # bool subclasses int — check before isinstance(int)
+    if isinstance(value, bool):
+        logger.warning(
+            "[session] attachment_dir_cap_mb must be an integer, "
+            "got bool: %r — using default %d MB",
+            value, _DEFAULT_ATTACHMENT_CAP_MB,
+        )
+        return _DEFAULT_ATTACHMENT_CAP_MB
+    if isinstance(value, float):
+        coerced = int(value)
+        logger.warning(
+            "[session] attachment_dir_cap_mb must be an integer "
+            "(got float %r); rounding to %d MB",
+            value, coerced,
+        )
+        return max(0, coerced)
+    if isinstance(value, int):
+        if value < 0:
+            logger.warning(
+                "[session] attachment_dir_cap_mb must be >= 0, "
+                "got %d — clamping to 0 (eviction disabled)",
+                value,
+            )
+            return 0
+        return value
+    logger.warning(
+        "[session] attachment_dir_cap_mb must be an integer, got "
+        "%s: %r — using default %d MB",
+        type(value).__name__, value, _DEFAULT_ATTACHMENT_CAP_MB,
+    )
+    return _DEFAULT_ATTACHMENT_CAP_MB
 
 
 def path() -> Path:

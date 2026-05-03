@@ -1762,12 +1762,17 @@ def main(
 
     model = _resolve_model(model)
 
+    cfg = config.load()
+    cap_mb = config.resolve_attachment_dir_cap_mb(
+        cfg.get("session", {}).get("attachment_dir_cap_mb")
+    )
+
     if resume_id:
-        session = Session(session_id=resume_id)
+        session = Session(session_id=resume_id, attachment_dir_cap_mb=cap_mb)
         if not session.exists():
             raise click.UsageError(f"session {resume_id!r} not found at {session.dir}")
     else:
-        session = Session()
+        session = Session(attachment_dir_cap_mb=cap_mb)
 
     soul = paths.resolve("SOUL.md", override=soul, seed="SOUL.md")
     tools_md = paths.resolve("TOOLS.md", override=tools_md, seed="TOOLS.md")
@@ -1788,6 +1793,7 @@ def main(
         "tools_path": str(tools_md),
         "primer_path": str(primer),
         "approved_paths": [str(p) for p in permissions.approved_paths()],
+        "attachment_dir_cap_mb": cap_mb,
     }
 
     # spawn (not fork): pickles fresh, doesn't drag the parent's

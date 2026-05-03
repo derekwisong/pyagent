@@ -9,6 +9,7 @@ into offloading; the agent additionally applies a size-based fallback.
 """
 
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import date
@@ -16,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 import petname
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -50,13 +53,29 @@ class Session:
     DEFAULT_ROOT = Path(".pyagent/sessions")
     attachment_threshold = 8000
     preview_chars = 1000
+    # Soft cap on total attachments-dir size, in megabytes. After each
+    # write, if the dir exceeds this we evict least-recently-accessed
+    # files (atime, mtime fallback) until under the cap. The just-
+    # written file is always preserved. 0 disables eviction entirely.
+    attachment_dir_cap_mb: int = 25
 
-    def __init__(self, session_id: str | None = None, root: Path | None = None) -> None:
+    def __init__(
+        self,
+        session_id: str | None = None,
+        root: Path | None = None,
+        attachment_dir_cap_mb: int | None = None,
+    ) -> None:
         self.root = root if root is not None else self.DEFAULT_ROOT
         self.id = session_id or self._unique_id(self.root)
         self.dir = self.root / self.id
         self.attachments_dir = self.dir / "attachments"
         self.conversation_path = self.dir / "conversation.jsonl"
+        if attachment_dir_cap_mb is not None:
+            # Per-instance override of the class-level default. Keeps
+            # the class attribute as the single source of truth for the
+            # default while letting config wiring inject a different
+            # cap without subclassing.
+            self.attachment_dir_cap_mb = attachment_dir_cap_mb
 
     @classmethod
     def list_ids(cls, root: Path | None = None) -> list[str]:
@@ -114,7 +133,91 @@ class Session:
             path.write_bytes(content)
         else:
             path.write_text(content)
+        # After every write, run LRU eviction if the dir is over cap.
+        # The just-written `path` is always exempt — even a single
+        # write that exceeds the cap by itself stays put (we evict
+        # everything older first, then stop). cap=0 disables eviction.
+        if self.attachment_dir_cap_mb > 0:
+            self._evict_lru_until_under_cap(exclude=path)
         return path
+
+    def _evict_lru_until_under_cap(self, exclude: Path) -> int:
+        """Delete least-recently-accessed attachments until under cap.
+
+        Eviction policy:
+          - Sort files in `attachments_dir` by access time ascending
+            (oldest atime first). Some filesystems mount with
+            `noatime` and never update atime; on those, atime equals
+            ctime/mtime, so falling back to mtime is implicit when the
+            two agree. We still prefer atime explicitly because on a
+            filesystem that DOES track it, "haven't read this in a
+            while" is the policy we want.
+          - The file at `exclude` (the just-written attachment) is
+            never evicted, even if removing every other file still
+            leaves us over cap. A single huge write that exceeds the
+            cap on its own is allowed; the alternative (refusing the
+            write or deleting it) breaks forward progress mid-task,
+            which is exactly what the LRU design avoids per the issue.
+          - Path A re: conversation.jsonl: we do NOT rewrite the JSONL
+            when an evicted file was referenced. A future re-read
+            attempt by the agent will hit the standard "file not
+            found" marker, which is acceptable signal. Documenting
+            here so the contract is grep-able alongside the eviction
+            logic.
+
+        Returns the count of files evicted.
+        """
+        cap_bytes = self.attachment_dir_cap_mb * 1024 * 1024
+        if cap_bytes <= 0:
+            return 0
+        if not self.attachments_dir.exists():
+            return 0
+
+        # Collect (atime, size, path) for everything in the dir. We
+        # gather sizes up front so the running total is stable as we
+        # unlink — no re-stat per iteration.
+        entries: list[tuple[float, int, Path]] = []
+        total = 0
+        try:
+            exclude_resolved = exclude.resolve()
+        except OSError:
+            exclude_resolved = exclude
+        for child in self.attachments_dir.iterdir():
+            if not child.is_file():
+                continue
+            try:
+                st = child.stat()
+            except OSError:
+                continue
+            entries.append((st.st_atime, st.st_size, child))
+            total += st.st_size
+
+        if total <= cap_bytes:
+            return 0
+
+        # Sort oldest-atime first. Tie-break by size descending so a
+        # cluster of same-atime files (common on noatime fs) prefers
+        # to drop bigger ones first — fewer evictions to get under.
+        entries.sort(key=lambda e: (e[0], -e[1]))
+
+        evicted = 0
+        for _atime, size, child in entries:
+            if total <= cap_bytes:
+                break
+            try:
+                if child.resolve() == exclude_resolved:
+                    continue
+            except OSError:
+                if child == exclude:
+                    continue
+            try:
+                child.unlink()
+            except OSError as e:
+                logger.warning("attachment eviction skipped %s: %s", child, e)
+                continue
+            total -= size
+            evicted += 1
+        return evicted
 
     def find_orphan_attachments(self) -> list[Path]:
         """Return attachment files not referenced by conversation.jsonl.
