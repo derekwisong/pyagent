@@ -269,6 +269,157 @@ def _render_models_listing() -> str:
     return "\n".join(lines).rstrip()
 
 
+def _dump_prompt(
+    *,
+    soul_override: Path | None,
+    tools_override: Path | None,
+    primer_override: Path | None,
+    include_schemas: bool,
+) -> None:
+    """Render the system prompt the live agent would see and print it.
+
+    Honors the same SOUL/TOOLS/PRIMER resolution as a normal run —
+    project root → config dir → bundled defaults — so the dump
+    matches what a real session would assemble. Override flags
+    short-circuit resolution so a candidate persona file can be
+    previewed without applying it.
+
+    Plugins are loaded so their prompt sections (memory-vector,
+    memory-markdown, etc.) and tool schemas appear in the dump.
+    Plugin section state is computed against an empty conversation
+    context — the dump shows what a fresh turn looks like, not what
+    a session mid-flight would emit.
+
+    Tool schemas (when --prompt-include-schemas) cover the static
+    built-ins and plugin-registered tools. Dynamic state-dependent
+    tools (subagent meta-tools, ask_parent, checklist tools) are
+    skipped — they exist only when an agent is actively running.
+    Same caveat for any volatile-section content that depends on a
+    real conversation.
+    """
+    from pyagent import plugins as _plugins
+    from pyagent import skills as skills_mod
+    from pyagent import tools as agent_tools
+    from pyagent.prompts import SystemPromptBuilder
+    from pyagent.tool_schema import schema as build_schema
+
+    soul_path = paths.resolve("SOUL.md", override=soul_override, seed="SOUL.md")
+    tools_path = paths.resolve("TOOLS.md", override=tools_override, seed="TOOLS.md")
+    primer_path = paths.resolve("PRIMER.md", override=primer_override, seed="PRIMER.md")
+
+    loaded = _plugins.load()
+    builder = SystemPromptBuilder(
+        soul=soul_path,
+        tools=tools_path,
+        primer=primer_path,
+        skills_catalog=skills_mod.live_catalog,
+        plugin_loader=loaded,
+    )
+    stable, volatile = builder.build_segments()
+
+    out_lines: list[str] = []
+    out_lines.append("=" * 72)
+    out_lines.append("PYAGENT SYSTEM PROMPT — STABLE SEGMENT (cached prefix)")
+    out_lines.append("=" * 72)
+    out_lines.append("")
+    out_lines.append(stable)
+    if volatile:
+        out_lines.append("")
+        out_lines.append("=" * 72)
+        out_lines.append("VOLATILE SEGMENT (after cache breakpoint)")
+        out_lines.append("=" * 72)
+        out_lines.append("")
+        out_lines.append(volatile)
+    else:
+        out_lines.append("")
+        out_lines.append("[no volatile content this turn]")
+
+    schemas_block = ""
+    schema_count = 0
+    if include_schemas:
+        # Static built-ins from agent_tools — same set agent_proc
+        # registers, minus dynamic tools (subagent meta, ask_parent,
+        # checklist) that depend on session/checklist state.
+        builtins = [
+            ("read_file", agent_tools.read_file),
+            ("write_file", agent_tools.write_file),
+            ("edit_file", agent_tools.edit_file),
+            ("list_directory", agent_tools.list_directory),
+            ("grep", agent_tools.grep),
+            ("glob", agent_tools.glob),
+            ("execute", agent_tools.execute),
+            ("run_background", agent_tools.run_background),
+            ("read_output", agent_tools.read_output),
+            ("wait_for", agent_tools.wait_for),
+            ("kill_process", agent_tools.kill_process),
+            ("fetch_url", agent_tools.fetch_url),
+        ]
+        all_schemas: list[dict[str, Any]] = []
+        for name, fn in builtins:
+            try:
+                all_schemas.append(build_schema(name, fn))
+            except Exception as e:  # noqa: BLE001 — surface but keep going
+                all_schemas.append(
+                    {"name": name, "error": f"<schema build failed: {e}>"}
+                )
+        for tool_name, (_pname, fn) in loaded.tools().items():
+            try:
+                all_schemas.append(build_schema(tool_name, fn))
+            except Exception as e:  # noqa: BLE001
+                all_schemas.append(
+                    {"name": tool_name, "error": f"<schema build failed: {e}>"}
+                )
+        import json as _json
+        schemas_block = _json.dumps(all_schemas, indent=2)
+        schema_count = len(all_schemas)
+        out_lines.append("")
+        out_lines.append("=" * 72)
+        out_lines.append(f"TOOL SCHEMAS ({schema_count} tools)")
+        out_lines.append("=" * 72)
+        out_lines.append("")
+        out_lines.append(schemas_block)
+
+    # Token-count footer. char/4 is the conventional rough proxy for
+    # English+code; not a real tokenizer, but useful for relative
+    # comparison between sections.
+    def _tok(s: str) -> int:
+        return len(s) // 4
+
+    stable_chars = len(stable)
+    volatile_chars = len(volatile)
+    schema_chars = len(schemas_block)
+    total_chars = stable_chars + volatile_chars + schema_chars
+    out_lines.append("")
+    out_lines.append("=" * 72)
+    out_lines.append("SIZE FOOTER (rough — len(text)//4 token proxy)")
+    out_lines.append("=" * 72)
+    out_lines.append(
+        f"  stable    {stable_chars:>7} chars  ~{_tok(stable):>5} tokens"
+    )
+    out_lines.append(
+        f"  volatile  {volatile_chars:>7} chars  ~{_tok(volatile):>5} tokens"
+    )
+    if include_schemas:
+        out_lines.append(
+            f"  schemas   {schema_chars:>7} chars  ~{_tok(schemas_block):>5} tokens"
+            f"  ({schema_count} tools)"
+        )
+    out_lines.append("  " + "-" * 60)
+    out_lines.append(
+        f"  TOTAL     {total_chars:>7} chars  ~{_tok(stable + volatile + schemas_block):>5} tokens"
+    )
+    out_lines.append("")
+    out_lines.append("Sources:")
+    out_lines.append(f"  SOUL:   {soul_path}")
+    out_lines.append(f"  TOOLS:  {tools_path}")
+    out_lines.append(f"  PRIMER: {primer_path}")
+    if not include_schemas:
+        out_lines.append("")
+        out_lines.append("Tip: pass --prompt-include-schemas for the JSON tool schemas.")
+
+    print("\n".join(out_lines))
+
+
 def _resolve_model(cli_model: str | None) -> str:
     """Pick a model string. Precedence: --model > config.default_model
     > auto-detect from API-key env vars. Raises a click error if all
@@ -1615,6 +1766,28 @@ async def _repl_async(
     ),
 )
 @click.option(
+    "--prompt-dump",
+    "prompt_dump_flag",
+    is_flag=True,
+    help=(
+        "Render the system prompt the agent would see this turn and "
+        "print it to stdout, then exit. Honors --soul / --tools / "
+        "--primer overrides so you can preview a candidate persona "
+        "change without applying it. Pair with "
+        "--prompt-include-schemas to also dump the JSON tool schemas."
+    ),
+)
+@click.option(
+    "--prompt-include-schemas",
+    "prompt_include_schemas",
+    is_flag=True,
+    help=(
+        "When dumping the system prompt, also append the JSON tool "
+        "schemas the agent would receive on every turn. Off by "
+        "default — schemas are bulky and most audits want the prose."
+    ),
+)
+@click.option(
     "--resume",
     "resume_id",
     is_flag=False,
@@ -1674,6 +1847,8 @@ def main(
     primer: Path | None,
     model: str | None,
     list_models_flag: bool,
+    prompt_dump_flag: bool,
+    prompt_include_schemas: bool,
     resume_id: str | None,
     reset_soul: bool,
     reset_tools: bool,
@@ -1698,6 +1873,15 @@ def main(
 
         _plugins.load()
         console.print(_render_models_listing())
+        return
+
+    if prompt_dump_flag:
+        _dump_prompt(
+            soul_override=soul,
+            tools_override=tools_md,
+            primer_override=primer,
+            include_schemas=prompt_include_schemas,
+        )
         return
 
     will_reset_soul = reset_soul or reset_all
