@@ -29,6 +29,13 @@ Configuration (all optional, all read at call time):
         the full set. Defaults to ``"auto"``. Use to pin to a known
         subset (e.g. ``"duckduckgo,brave,yahoo,mojeek"``) if a
         particular engine stays flaky.
+    ``save_structured`` — when true (default), web_search saves the
+        structured ``[{title, url, snippet}]`` list as a JSON
+        attachment alongside the inline markdown. The footer points
+        at the attachment so downstream tools (extract_doc, future
+        chained workflows) can consume the URL list without
+        re-running the search. Set to false to keep the legacy
+        markdown-only string return.
 
 Lifted from the user-scope `web-search` skill at
 ~/.config/pyagent/skills/web-search/. The skill is left in place so
@@ -39,15 +46,24 @@ because plugin tools call directly while skill scripts go through
 
 from __future__ import annotations
 
+import json
 from typing import Sequence
 
 from pyagent.plugins.web_search import search as _search
+from pyagent.session import Attachment
 
 
 # Maximum results the agent is allowed to ask for in one call. DDG
 # starts rate-limiting around the high 20s in practice; cap is a
 # safety belt rather than the everyday limit.
 _MAX_RESULTS = 25
+
+# Side-save the structured SearchResult list to attachments by
+# default. Cost is ~3KB per call; benefit is downstream tools can
+# consume the URL list without re-running the search, and the agent
+# has a recovery path if it forgets which URLs it saw. Configurable
+# via [plugins.web-search] save_structured.
+_DEFAULT_SAVE_STRUCTURED = True
 
 
 def _resolve_attempts(plugin_cfg: dict) -> int:
@@ -74,6 +90,13 @@ def _resolve_backend(plugin_cfg: dict) -> str:
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
     return _search._DEFAULT_BACKEND
+
+
+def _resolve_save_structured(plugin_cfg: dict) -> bool:
+    raw = plugin_cfg.get("save_structured")
+    if isinstance(raw, bool):
+        return raw
+    return _DEFAULT_SAVE_STRUCTURED
 
 
 def _config_warnings(plugin_cfg: dict) -> list[str]:
@@ -132,6 +155,15 @@ def _config_warnings(plugin_cfg: dict) -> list[str]:
         elif not raw.strip():
             out.append("backend is set but empty — using default 'auto'")
 
+    if "save_structured" in plugin_cfg:
+        raw = plugin_cfg["save_structured"]
+        if not isinstance(raw, bool):
+            out.append(
+                f"save_structured must be a bool, got "
+                f"{type(raw).__name__}: {raw!r} — using default "
+                f"{_DEFAULT_SAVE_STRUCTURED}"
+            )
+
     return out
 
 
@@ -143,7 +175,7 @@ def register(api):
     for warning in _config_warnings(api.plugin_config or {}):
         api.log("warning", warning)
 
-    def web_search(query: str, n: int = 10) -> str:
+    def web_search(query: str, n: int = 10):
         """Search the web via DuckDuckGo; return up to `n` results.
 
         Reach for this when `fetch_url` alone isn't enough — i.e. you
@@ -162,6 +194,15 @@ def register(api):
         known URL), or a generic ``<search error: ...>`` for
         programmer/parser issues.
 
+        On a successful search the structured ``[{title, url,
+        snippet}]`` list is also saved as a JSON attachment. The
+        markdown above the ``[also saved: ...]`` footer is the
+        complete answer — no need to read the attachment unless
+        you're chaining (passing the structured form to
+        ``extract_doc`` or another tool that consumes it).
+        Disable via ``[plugins.web-search] save_structured = false``
+        for the legacy markdown-only string return.
+
         Args:
             query: Search query. Plain text; DDG handles quoting and
                 operators.
@@ -169,13 +210,18 @@ def register(api):
                 may auto-offload as an attachment.
 
         Returns:
-            A markdown numbered list of `title — url` lines with
-            snippets. ``<no results ...>`` if every backend returned
-            empty; ``<search error: rate limited; ...>`` if the upstream
-            is explicitly throttling; ``<search error: backend
-            unavailable after N attempts; ...>`` if all retries failed
-            with transient errors; ``<search error: ...>`` for other
-            failures.
+            On success: an Attachment whose inline_text is a markdown
+            numbered list of ``title — url`` lines with snippets, and
+            whose content is the same results as a JSON list. The
+            agent renders the markdown inline with an ``[also saved:
+            <path>]`` footer.
+
+            On miss / failure: a plain string marker. ``<no results
+            ...>`` if every backend returned empty; ``<search error:
+            rate limited; ...>`` if the upstream is explicitly
+            throttling; ``<search error: backend unavailable after N
+            attempts; ...>`` if all retries failed with transient
+            errors; ``<search error: ...>`` for other failures.
         """
         if not query or not query.strip():
             return "<query is empty>"
@@ -192,6 +238,7 @@ def register(api):
         attempts = _resolve_attempts(cfg)
         backoff_s = _resolve_backoff_s(cfg)
         backend = _resolve_backend(cfg)
+        save_structured = _resolve_save_structured(cfg)
 
         try:
             results = _search.ddg_text_search(
@@ -218,7 +265,28 @@ def register(api):
             )
         except Exception as e:
             return f"<search error: {e}>"
-        return _search.format_search_results(results, query)
+
+        markdown = _search.format_search_results(results, query)
+        # Empty-results path: format_search_results returned the
+        # `<no results ...>` marker. Nothing structurally useful to
+        # save; return the marker as a plain string so error/empty
+        # behavior stays consistent.
+        if not save_structured or not results:
+            return markdown
+
+        structured = json.dumps(
+            [
+                {"title": r.title, "url": r.url, "snippet": r.snippet}
+                for r in results
+            ],
+            indent=2,
+            ensure_ascii=False,
+        )
+        return Attachment(
+            content=structured,
+            inline_text=markdown,
+            suffix=".json",
+        )
 
     def web_search_instant(query: str, related: bool = False) -> str:
         """Hit DuckDuckGo's instant-answer API for a short factual reply.

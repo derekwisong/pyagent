@@ -149,7 +149,18 @@ def _check_attachment_construction_sites() -> None:
             if name == "Attachment":
                 sites.append((py.relative_to(repo_root), node.lineno))
 
-    allowed = {Path("pyagent/tools.py")}
+    # Files whose Attachment(...) calls have been reviewed and confirmed
+    # to flow through Agent._render_tool_result (i.e. they're returned
+    # from a tool, not stuffed into the conversation directly).
+    #   - pyagent/tools.py: read_file binary branch.
+    #   - pyagent/plugins/web_search/__init__.py: side-saves the
+    #     structured SearchResult list as JSON via Attachment(
+    #     content=json, inline_text=markdown). The Agent layer
+    #     renders inline_text + [also saved: ...] footer.
+    allowed = {
+        Path("pyagent/tools.py"),
+        Path("pyagent/plugins/web_search/__init__.py"),
+    }
     unexpected = [(p, i) for (p, i) in sites if p not in allowed]
     assert not unexpected, (
         "Unexpected Attachment(...) construction site(s); each new site "
@@ -226,17 +237,24 @@ def _check_attachment_inline_text_set() -> None:
     )
     assert isinstance(rendered, str), type(rendered)
     assert rendered.startswith(inline), rendered
-    # Footer at the tail; minimal shape "[also saved: <path>]".
+    # Footer at the tail; explicit about "complete above" + "for chaining".
     assert rendered.rstrip().endswith("]"), rendered
     assert "[also saved: " in rendered, rendered
+    # The footer must signal that the inline view is COMPLETE so the
+    # agent doesn't reflexively re-read the attachment for "missing"
+    # content (a real risk given how the offload header trains
+    # similar-shaped attention).
+    assert "inline answer above is complete" in rendered, rendered
+    assert "for downstream tools" in rendered, rendered
     # No offload header: the file is *side data*, not an offloaded big
     # result whose preview the agent must not re-read.
     assert "[offload " not in rendered, rendered
     assert "Do NOT read_file" not in rendered
 
     # Recover the path from the footer and confirm the bytes landed.
-    footer = rendered.rsplit("[also saved: ", 1)[1].rstrip().rstrip("]")
-    saved_path = Path(footer)
+    # Footer shape: "[also saved: <path> — inline answer above is ...]"
+    footer_chunk = rendered.rsplit("[also saved: ", 1)[1]
+    saved_path = Path(footer_chunk.split(" — ", 1)[0])
     assert saved_path.exists(), saved_path
     assert saved_path.read_text() == structured
     assert saved_path.suffix == ".json", saved_path
