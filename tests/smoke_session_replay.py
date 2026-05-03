@@ -157,9 +157,15 @@ def _check_attachment_construction_sites() -> None:
     #     structured SearchResult list as JSON via Attachment(
     #     content=json, inline_text=markdown). The Agent layer
     #     renders inline_text + [also saved: ...] footer.
+    #   - pyagent/plugins/reddit_search/__init__.py: same pattern as
+    #     web_search — side-saves structured RedditPost list.
+    #   - pyagent/plugins/hn_search/__init__.py: same pattern as
+    #     web_search — side-saves structured HNStory list.
     allowed = {
         Path("pyagent/tools.py"),
         Path("pyagent/plugins/web_search/__init__.py"),
+        Path("pyagent/plugins/reddit_search/__init__.py"),
+        Path("pyagent/plugins/hn_search/__init__.py"),
     }
     unexpected = [(p, i) for (p, i) in sites if p not in allowed]
     assert not unexpected, (

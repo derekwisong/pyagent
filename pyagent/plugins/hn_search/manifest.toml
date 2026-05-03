@@ -1,0 +1,23 @@
+name = "hn-search"
+version = "0.1.0"
+description = "Search Hacker News stories and comments via the Algolia public API."
+api_version = "1"
+
+# One stateless tool:
+#
+#   hn_search(query, n=10, kind="story", time_window="all",
+#             min_points=None)
+#       Search HN. Returns the same Attachment(inline_text=md,
+#       content=json) shape as web_search and reddit_search.
+#
+# Algolia's HN search index (hn.algolia.com/api/v1) is the same
+# backend HN's own Search box uses. Public, no auth, no API key.
+# Rate limits are generous; in practice the agent hits transient
+# 5xx far more often than 429.
+
+[provides]
+tools = ["hn_search"]
+
+# Stateless and read-only — fine to load in subagents.
+[load]
+in_subagents = true
