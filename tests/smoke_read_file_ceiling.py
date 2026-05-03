@@ -64,7 +64,7 @@ def _check_large_read_file_offloads() -> None:
         )
         text = "y" * size
         rendered = agent._render_tool_result("read_file", text)
-        assert "[output saved to" in rendered, rendered
+        assert rendered.startswith("[offload "), rendered
         assert text not in rendered, (
             "raw payload leaked through soft-threshold offload"
         )
@@ -94,7 +94,7 @@ def _check_hard_ceiling_still_fires() -> None:
         ceiling = agent.HARD_OFFLOAD_CEILING
         text = "q" * (ceiling + 5_000)
         rendered = agent._render_tool_result("read_skill", text)
-        assert "[output saved to" in rendered, rendered
+        assert rendered.startswith("[offload "), rendered
         assert text not in rendered
     print("✓ hard ceiling still offloads oversize read_skill output")
 

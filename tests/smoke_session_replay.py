@@ -52,7 +52,7 @@ def _check_stub_not_content() -> None:
     # Mint a stub the same way Agent._render_tool_result does.
     preview = payload[: session.preview_chars]
     stub = Agent._format_offload_ref(attachment_path, len(payload), preview)
-    assert "[output saved to" in stub, stub
+    assert stub.startswith("[offload "), stub
 
     # Build a realistic tool-result conversation entry and persist it.
     entry = {
@@ -181,7 +181,7 @@ def _check_render_path_returns_stub() -> None:
     )
     assert isinstance(rendered, str), type(rendered)
     assert big not in rendered, "raw content leaked through _render_tool_result"
-    assert "[output saved to" in rendered, rendered
+    assert rendered.startswith("[offload "), rendered
     print(f"✓ _render_tool_result(Attachment) → stub: {len(rendered)} chars")
 
 
