@@ -43,6 +43,109 @@ def _check_offload_regex_matches_format_offload_ref() -> None:
     print(f"✓ _OFFLOAD_RE captures path={m.group(1)!r} size={m.group(2)!r}")
 
 
+def _check_offload_header_structured_tokens() -> None:
+    """The new structured header (issue #82) carries produced/cap/file
+    tokens so the agent can size its next slice without bisecting.
+
+    Locks the format the regex above relies on, plus the optional
+    fields a tool-aware caller may pass through (cap, file_lines).
+    """
+    fake_path = Path("/tmp/foo.txt")
+    stub = Agent._format_offload_ref(
+        fake_path,
+        10204,
+        "preview",
+        cap_chars=8000,
+        file_lines=561,
+    )
+    first_line = stub.splitlines()[0]
+    assert first_line.startswith(f"[offload {fake_path}"), first_line
+    assert "produced 10204c" in first_line, first_line
+    assert "cap 8000c" in first_line, first_line
+    assert "file 561 lines" in first_line, first_line
+    # Header should be MUCH cheaper than the old prose paragraph (~330c).
+    assert len(first_line) < 130, (
+        f"header bloated past target: {len(first_line)}c — {first_line!r}"
+    )
+    print(f"✓ structured header tokens present ({len(first_line)}c)")
+
+
+def _check_offload_read_file_next_range_hint() -> None:
+    """For `read_file` with a known consumed range, the hint line tells
+    the agent the next start so successive slices don't overlap."""
+    from pyagent.agent import Agent
+    from pyagent.session import Session
+    import tempfile as _tempfile
+
+    with _tempfile.TemporaryDirectory() as td:
+        session = Session(session_id="hint", root=Path(td))
+        session._ensure_dirs()
+        agent = Agent(client=None, session=session)
+        agent.add_tool("read_file", lambda: None, auto_offload=False)
+        # 240 lines of 80 chars each = ~19_440 chars > 8000 threshold.
+        text = "\n".join(["x" * 80 for _ in range(240)])
+        rendered = agent._render_tool_result(
+            "read_file", text, args={"path": "f.txt", "start": 200, "end": 700}
+        )
+        # Header line 1.
+        lines = rendered.splitlines()
+        assert lines[0].startswith("[offload "), lines[0]
+        # Hint line 2 — read_file gets the range-aware next-call line.
+        assert lines[1].startswith("[next: read_file(f.txt"), lines[1]
+        assert "start=440" in lines[1], lines[1]  # 200 + 240 lines
+        assert "lines 200-439" in lines[1], lines[1]
+        print(f"✓ read_file next-range hint: {lines[1]!r}")
+
+
+def _check_offload_read_file_whole_file_consumed() -> None:
+    """When the agent asked for to-EOF and the read_file tool didn't
+    truncate, the hint says `[whole file consumed]` instead of
+    pointing at a phantom next slice."""
+    from pyagent.agent import Agent
+    from pyagent.session import Session
+    import tempfile as _tempfile
+
+    with _tempfile.TemporaryDirectory() as td:
+        session = Session(session_id="whole", root=Path(td))
+        session._ensure_dirs()
+        agent = Agent(client=None, session=session)
+        agent.add_tool("read_file", lambda: None, auto_offload=False)
+        # No truncation marker, no end arg ⇒ "[whole file consumed]".
+        text = "\n".join(["y" * 80 for _ in range(150)])
+        rendered = agent._render_tool_result(
+            "read_file", text, args={"path": "g.txt", "start": 1}
+        )
+        lines = rendered.splitlines()
+        assert "[whole file consumed]" in lines[1], lines[1]
+        print(f"✓ whole-file-consumed hint: {lines[1]!r}")
+
+
+def _check_offload_tool_specific_hints() -> None:
+    """`execute` / `fetch_url` / `html_to_md` get their own hint lines.
+    `read_file` is exempt (it gets the range-aware variant)."""
+    fake_path = Path("/tmp/x.txt")
+    for tool, needle in [
+        ("execute", "stdout was huge"),
+        ("fetch_url", "html_to_md"),
+        ("html_to_md", "html_to_md"),
+    ]:
+        stub = Agent._format_offload_ref(
+            fake_path, 9000, "preview", cap_chars=8000, tool_name=tool
+        )
+        lines = stub.splitlines()
+        assert lines[1].startswith("[hint: "), (tool, lines[1])
+        assert needle in lines[1], (tool, lines[1])
+    # A tool with no entry in the table (e.g. `grep`) gets no hint
+    # line — grep emits its own truncation marker in the body.
+    stub = Agent._format_offload_ref(
+        fake_path, 9000, "preview", cap_chars=8000, tool_name="grep"
+    )
+    lines = stub.splitlines()
+    # First line is header, then "--- preview ---", then preview body.
+    assert lines[1] == "--- preview ---", lines
+    print("✓ tool-specific hints render for execute/fetch_url/html_to_md")
+
+
 def _write_synthetic_session(tmp: Path) -> Path:
     """Mint a session dir with a transcript containing both pre-#15 and
     post-#15 assistant turns, plus inline + offloaded tool results, and
@@ -420,6 +523,10 @@ def _check_path_traversal_refused() -> None:
 
 def main() -> None:
     _check_offload_regex_matches_format_offload_ref()
+    _check_offload_header_structured_tokens()
+    _check_offload_read_file_next_range_hint()
+    _check_offload_read_file_whole_file_consumed()
+    _check_offload_tool_specific_hints()
     _check_audit_synthetic_session()
     _check_render_text_smoke()
     _check_render_json_smoke()

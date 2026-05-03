@@ -27,12 +27,13 @@ from typing import Any
 from pyagent import pricing
 
 
-# Matches the prefix produced by `Agent._format_offload_ref(path, size, preview)`.
-# Captures the attachment path and its char count. Anchored to the start
-# of the tool-result content; unanchored matching would catch the
-# substring inside an inline tool result that happens to mention an
-# attachment, inflating the offload count.
-_OFFLOAD_RE = re.compile(r"^\[output saved to (\S+) \((\d+) chars\)")
+# Matches the prefix produced by `Agent._format_offload_ref` (issue #82
+# changed the header from prose to structured tokens). Captures the
+# attachment path and its char count. Anchored to the start of the
+# tool-result content; unanchored matching would catch the substring
+# inside an inline tool result that happens to mention an attachment,
+# inflating the offload count.
+_OFFLOAD_RE = re.compile(r"^\[offload (\S+) \| produced (\d+)c")
 
 
 @dataclass

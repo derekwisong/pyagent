@@ -203,7 +203,7 @@ class Agent:
                 declared_tool_provenance=provenance,
             )
         result = self.tools[name](**args)
-        return self._render_tool_result(name, result)
+        return self._render_tool_result(name, result, args=args)
 
     # Hard ceiling: any tool result above this size is offloaded
     # regardless of the tool's `auto_offload` setting. Prevents a
@@ -226,7 +226,12 @@ class Agent:
     # read of HTML / a wide log line / a binary mistakenly read as text.
     SOFT_THRESHOLD_FORCED_TOOLS: frozenset[str] = frozenset({"read_file"})
 
-    def _render_tool_result(self, name: str, result: Any) -> str:
+    def _render_tool_result(
+        self,
+        name: str,
+        result: Any,
+        args: dict[str, Any] | None = None,
+    ) -> str:
         if isinstance(result, Attachment):
             if not self.session:
                 if result.preview:
@@ -235,8 +240,13 @@ class Agent:
             path = self.session.write_attachment(
                 name, result.content, result.suffix
             )
+            cap = self.session.attachment_threshold
             return self._format_offload_ref(
-                path, len(result.content), result.preview
+                path,
+                len(result.content),
+                result.preview,
+                cap_chars=cap,
+                tool_name=name,
             )
 
         if isinstance(result, str):
@@ -260,7 +270,52 @@ class Agent:
             if (auto and over_threshold) or over_ceiling or forced_soft:
                 path = self.session.write_attachment(name, text)
                 preview = text[: self.session.preview_chars]
-                return self._format_offload_ref(path, len(text), preview)
+                # File-shape and read_file range hints are computed
+                # from the rendered text + the original tool args so
+                # the agent can size its next slice without having to
+                # bisect by feel (issue #82).
+                file_lines = text.count("\n") + 1 if text else 0
+                range_consumed: tuple[int, int] | None = None
+                next_call_hint: str | None = None
+                if name == "read_file" and isinstance(args, dict):
+                    rf_path = args.get("path")
+                    rf_start_raw = args.get("start", 1)
+                    rf_end_raw = args.get("end")
+                    try:
+                        rf_start = int(rf_start_raw)
+                    except (TypeError, ValueError):
+                        rf_start = 1
+                    rf_consumed_end = rf_start + file_lines - 1
+                    range_consumed = (rf_start, rf_consumed_end)
+                    # Was this slice the tail of the file? If `end`
+                    # is unset the agent asked for "to EOF" — but
+                    # `read_file` itself caps at 2000 lines and
+                    # appends a `... (truncated: ...)` marker when
+                    # it had to truncate, so check for that instead
+                    # of trusting the args. With explicit end, the
+                    # next start is one past what we just returned.
+                    end_is_eof = rf_end_raw is None
+                    truncated_marker = "... (truncated: file has "
+                    file_was_truncated = truncated_marker in text
+                    if end_is_eof and not file_was_truncated:
+                        next_call_hint = "[whole file consumed]"
+                    elif rf_path is not None:
+                        next_start = rf_consumed_end + 1
+                        next_call_hint = (
+                            f"[next: read_file({rf_path}, "
+                            f"start={next_start}) — you've read lines "
+                            f"{rf_start}-{rf_consumed_end}]"
+                        )
+                return self._format_offload_ref(
+                    path,
+                    len(text),
+                    preview,
+                    cap_chars=self.session.attachment_threshold,
+                    file_lines=file_lines,
+                    range_consumed=range_consumed,
+                    next_call_hint=next_call_hint,
+                    tool_name=name,
+                )
         return text
 
     def _scrub_large_tool_args(self, call: dict[str, Any]) -> None:
@@ -296,18 +351,85 @@ class Agent:
                     f"see the tool result for the outcome>"
                 )
 
+    # Per-tool next-step hints rendered into the offload header when no
+    # tool-specific guidance has already been computed (read_file gets
+    # its own range-aware hint via `next_call_hint`; grep already
+    # appends a "tighten the pattern" marker on truncation in
+    # tools.py). See issue #82.
+    _TOOL_HINTS: dict[str, str] = {
+        "execute": (
+            "stdout was huge — filter (`grep`/`head`) or redirect to a "
+            "file"
+        ),
+        "fetch_url": (
+            "use `html_to_md` on the saved path or `read_file` with a "
+            "smaller range"
+        ),
+        "html_to_md": (
+            "use `html_to_md` on the saved path or `read_file` with a "
+            "smaller range"
+        ),
+    }
+
     @staticmethod
-    def _format_offload_ref(path: Any, size: int, preview: str) -> str:
-        header = (
-            f"[output saved to {path} ({size} chars) — preview below. "
-            f"Do NOT read_file the whole attachment; that pulls every "
-            f"byte back into context permanently. If you need more, "
-            f"grep for what you want or read_file with start/end to "
-            f"slice a specific range.]"
-        )
+    def _format_offload_ref(
+        path: Any,
+        size: int,
+        preview: str,
+        *,
+        cap_chars: int | None = None,
+        file_lines: int | None = None,
+        range_consumed: tuple[int, int] | None = None,
+        next_call_hint: str | None = None,
+        tool_name: str | None = None,
+    ) -> str:
+        """Render the offload notice the agent sees in place of bytes.
+
+        The first line is a structured header keyed `produced` /
+        `cap` / `file` so the agent can size its next slice on the
+        first try instead of bisecting (issue #82). Older inline
+        prose has been dropped — for `read_file` the next-range
+        hint replaces the generic warning, for other tools the hint
+        comes from `_TOOL_HINTS` keyed off `tool_name`.
+
+        Note: `range_consumed` is currently included on the next-step
+        line for `read_file` rather than the header; kept as a
+        parameter so future callers can surface it independently
+        (e.g. tail/head-style readers) without refactoring.
+        """
+        # Header: structured tokens. Keep keys / order stable —
+        # `pyagent.sessions_audit._OFFLOAD_RE` parses this prefix to
+        # identify offloaded results vs inline ones.
+        parts = [f"[offload {path}", f"produced {size}c"]
+        if cap_chars is not None:
+            parts.append(f"cap {cap_chars}c")
+        if file_lines is not None and file_lines > 0:
+            avg = max(1, size // file_lines) if file_lines else 0
+            parts.append(f"file {file_lines} lines, ~{avg}c/line avg")
+        header = " | ".join(parts) + "]"
+
+        # Next-step line: read_file gets a range-aware hint computed
+        # by the caller; other tools fall back to the static hint
+        # table. Some tools (`grep`) emit their own truncation hint
+        # inside the result body — they get nothing extra here.
+        hint_line: str | None = None
+        if next_call_hint:
+            hint_line = next_call_hint
+        elif tool_name and tool_name in Agent._TOOL_HINTS:
+            hint_line = f"[hint: {Agent._TOOL_HINTS[tool_name]}]"
+        # `range_consumed` is not separately rendered today (the
+        # range info already lives in `next_call_hint`); reserved for
+        # future tool-shapes. Reference it so static analysis doesn't
+        # flag it.
+        _ = range_consumed
+
+        lines = [header]
+        if hint_line:
+            lines.append(hint_line)
         if preview:
-            return f"{header}\n\n--- preview ---\n{preview}"
-        return header
+            lines.append("--- preview ---")
+            lines.append(preview)
+        return "\n".join(lines)
 
     def _route_tool(
         self,
