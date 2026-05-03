@@ -144,16 +144,8 @@ def catalog(skills: dict[str, Skill]) -> str:
     lines = [
         "## Available skills",
         "",
-        "Each line is a skill you can load on demand. When the user's "
-        "request matches a description, call `read_skill(<name>)` to "
-        "load that skill's instructions. The call is idempotent — if a "
-        "long session has pushed the body out of working memory or you "
-        "are unsure of a script's exact syntax, just call it again.",
-        "",
-        "This list re-renders before every model call, so a skill you "
-        "or the user just installed shows up on the next call — no "
-        "session restart needed. The body still requires `read_skill` "
-        "to load.",
+        "Skills you can load on demand via `read_skill(<name>)`. "
+        "Idempotent — call again if the body has rolled out of context.",
         "",
     ]
     for skill in sorted(skills.values(), key=lambda s: s.name):

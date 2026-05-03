@@ -504,21 +504,14 @@ def glob(
 ) -> list[str]:
     """Find files by name pattern under `root`.
 
-    Reach for this whenever you'd otherwise call `execute("find ...")`
-    to discover files by name — it's faster, billed as read-only
-    metadata, and dodges the shell-quoting failure modes of `find`.
-    `grep` covers content search; `list_directory` covers a single
-    level; `glob` is the recursive name-match peer.
-
     Patterns use Python `pathlib`-style semantics: `**/*.py` matches
     every `.py` file at any depth, `src/*.ts` matches one level deep
-    under `src/`, etc. Output paths are relative to `root` so they can
-    be fed straight back into `read_file` / `grep`.
+    under `src/`. Output paths are relative to `root` so they can be
+    fed straight back into `read_file` / `grep`.
 
-    Default exclusions skip `.git`, `.venv`, `venv`, `node_modules`,
+    Default exclusions: `.git`, `.venv`, `venv`, `node_modules`,
     `__pycache__`, `*.pyc`, `.pytest_cache`, `.mypy_cache`, `dist`,
-    `build`, `*.egg-info` — same set bench_cli uses when seeding
-    workspaces. Pass a more specific `root` if you need to look inside
+    `build`, `*.egg-info`. Pass a more specific `root` to look inside
     one of those (e.g. `root="node_modules/some-pkg"`).
 
     Args:
