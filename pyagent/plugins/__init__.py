@@ -38,6 +38,7 @@ import logging
 import os
 import shutil
 import sys
+import threading
 import tomllib
 from dataclasses import dataclass, field
 from importlib import resources
@@ -59,6 +60,17 @@ ENTRY_POINT_GROUP = "pyagent.plugins"
 # user-role messages).
 SUPPORTED_API_VERSIONS: set[str] = {"1", "2"}
 RECENT_MESSAGES_WINDOW = 8
+
+# Maximum nesting depth for `PluginAPI.call_tool` chains. A → B → C → D
+# is fine; A → B → C → D → E is rejected with the depth-exceeded marker.
+# Cap is per-thread (we use threading.local) so concurrent agent threads
+# don't see each other's nesting state.
+CALL_TOOL_DEPTH_CAP = 4
+_call_tool_state = threading.local()
+
+
+def _call_tool_depth() -> int:
+    return int(getattr(_call_tool_state, "depth", 0))
 
 
 # ---- Public types ----------------------------------------------
@@ -343,6 +355,66 @@ class PluginAPI:
         if session is None:
             return None
         return session.write_attachment(tool_name, content, suffix)
+
+    # ---- cross-plugin tool composition --------------------------
+
+    def call_tool(self, name: str, **kwargs: Any) -> str:
+        """Invoke another plugin's registered tool from inside a tool body.
+
+        Returns the called tool's raw output (string convention with
+        ``<… error: …>`` markers — propagated as-is). On failure modes
+        the harness owns, returns one of these marker strings rather
+        than raising:
+
+        - ``<error: tool {name!r} not available in this context>`` when
+          the tool isn't in this process's resolved registry. Happens
+          in subagents where the providing plugin is
+          ``in_subagents = false``, when the plugin failed to load,
+          or when the plugin loader simply isn't bound (e.g. unit
+          tests using a hand-rolled fake API).
+        - ``<error: tool composition depth exceeded>`` when a chain of
+          ``call_tool`` invocations would exceed ``CALL_TOOL_DEPTH_CAP``.
+          Bounds A → B → A loops without forbidding all recursion.
+
+        Permissions: the called tool inherits the calling agent's
+        permission scope. ``permissions.require_access(...)`` is
+        module-global (set once at process boot), so file-access
+        prompts for the called tool surface through the same handler
+        the calling tool would have used. There is no separate
+        "system" context.
+
+        Discoverability: ``call_tool`` is a plugin-author API only —
+        it is NOT exposed to the LLM through the tool list, and
+        plugins must not re-publish wrappers that re-expose it as an
+        agent-facing tool.
+
+        If this PluginAPI was constructed without a ``LoadedPlugins``
+        loader (the bench harness, ``_FakeAPI`` in tests), the call
+        gracefully degrades to the "tool not available" marker — same
+        shape callers must already handle for the subagent-filtered
+        case. We deliberately do not raise here so plugin-author code
+        composes the same way in test and production contexts.
+        """
+        loader = self._loader
+        if loader is None:
+            return (
+                f"<error: tool {name!r} not available in this context>"
+            )
+        tools = loader.tools()
+        entry = tools.get(name)
+        if entry is None:
+            return (
+                f"<error: tool {name!r} not available in this context>"
+            )
+        depth = _call_tool_depth()
+        if depth >= CALL_TOOL_DEPTH_CAP:
+            return "<error: tool composition depth exceeded>"
+        _call_tool_state.depth = depth + 1
+        try:
+            _, fn = entry
+            return fn(**kwargs)
+        finally:
+            _call_tool_state.depth = depth
 
     # ---- registration -------------------------------------------
 
