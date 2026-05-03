@@ -18,8 +18,13 @@ Configuration (all optional, all read at call time):
 
   ``[plugins.doc-tools]`` table in pyagent's config TOML
     ``model`` — provider/model string the tools call. Defaults to
-        ``anthropic/claude-haiku-4-5-20251001``: cheap, fast,
-        tool-capable. Per-call ``model=`` overrides.
+        ``ollama/llama3.2:latest`` — chosen from a head-to-head over
+        local ollama models on representative fixtures: 5s extract,
+        sub-1s summarize, perfect schema match, 2GB on disk. Requires
+        the ollama daemon running and the model pulled; users without
+        ollama should set this to a hosted model
+        (e.g. ``anthropic/claude-haiku-4-5-20251001``). Per-call
+        ``model=`` overrides.
     ``min_size_chars`` — files smaller than this trigger a "just
         read it directly" response instead of spinning up a sub-LLM.
         Defaults to 4000 — below that the round-trip cost beats
@@ -41,7 +46,7 @@ from pyagent import permissions
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_MODEL = "anthropic/claude-haiku-4-5-20251001"
+_DEFAULT_MODEL = "ollama/llama3.2:latest"
 _DEFAULT_MIN_SIZE_CHARS = 4000
 
 # Cap how much of the document we send to the sub-LLM in one call.
