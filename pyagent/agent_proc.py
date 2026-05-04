@@ -634,7 +634,8 @@ def _register_tools(
     _add("wait_for", agent_tools.wait_for, auto_offload=False)
     _add("kill_process", agent_tools.kill_process, auto_offload=False)
     _add("fetch_url", agent_tools.fetch_url)
-    # read_ledger / write_ledger are now provided by the bundled
+    # Memory tools (read_memory / write_memory / write_user /
+    # add_memory / update_memory_hook) come from the bundled
     # memory-markdown plugin (see pyagent/plugins/memory_markdown/).
     # Disabling that plugin removes the tools entirely — clean
     # replacement surface for alternative memory backends.

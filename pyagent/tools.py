@@ -181,10 +181,11 @@ def _denied(path: str) -> str:
     return f"<permission denied (outside workspace): {path}>"
 
 
-# read_ledger / write_ledger moved to the bundled memory-markdown
-# plugin (pyagent/plugins/memory_markdown/) in stage 2 of the plugin
-# migration. They are no longer core tools — disabling the plugin
-# removes them entirely.
+# Memory tools (read_memory / write_memory / write_user / add_memory /
+# update_memory_hook) live in the bundled memory-markdown plugin
+# (pyagent/plugins/memory_markdown/). Disabling the plugin removes
+# them entirely — clean replacement surface for alternative memory
+# backends.
 
 
 def read_file(

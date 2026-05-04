@@ -261,8 +261,9 @@ breaking the conversation.
 | --- | --- |
 | `memory-markdown` | yes |
 
-`memory-markdown` is the existing `read_ledger`/`write_ledger` system
-ported to the plugin API. Disabling it removes the ledger tools and
-the SOUL-level memory prose entirely — clean replacement surface for
-alternative memory backends. See `plugin-memory-migration.md` for the
-staged cutover.
+`memory-markdown` is the markdown-backed memory ledger ported to the
+plugin API. It provides `add_memory`, `read_memory`, `write_memory`,
+`write_user`, and `update_memory_hook`, plus the USER + MEMORY index
+prompt sections. Disabling it removes the tools entirely — clean
+replacement surface for alternative memory backends. See
+`plugin-memory-migration.md` for historical context on the cutover.

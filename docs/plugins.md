@@ -28,7 +28,7 @@ warnings when a higher-tier plugin shadows a lower-tier one.
 
 | Plugin | What it provides | Default enabled? |
 | --- | --- | --- |
-| `memory-markdown` | Markdown ledger storage — `read_ledger`, `write_ledger`, `add_memory`, plus USER/MEMORY prompt sections. Root-only (does not load in subagents). | yes |
+| `memory-markdown` | Markdown ledger storage — `add_memory`, `read_memory`, `write_memory`, `write_user`, `update_memory_hook`, plus USER/MEMORY prompt sections. Root-only (does not load in subagents). | yes |
 | `memory-vector` | Semantic recall (`recall_memory`) over `memory-markdown`'s files via fastembed. Root-only. | yes |
 | `html-tools` | `html_to_md` / `html_select` — convert or query saved HTML attachments (or any local HTML file). | yes |
 | `code-mapper` | `map_code` / `probe_grammar` — tree-sitter symbol map for source files (Python in v1; multi-language ready). | yes |

@@ -8,8 +8,8 @@ MEMORY       — index + per-memory files. MEMORY.md is the catalog
                 (auto-loaded into every prompt); each memory is its
                 own markdown file under memories/ in the plugin's
                 data dir. Agent reads the catalog in the prompt,
-                fetches a specific file with read_ledger("MEMORY",
-                file="foo.md") only when it needs the body.
+                fetches a body with read_memory(file="foo.md") only
+                when it needs it.
 
 Companion files in this directory:
   manifest.toml
@@ -21,6 +21,8 @@ Companion files in this directory:
 
 from __future__ import annotations
 
+import datetime
+import os
 import re
 import shutil
 from difflib import SequenceMatcher
@@ -155,8 +157,10 @@ def _validate_memory_filename(file: str) -> str | None:
     if not file:
         return "<memory filename is empty>"
     p = Path(file)
-    if p.is_absolute() or len(p.parts) != 1:
-        return f"<memory filename must be a bare name (no slashes): {file!r}>"
+    if p.is_absolute():
+        return f"<memory filename must not be absolute: {file!r}>"
+    if len(p.parts) != 1:
+        return f"<memory filename must not contain slashes: {file!r}>"
     if file.startswith(".") or ".." in file:
         return f"<invalid memory filename: {file!r}>"
     if not file.endswith(".md"):
@@ -224,6 +228,109 @@ def _insert_index_bullet(
     return text
 
 
+# Minimal YAML-flavored frontmatter parser. We only emit ``created_at:
+# <iso>`` blocks today; the parser is intentionally narrow — split on
+# the first ``:``, no quoting, no nesting, no lists. If the day comes
+# we need richer metadata, swap in a real YAML lib here.
+_FRONTMATTER_RE = re.compile(r"\A---\n(?P<inner>.*?)\n---\n?", re.DOTALL)
+
+
+def _split_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    """Pull a leading ``---\\n...\\n---\\n`` block off ``text``.
+
+    Returns ``(metadata_dict, remaining_body)``. Lines without ``:``
+    are skipped silently — malformed frontmatter degrades to empty
+    metadata rather than poisoning a body read.
+    """
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return {}, text
+    meta: dict[str, str] = {}
+    for line in m.group("inner").splitlines():
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        meta[k.strip()] = v.strip()
+    return meta, text[m.end():]
+
+
+def _format_frontmatter(meta: dict[str, str]) -> str:
+    """Inverse of ``_split_frontmatter``. Empty dict → empty string."""
+    if not meta:
+        return ""
+    lines = ["---"]
+    for k, v in meta.items():
+        lines.append(f"{k}: {v}")
+    lines.append("---\n")
+    return "\n".join(lines)
+
+
+def _now_iso() -> str:
+    """Current UTC time as RFC 3339 / ISO 8601, second-precision."""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(
+        timespec="seconds"
+    )
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` via ``<path>.tmp`` + ``os.replace``.
+
+    The replace is atomic on POSIX, so a crash mid-write leaves either
+    the prior file or the new — never a truncated one. Used for
+    MEMORY.md and USER.md to prevent index corruption.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _validate_inline_field(name: str, value: str) -> str | None:
+    """Reject newlines in fields that flow into a single MEMORY.md line.
+
+    A bullet line is ``- [<title>](<file>) — <hook>`` on one line; a
+    newline in any of those fields breaks the line shape and a future
+    parse will silently drop the bullet. Used as a unified gate for
+    ``title`` and ``hook``.
+    """
+    if "\n" in value or "\r" in value:
+        return f"<{name} contains a newline; not allowed>"
+    return None
+
+
+def _validate_category(value: str) -> str | None:
+    """Newline-reject + leading-``#`` reject for ``category``.
+
+    A leading ``#`` would emit ``## # Foo`` (cosmetic) or, worse,
+    ``\\n## Bar`` injected via ``category="Foo\\n## Bar"`` would add a
+    parallel heading the next call's ``_extract_categories`` treats as
+    real. Cheap belt against an LLM-controlled value flowing into
+    markdown structure.
+    """
+    err = _validate_inline_field("category", value)
+    if err:
+        return err
+    if value.lstrip().startswith("#"):
+        return "<category cannot start with '#' (would break heading)>"
+    return None
+
+
+def _derive_filename_from_title(title: str) -> str:
+    """Snake_case ``title`` into a memory filename.
+
+    Lowercases, replaces non-alphanumeric runs with ``_``, strips
+    leading/trailing underscores, suffixes ``.md``. Returns the empty
+    string if the title produces nothing (all-punctuation or empty
+    after stripping). The downstream filename validator catches that
+    case explicitly so the caller knows to pass an explicit filename.
+    """
+    s = title.lower().strip()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    s = s.strip("_")
+    if not s or not s[0].isalnum():
+        return ""
+    return f"{s}.md"
+
+
 def register(api):
     """Plugin entrypoint."""
 
@@ -251,154 +358,155 @@ def register(api):
 
     # ---- Tools ------------------------------------------------------
 
-    def read_ledger(name: str, file: str | None = None) -> str:
-        """Read a ledger or a specific memory file.
+    def read_memory(file: str) -> str:
+        """Fetch a memory body from `memories/<file>`.
 
-        Ledgers are the agent's persistent notebooks. `USER` is a
-        single-file ledger (notes about the person being helped).
-        `MEMORY` is an index + per-memory files: MEMORY.md is the
-        catalog (auto-loaded into your prompt), each memory is its
-        own file under `memories/` (loaded only on demand).
-
-        Primary use: fetching a *known* memory body once you've
-        identified it — by scanning the index in your prompt or via
-        `recall_memory(query)` if it's available. Reading the MEMORY.md
-        index directly is rarely needed since it's already in the
-        prompt.
+        USER and the MEMORY.md catalog auto-load into your system
+        prompt — no tool to re-read them. Use this only when you've
+        spotted a memory in the catalog (or via `recall_memory`)
+        and want the body.
 
         Args:
-            name: Ledger to read. One of: "USER", "MEMORY".
-            file: For MEMORY only — name of a specific memory file
-                under `memories/` (e.g. "stack_choices.md"). Omit to
-                read the MEMORY.md index. Not supported for USER.
+            file: Bare memory filename, e.g. "stack_choices.md".
 
         Returns:
-            File contents, or an empty string if unwritten. Returns
-            an error string in `<...>` form for invalid inputs.
+            Body text. If a `created_at` frontmatter is present, it's
+            stripped and a `[created <iso>]` header is prepended so
+            the date is visible without exposing YAML. `<...>` error
+            for missing or invalid filenames.
         """
-        key = name.upper()
-        if key not in _LEDGERS:
-            valid = ", ".join(sorted(_LEDGERS))
-            return f"<unknown ledger: {name!r}; valid: {valid}>"
-        if file is not None:
-            if key == "USER":
-                return "<USER is a single-file ledger; file argument not supported>"
-            err = _validate_memory_filename(file)
-            if err:
-                return err
-            target = _memory_file_path(file)
-            if not target.exists():
-                return f"<memory not found: memories/{file}>"
-            return target.read_text()
-        _seed_if_missing(key)
-        target = _ledger_path(key)
+        err = _validate_memory_filename(file)
+        if err:
+            return err
+        target = _memory_file_path(file)
         if not target.exists():
-            return ""
-        return target.read_text()
+            return f"<memory not found: memories/{file}>"
+        meta, body = _split_frontmatter(target.read_text())
+        if meta.get("created_at"):
+            return f"[created {meta['created_at']}]\n\n{body}"
+        return body
 
-    def write_ledger(
-        name: str, content: str, file: str | None = None
-    ) -> str:
-        """Overwrite a ledger or a specific memory file (in-place
-        edits and consolidation).
+    def write_user(content: str) -> str:
+        """Overwrite the USER ledger.
 
-        For *new* memories, prefer `add_memory(...)` — it writes
-        the body and updates the index in one call. write_ledger is
-        for editing what's already there: revising a body, pruning
-        an entry, merging fragmentary memories, moving one to a
-        different category, or sweeping the catalog. It's also how
-        you write USER, which is a single-file ledger and has no
-        add_memory equivalent.
-
-        For USER, omit `file` — USER is a single-file ledger.
-        For MEMORY, omit `file` to overwrite the MEMORY.md index
-        directly (e.g. when reorganizing); pass `file="foo.md"` to
-        overwrite `memories/foo.md`.
+        USER auto-loads into every system prompt; the next turn
+        sees the change. Atomic write — a crash mid-write keeps
+        the prior file rather than truncating it.
 
         Args:
-            name: Ledger to write. One of: "USER", "MEMORY".
-            content: Full new content.
-            file: For MEMORY only — name of a memory file under
-                `memories/`. Omit to write the MEMORY.md index.
+            content: Full new content for USER.
         """
-        key = name.upper()
-        if key not in _LEDGERS:
-            valid = ", ".join(sorted(_LEDGERS))
-            return f"<unknown ledger: {name!r}; valid: {valid}>"
-        if file is not None:
-            if key == "USER":
-                return "<USER is a single-file ledger; file argument not supported>"
-            err = _validate_memory_filename(file)
-            if err:
-                return err
-            target = _memory_file_path(file)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content)
-            return f"Wrote {len(content)} bytes to {target}"
-        target = _ledger_path(key)
+        target = _ledger_path("USER")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content)
-        return f"Wrote {len(content)} bytes to {target}"
+        _atomic_write(target, content)
+        return f"updated USER ({len(content)} bytes)"
+
+    def write_memory(file: str, content: str) -> str:
+        """Overwrite an existing memory body, or the MEMORY.md catalog.
+
+        For a body, pass the filename. To create a *new* memory
+        (body + index entry in one call), use `add_memory`. To
+        rewrite the MEMORY.md catalog itself (rare; consolidation),
+        pass `file=""`.
+
+        When editing a body, an existing `created_at` frontmatter is
+        preserved if `content` doesn't carry one — agents revising
+        bodies rarely re-emit the YAML.
+
+        Args:
+            file: Bare memory filename under `memories/`, OR empty
+                string to overwrite MEMORY.md.
+            content: Full new content.
+        """
+        if not file or not file.strip():
+            target = _ledger_path("MEMORY")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write(target, content)
+            return f"updated MEMORY.md ({len(content)} bytes)"
+        err = _validate_memory_filename(file)
+        if err:
+            return err
+        target = _memory_file_path(file)
+
+        final = content
+        if target.exists():
+            old_meta, _ = _split_frontmatter(target.read_text())
+            new_meta, new_body = _split_frontmatter(content)
+            if not new_meta and old_meta:
+                if not new_body.endswith("\n"):
+                    new_body = new_body + "\n"
+                final = _format_frontmatter(old_meta) + new_body
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(target, final)
+        return f"updated {file} ({len(final)} bytes)"
 
     def add_memory(
         category: str,
         title: str,
-        filename: str,
-        hook: str,
         content: str,
+        filename: str = "",
+        hook: str = "",
         force_new_category: bool = False,
     ) -> str:
         """Add a new memory in one call — body file plus index entry.
 
-        Writes `memories/<filename>` with `content`, then surgically
-        inserts a bullet line under `## <category>` in MEMORY.md
-        (creating the heading if absent, case-insensitive match for
-        existing). Saves the round-trip cost of re-emitting the
-        full index every time you save a memory.
+        Writes `memories/<filename>` with `content` (plus a
+        `created_at` frontmatter), then inserts a bullet under
+        `## <category>` in MEMORY.md. Use for *new* memories;
+        `write_memory` edits existing ones, `update_memory_hook`
+        retunes one bullet without rewriting the index.
 
-        Use this for *new* memories. To update an existing body in
-        place, use `write_ledger("MEMORY", content, file=...)`. To
-        prune, edit MEMORY.md and delete the body file directly.
-
-        Category drift guard: if `category` is close (but not equal)
-        to an existing heading in MEMORY.md, this call refuses with
-        a marker pointing at the closer match. Re-call with the
-        existing category to file under it, or pass
-        `force_new_category=True` to confirm a deliberately new
-        heading. The guard prevents drift toward parallel headings
-        (`Style` + `Code Style` + `Conventions` for one concept).
+        Drift guard: a close-but-not-equal `category` is refused
+        with a marker pointing at the existing heading. Re-call with
+        that heading, or pass `force_new_category=True` to confirm a
+        deliberately new one. Existing categories appear in the
+        MEMORY.md section of your prompt.
 
         Args:
-            category: H2 section to file under (e.g. "Database",
-                "Style", "Gotchas"). Matched case-insensitively
-                against existing headings; new heading created at
-                the end of the index if no match. Close-but-not-
-                equal matches against existing headings are
-                refused unless `force_new_category=True`.
-            title: Short topical name used as the link text.
-            filename: Bare filename under `memories/`, must end
-                in `.md`. Cannot collide with an existing file.
-            hook: One-line description shown after the title in
-                the index — what future-you reads to decide
-                whether to fetch. May be empty if the title alone
-                is enough.
-            content: Full body markdown for the new memory file.
-            force_new_category: When True, skip the drift guard and
-                file under `category` even if it's close to an
-                existing heading. Use when you genuinely want a new
-                heading near an existing one (rare).
+            category: H2 section ("Database", "Style", "Gotchas",
+                etc). Matched case-insensitively against existing
+                headings; close-but-not-equal matches refused unless
+                `force_new_category=True`.
+            title: Short topical name; the link text in the index.
+            content: Full body markdown for the new memory.
+            filename: Bare filename under `memories/`, lowercase
+                snake_case ASCII ending in `.md`. Empty → derived
+                from `title` (`"Stack choices"` → `stack_choices.md`).
+            hook: One-line description shown after the title in the
+                index. Empty allowed but costs recall accuracy.
+            force_new_category: Skip the drift guard and file under
+                `category` as a new heading.
 
         Returns:
-            A confirmation string with both written paths, or an
-            error / drift-warning in `<...>` form.
+            Confirmation, or `<...>` error/warning marker.
         """
         if not category or not category.strip():
             return "<category is empty>"
         if not title or not title.strip():
             return "<title is empty>"
+        err = _validate_category(category)
+        if err:
+            return err
+        err = _validate_inline_field("title", title)
+        if err:
+            return err
+        err = _validate_inline_field("hook", hook)
+        if err:
+            return err
+
+        if not filename or not filename.strip():
+            filename = _derive_filename_from_title(title)
+            if not filename:
+                return (
+                    f"<could not derive a filename from title "
+                    f"{title!r}; pass an explicit `filename` like "
+                    f"'stack_choices.md'>"
+                )
         err = _validate_memory_filename(filename)
         if err:
             return err
+
         body_path = _memory_file_path(filename)
         _seed_if_missing("MEMORY")
         index_path = _ledger_path("MEMORY")
@@ -406,9 +514,17 @@ def register(api):
             index_path.read_text() if index_path.exists() else ""
         )
 
-        # Drift guard: refuse close-but-not-equal category matches.
-        # Exact case-insensitive matches fall through to
-        # _insert_index_bullet which collapses them.
+        # Validation order: filename → collision → drift. Collision
+        # is decisive (can't recover); drift is a soft warning the
+        # caller can override. Doing collision first saves a wasted
+        # retry where the caller fixed drift only to hit a clash.
+        if f"]({filename})" in index_text:
+            return (
+                f"<filename collision: memories/{filename} is "
+                f"already in the index; pick a more specific "
+                f'filename, or call read_memory("{filename}") to '
+                "inspect what is there>"
+            )
         if not force_new_category:
             existing_cats = _extract_categories(index_text)
             similar = _find_similar_category(category, existing_cats)
@@ -420,23 +536,32 @@ def register(api):
                     f"force_new_category=True to confirm a "
                     f"deliberately new heading>"
                 )
-        # Same disambiguation guidance whether the collision is on
-        # disk, in the index, or both: pick a different filename, or
-        # inspect the existing memory before deciding what to do.
-        if body_path.exists() or f"]({filename})" in index_text:
+
+        # Body: prepend frontmatter and ensure trailing newline.
+        # `created_at` lets read_memory and recall surface age.
+        body_text = content if content.endswith("\n") else content + "\n"
+        body_with_meta = (
+            _format_frontmatter({"created_at": _now_iso()}) + body_text
+        )
+
+        # O_EXCL on the body file: the OS does the existence check
+        # atomically, eliminating the race between the index's "is
+        # this filename in use?" check and the actual write.
+        body_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(body_path, "x", encoding="utf-8") as f:
+                f.write(body_with_meta)
+        except FileExistsError:
             return (
-                f"<filename collision: memories/{filename} is "
-                "already taken; pick a more specific filename, "
-                f'or call read_ledger("MEMORY", file="{filename}") '
-                "to inspect what is already there>"
+                f"<filename collision: memories/{filename} appeared "
+                "between check and write; pick a different filename>"
             )
 
-        # Write the body first — if the index update fails, the
-        # body is at least findable via recall_memory and the agent
-        # can re-link.
-        body_path.parent.mkdir(parents=True, exist_ok=True)
-        body_path.write_text(content)
-
+        # Index update is atomic via temp-then-rename so a crash
+        # leaves either the prior index or the new — never a
+        # truncated one. Body is already on disk; if the rename
+        # fails, the body is recoverable (recall_memory finds it,
+        # or the agent can re-link via update_memory_hook).
         bullet = (
             f"- [{title.strip()}]({filename})"
             + (f" — {hook.strip()}" if hook and hook.strip() else "")
@@ -445,15 +570,72 @@ def register(api):
             index_text, category.strip(), bullet
         )
         index_path.parent.mkdir(parents=True, exist_ok=True)
-        index_path.write_text(new_index)
-        return (
-            f"Wrote {len(content)} bytes to {body_path}; "
-            f"added index entry under '## {category.strip()}'."
-        )
+        _atomic_write(index_path, new_index)
+        return f"saved {filename} under '{category.strip()}'"
 
-    api.register_tool("read_ledger", read_ledger)
-    api.register_tool("write_ledger", write_ledger)
+    def update_memory_hook(filename: str, new_hook: str) -> str:
+        """Update the hook line of one bullet in MEMORY.md, in place.
+
+        The hook is the description after the title — what future-you
+        reads to decide whether to fetch the body. Use this when a
+        hook is failing recall (generic phrasing, missing distinctive
+        tokens) — far cheaper than re-emitting the whole index via
+        `write_memory`.
+
+        Args:
+            filename: Bare memory filename whose bullet to retune.
+            new_hook: Replacement hook text. Empty string clears it.
+
+        Returns:
+            Confirmation, or `<...>` error if the bullet isn't found.
+        """
+        err = _validate_memory_filename(filename)
+        if err:
+            return err
+        err = _validate_inline_field("new_hook", new_hook)
+        if err:
+            return err
+
+        index_path = _ledger_path("MEMORY")
+        if not index_path.exists():
+            return "<MEMORY.md not found>"
+        text = index_path.read_text()
+
+        # Locate the bullet by its `](filename)` link target. We
+        # don't reparse the bullet as markdown — we splice the
+        # trailing portion (after the closing `)`) with the new
+        # hook. Preserves any indentation, bullet style, or list
+        # depth the existing line carries.
+        needle = f"]({filename})"
+        new_lines: list[str] = []
+        found = False
+        for line in text.splitlines():
+            idx = line.find(needle)
+            if idx == -1:
+                new_lines.append(line)
+                continue
+            prefix = line[: idx + len(needle)]
+            tail = (
+                f" — {new_hook.strip()}"
+                if new_hook and new_hook.strip()
+                else ""
+            )
+            new_lines.append(prefix + tail)
+            found = True
+        if not found:
+            return f"<no bullet for {filename!r} in MEMORY.md>"
+
+        new_text = "\n".join(new_lines)
+        if not new_text.endswith("\n"):
+            new_text += "\n"
+        _atomic_write(index_path, new_text)
+        return f"updated hook for {filename}"
+
+    api.register_tool("read_memory", read_memory)
+    api.register_tool("write_user", write_user)
+    api.register_tool("write_memory", write_memory)
     api.register_tool("add_memory", add_memory)
+    api.register_tool("update_memory_hook", update_memory_hook)
 
     # ---- Prompt sections --------------------------------------------
     #
@@ -484,14 +666,14 @@ def register(api):
         """Auto-load the MEMORY.md index into every prompt so the
         agent always sees the catalog without a tool call. Body
         files under memories/ are fetched on demand via
-        read_ledger("MEMORY", file=...).
+        read_memory(file=...).
 
         When the index has many headings, prepend a one-line
         ``Categories in use: ...`` summary so the agent can scan
         available categories before picking one for ``add_memory``
         without parsing the full bulleted detail. The summary is
         synthesized at render time only — the source MEMORY.md
-        file stays clean so ``write_ledger`` round-trips don't
+        file stays clean so ``write_memory`` round-trips don't
         fight a derived line.
         """
         _seed_if_missing("MEMORY")

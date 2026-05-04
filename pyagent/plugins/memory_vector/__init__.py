@@ -33,6 +33,16 @@ _INDEX_LINE_RE = re.compile(
     r"(?:\s*[—\-:]\s*(?P<hook>.+))?\s*$"
 )
 
+# YAML-flavored frontmatter that memory-markdown's add_memory writes.
+# We strip it before embedding and snippeting so `created_at: <iso>`
+# tokens don't dilute topical signal in vector matches and don't leak
+# YAML into the LLM-facing snippet preview.
+_FRONTMATTER_RE = re.compile(r"\A---\n.*?\n---\n?", re.DOTALL)
+
+
+def _strip_frontmatter(text: str) -> str:
+    return _FRONTMATTER_RE.sub("", text, count=1)
+
 
 def _filename_search_terms(filename: str) -> str:
     """Convert a memory filename into search-friendly tokens.
@@ -136,11 +146,12 @@ def register(api):
                 # body text is preserved as-is for the embedder; the
                 # double newline keeps them as a "topic anchor"
                 # rather than fusing with the body's first sentence.
+                body_text = _strip_frontmatter(body_path.read_text())
                 chunks.append(
                     {
                         "kind": "body",
                         "filename": body_path.name,
-                        "text": f"{fn_terms}\n\n{body_path.read_text()}",
+                        "text": f"{fn_terms}\n\n{body_text}",
                     }
                 )
         return chunks
@@ -217,9 +228,8 @@ def register(api):
         body_path = source / "memories" / meta["filename"]
         if not body_path.exists():
             return ""
-        lines = [
-            ln for ln in body_path.read_text().splitlines() if ln.strip()
-        ]
+        body_text = _strip_frontmatter(body_path.read_text())
+        lines = [ln for ln in body_text.splitlines() if ln.strip()]
         return "\n".join(lines[:3])
 
     def recall_memory(
@@ -237,8 +247,8 @@ def register(api):
         what you wrote down but not the title or filename.
 
         Each hit names a file under `memories/` and a short snippet.
-        Fetch the full body with `read_ledger("MEMORY",
-        file="<filename>")` only when you need it.
+        Fetch the full body with `read_memory(file=<filename>)` only
+        when you need it.
 
         Args:
             query: What you're looking for, in natural language.
@@ -327,16 +337,14 @@ def register(api):
             for s_line in snippet.splitlines()[:3]:
                 lines.append(f"      {s_line}")
         lines.append("")
-        lines.append(
-            'Fetch a body with: read_ledger("MEMORY", file="<filename>")'
-        )
+        lines.append('Fetch a body with: read_memory(file="<filename>")')
         return "\n".join(lines)
 
     api.register_tool("recall_memory", recall_memory)
 
     # ---- Prompt section --------------------------------------------
     #
-    # Spells out the index→read_ledger / fishing→recall_memory
+    # Spells out the index→read_memory / fishing→recall_memory
     # decision tree so the agent isn't left to infer it from two
     # disconnected tool docstrings. Skipped entirely when MEMORY.md
     # is empty — there's nothing to recall, and the recall_memory
@@ -357,18 +365,17 @@ def register(api):
             "## Recalling memories by similarity\n"
             "\n"
             "When the MEMORY.md index in your prompt has what you "
-            'need — you can see the title and hook — call '
-            '`read_ledger("MEMORY", file="…")` directly to fetch the '
-            "body.\n"
+            "need — you can see the title and hook — call "
+            "`read_memory(file=\"…\")` directly to fetch the body.\n"
             "\n"
             "Reach for `recall_memory(query)` instead when scanning "
             "the index isn't enough: the catalog is long, the topic "
             "cuts across multiple memories, or you remember the "
             "*gist* of what you wrote down but not the filename. "
             "recall_memory returns the top matching files with "
-            "snippets; fetch the ones you want with read_ledger.\n"
+            "snippets; fetch the ones you want with read_memory.\n"
             "\n"
-            "Rule of thumb: **index → read_ledger** for direct "
+            "Rule of thumb: **index → read_memory** for direct "
             "fetches; **recall_memory** for fishing.\n"
             "\n"
             "Filters when you need them: pass `min_score=0.3` "

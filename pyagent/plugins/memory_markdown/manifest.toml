@@ -9,7 +9,13 @@ api_version = "1"
 # rich missing-tool error — when the LLM calls a tool that's gone,
 # pyagent can name the plugin that provided it.
 [provides]
-tools = ["read_ledger", "write_ledger", "add_memory"]
+tools = [
+  "read_memory",
+  "write_user",
+  "write_memory",
+  "add_memory",
+  "update_memory_hook",
+]
 prompt_sections = ["memory-guidance", "user-ledger", "memory-index"]
 
 # Spawn-tree behavior. Default true: the plugin loads in every agent

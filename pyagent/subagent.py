@@ -117,12 +117,13 @@ def make_spawn_subagent(
         """Spawn a subagent in its own subprocess.
 
         The subagent inherits the universal SOUL/TOOLS/PRIMER base, the
-        live skills catalog, and the same default tool set as the
-        parent (read_file, write_file, list_directory, grep, execute,
-        fetch_url, read_ledger, write_ledger, read_skill, plus
-        spawn/call/terminate so it can fan out further if the depth
-        cap allows). Use `call_subagent(<id>, message)` to send it
-        work and `terminate_subagent(<id>)` when you're done.
+        live skills catalog, and the core tool set (read_file,
+        write_file, list_directory, grep, execute, fetch_url,
+        read_skill, plus spawn/call/terminate so it can fan out
+        further if the depth cap allows). Memory tools are root-only;
+        a subagent doesn't get USER/MEMORY access. Use
+        `call_subagent(<id>, message)` to send it work and
+        `terminate_subagent(<id>)` when you're done.
 
         Args:
             name: Short label for this subagent (e.g. "researcher",
