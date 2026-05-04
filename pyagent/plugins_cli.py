@@ -98,9 +98,9 @@ def reset_cmd(name: str, assume_yes: bool) -> None:
     Removes <data-dir>/plugins/<name>/ entirely. The plugin's
     on_session_start re-seeds defaults next time pyagent runs.
 
-    Common case: `pyagent-plugins reset memory-markdown` to wipe
-    USER and MEMORY ledgers (replaces the old --reset-user /
-    --reset-memory CLI flags).
+    Common case: `pyagent-plugins reset memory` to wipe USER and
+    MEMORY ledgers (replaces the old --reset-user / --reset-memory
+    CLI flags).
     """
     target = paths.data_dir() / "plugins" / name
     if not target.exists():

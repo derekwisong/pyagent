@@ -40,11 +40,12 @@ Built-in tools shipped with pyagent:
 
 HTML tools (`html_to_md` / `html_select`) come from the bundled
 `html-tools` plugin and operate on saved attachments (or any local
-HTML file). Memory tools (`read_ledger`, `write_ledger`, `add_memory`)
-come from the `memory-markdown` plugin; semantic recall (`recall_memory`)
-from `memory-vector`. Other bundled plugins (`code-mapper`, `web-search`,
-`reddit-search`, `hn-search`, `claude-code-cli`, `doc-tools`) register
-additional tools — see [docs/plugins.md](plugins.md) for the full list.
+HTML file). Memory tools (`add_memory`, `read_memory`, `write_memory`,
+`write_user`, `update_memory_hook`, `recall_memory`) come from the
+bundled `memory` plugin. Other bundled plugins (`code-mapper`,
+`web-search`, `reddit-search`, `hn-search`, `claude-code-cli`,
+`doc-tools`) register additional tools — see
+[docs/plugins.md](plugins.md) for the full list.
 
 File tools resolve paths and refuse anything outside the workspace unless the
 human approves at a prompt. See `pyagent/permissions.py`. The user's pyagent
@@ -85,31 +86,32 @@ state) go in volatile so they don't invalidate the cached prefix.
 
 ## Memory
 
-Long-term memory is provided by two bundled plugins:
+Long-term memory is provided by the bundled **`memory`** plugin.
 
-- **`memory-markdown`** is the storage backend. Tools: `read_ledger`,
-  `write_ledger`, `add_memory`. Backed by markdown files under
-  `<config-dir>/plugins/memory-markdown/` — a single `USER.md` (always
-  splatted into the system prompt), a `MEMORY.md` index (also auto-loaded),
-  and a `memories/` directory of individual entries (loaded on demand).
-  `add_memory` writes the body and updates the index in one atomic call.
-- **`memory-vector`** layers semantic recall on top via `recall_memory`,
-  indexing the same files with fastembed (BGE-small-en-v1.5). The two
-  plugins are loosely coupled — `memory-vector` reads from
-  `memory-markdown`'s data dir at runtime; if `memory-markdown` is
-  disabled, `recall_memory` just reports that nothing is indexed.
+- **Storage:** markdown files under `<data-dir>/plugins/memory/` —
+  a single `USER.md` (always splatted into the system prompt), a
+  `MEMORY.md` index (also auto-loaded), and a `memories/` directory
+  of individual entries (loaded on demand). Each body carries a
+  `created_at` YAML frontmatter the read tools strip on the way out.
+- **Tools:** `add_memory` writes the body and updates the index in
+  one atomic call. `read_memory(file)` fetches a body. `write_memory`
+  and `write_user` overwrite an existing body or USER. `update_memory_hook`
+  retunes one bullet line in MEMORY.md without rewriting the index.
+- **Recall:** `recall_memory(query, ...)` runs cosine search over an
+  L2-normalized vector index built with fastembed (BGE-small-en-v1.5).
+  Index files (`vectors.npy`, `index.json`) live alongside MEMORY.md,
+  rebuilt on mtime change.
 
-`memory-markdown` also contributes prompt sections that auto-load
-USER content and the MEMORY index into every system prompt. Drop both
-plugins from `built_in_plugins_enabled` in `config.toml` to remove
-memory entirely — the agent will have no memory tools and no memory
-prose.
+The `memory` plugin also contributes prompt sections that auto-load
+USER content and the MEMORY index into every system prompt. Drop it
+from `built_in_plugins_enabled` in `config.toml` to remove memory
+entirely — the agent will have no memory tools and no memory prose.
 
 Memory work is meant to happen **organically**, mid-conversation: when
 the agent learns a preference, a convention, or something genuinely
 worth remembering, it updates the appropriate ledger then and there.
 
-To wipe memory data: `pyagent-plugins reset memory-markdown`.
+To wipe memory data: `pyagent-plugins reset memory`.
 
 ## Sessions and attachments
 

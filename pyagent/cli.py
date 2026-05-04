@@ -235,11 +235,10 @@ def _dump_prompt(
     short-circuit resolution so a candidate persona file can be
     previewed without applying it.
 
-    Plugins are loaded so their prompt sections (memory-vector,
-    memory-markdown, etc.) and tool schemas appear in the dump.
-    Plugin section state is computed against an empty conversation
-    context — the dump shows what a fresh turn looks like, not what
-    a session mid-flight would emit.
+    Plugins are loaded so their prompt sections (memory, etc.) and
+    tool schemas appear in the dump. Plugin section state is computed
+    against an empty conversation context — the dump shows what a
+    fresh turn looks like, not what a session mid-flight would emit.
 
     Tool schemas (when --prompt-include-schemas) cover the static
     built-ins and plugin-registered tools. Dynamic state-dependent
@@ -1885,8 +1884,8 @@ async def _repl_async(
     "--reset-all",
     is_flag=True,
     help="Shortcut: every --reset-* flag together (SOUL, TOOLS, PRIMER, skills). "
-    "USER.md and MEMORY.md are owned by the memory-markdown plugin now; "
-    "use `pyagent-plugins reset memory-markdown` to wipe them.",
+    "USER.md and MEMORY.md are owned by the memory plugin now; "
+    "use `pyagent-plugins reset memory` to wipe them.",
 )
 @click.option(
     "--yes",

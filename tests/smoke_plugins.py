@@ -259,40 +259,43 @@ def test_missing_tool_error() -> None:
     try:
         # Discover-but-disable a plugin so its tool name is in
         # declared_tool_provenance but not in the registered tools.
+        # Tool name is unique to this test (`fake_recall`) so it
+        # doesn't collide with the bundled memory plugin's
+        # recall_memory.
         plugin_py = (
             "def register(api):\n"
-            '    api.register_tool("recall_memory", lambda: "ok")\n'
+            '    api.register_tool("fake_recall", lambda: "ok")\n'
         )
         _write_plugin(
             cfg / "plugins",
-            dirname="memvec",
-            name="memory-vector",
-            provides_tools=["recall_memory"],
+            dirname="fakemem",
+            name="fake-memory",
+            provides_tools=["fake_recall"],
             plugin_py=plugin_py,
         )
         # Disable via config (preserve the built_in_plugins_enabled
-        # = [] from the test fixture so the bundled memory-markdown
+        # = [] from the test fixture so the bundled memory plugin
         # doesn't appear too).
         cfg_file = cfg / "config.toml"
         cfg_file.write_text(
             "built_in_plugins_enabled = []\n"
-            "[plugins.memory-vector]\nenabled = false\n"
+            "[plugins.fake-memory]\nenabled = false\n"
         )
         loaded = plugins_mod.load()
         # Plugin disabled, but declared_tool_provenance retained.
-        assert "recall_memory" not in loaded.tools()
+        assert "fake_recall" not in loaded.tools()
         assert (
-            loaded.declared_tool_provenance.get("recall_memory")
-            == "memory-vector"
+            loaded.declared_tool_provenance.get("fake_recall")
+            == "fake-memory"
         )
         # Format the error.
         err = plugins_mod.format_missing_tool_error(
-            name="recall_memory",
+            name="fake_recall",
             available=["read_file", "grep"],
             declared_tool_provenance=loaded.declared_tool_provenance,
         )
-        assert "memory-vector" in err
-        assert "recall_memory" in err
+        assert "fake-memory" in err
+        assert "fake_recall" in err
         assert "read_file" in err
         print("✓ rich missing-tool error cites disabled plugin")
     finally:
@@ -656,28 +659,27 @@ def test_builtin_tool_takes_precedence_in_agent() -> None:
         restore()
 
 
-def test_bundled_memory_markdown_loads() -> None:
-    """With memory-markdown explicitly enabled, the bundled plugin
-    loads and exposes its tools/sections."""
+def test_bundled_memory_loads() -> None:
+    """With memory explicitly enabled, the bundled plugin loads and
+    exposes its tools and prompt sections."""
     cfg, restore = _isolated_config_dir()
     try:
         # Override the fixture's empty list with the bundled plugin
         # turned on.
         (cfg / "config.toml").write_text(
-            'built_in_plugins_enabled = ["memory-markdown"]\n'
+            'built_in_plugins_enabled = ["memory"]\n'
         )
         # Root-mode load (bundled plugin sets in_subagents=false).
         loaded = plugins_mod.load(is_subagent=False)
         names = [s.manifest.name for s in loaded.states]
-        assert "memory-markdown" in names, (
-            f"expected memory-markdown in {names}"
-        )
+        assert "memory" in names, f"expected memory in {names}"
         for t in (
             "read_memory",
             "write_memory",
             "write_user",
             "add_memory",
             "update_memory_hook",
+            "recall_memory",
         ):
             assert t in loaded.tools(), (t, sorted(loaded.tools()))
         section_names = {s.name for s in loaded.sections()}
@@ -688,8 +690,8 @@ def test_bundled_memory_markdown_loads() -> None:
         # Subagent mode skips it (in_subagents=false).
         sub_loaded = plugins_mod.load(is_subagent=True)
         sub_names = [s.manifest.name for s in sub_loaded.states]
-        assert "memory-markdown" not in sub_names
-        print("✓ bundled memory-markdown loads in root, skipped in subagent")
+        assert "memory" not in sub_names
+        print("✓ bundled memory loads in root, skipped in subagent")
     finally:
         restore()
 
@@ -701,7 +703,7 @@ def test_memory_round_trip() -> None:
     cfg, restore = _isolated_config_dir()
     try:
         (cfg / "config.toml").write_text(
-            'built_in_plugins_enabled = ["memory-markdown"]\n'
+            'built_in_plugins_enabled = ["memory"]\n'
         )
         loaded = plugins_mod.load(is_subagent=False)
         _, read_memory = loaded.tools()["read_memory"]
@@ -717,7 +719,7 @@ def test_memory_round_trip() -> None:
         body = read_memory(file="stack_choices.md")
         assert "We use Postgres" in body, body
 
-        memories_dir = cfg / "plugins" / "memory-markdown" / "memories"
+        memories_dir = cfg / "plugins" / "memory" / "memories"
         assert (memories_dir / "stack_choices.md").exists()
 
         # Missing memory returns a clear error.
@@ -727,7 +729,7 @@ def test_memory_round_trip() -> None:
         # USER write via write_user.
         u = write_user(content="prefers tabs over spaces\n")
         assert "USER" in u, u
-        assert (cfg / "plugins" / "memory-markdown" / "USER.md").read_text() \
+        assert (cfg / "plugins" / "memory" / "USER.md").read_text() \
             == "prefers tabs over spaces\n"
 
         # Catalog overwrite via write_memory(file="").
@@ -760,26 +762,25 @@ def test_memory_round_trip() -> None:
         restore()
 
 
-def test_memory_vector_recall() -> None:
-    """End-to-end: plant memories in memory-markdown's data dir,
-    enable both bundled plugins, and confirm recall_memory finds
-    the semantically-matching file. Skipped if fastembed isn't
+def test_recall_memory() -> None:
+    """End-to-end: plant memories in the memory plugin's data dir,
+    enable the bundled plugin, and confirm recall_memory finds the
+    semantically-matching file. Skipped if fastembed isn't
     installed."""
     try:
         import fastembed  # noqa: F401
     except ImportError:
-        print("⊘ fastembed not installed; skipping memory-vector test")
+        print("⊘ fastembed not installed; skipping recall test")
         return
 
     cfg, restore = _isolated_config_dir()
     try:
         (cfg / "config.toml").write_text(
-            'built_in_plugins_enabled = '
-            '["memory-markdown", "memory-vector"]\n'
+            'built_in_plugins_enabled = ["memory"]\n'
         )
-        # Plant memories directly on disk under memory-markdown's
-        # storage (paths.data_dir() is monkeypatched to cfg).
-        mm_storage = cfg / "plugins" / "memory-markdown"
+        # Plant memories directly on disk under the plugin's storage
+        # (paths.data_dir() is monkeypatched to cfg).
+        mm_storage = cfg / "plugins" / "memory"
         memories_dir = mm_storage / "memories"
         memories_dir.mkdir(parents=True, exist_ok=True)
         (mm_storage / "MEMORY.md").write_text(
@@ -799,8 +800,8 @@ def test_memory_vector_recall() -> None:
 
         loaded = plugins_mod.load(is_subagent=False)
         names = [s.manifest.name for s in loaded.states]
-        assert "memory-vector" in names, (
-            f"expected memory-vector to load: states={names}"
+        assert "memory" in names, (
+            f"expected memory to load: states={names}"
         )
         assert "recall_memory" in loaded.tools()
 
@@ -844,9 +845,9 @@ def test_memory_vector_recall() -> None:
         # Subagent mode skips it.
         sub_loaded = plugins_mod.load(is_subagent=True)
         sub_names = [s.manifest.name for s in sub_loaded.states]
-        assert "memory-vector" not in sub_names
+        assert "memory" not in sub_names
 
-        print("✓ memory-vector recall: ranking + min_score + category filters")
+        print("✓ recall_memory: ranking + min_score + category filters")
     finally:
         restore()
 
@@ -860,7 +861,7 @@ def test_add_memory_tool() -> None:
     cfg, restore = _isolated_config_dir()
     try:
         (cfg / "config.toml").write_text(
-            'built_in_plugins_enabled = ["memory-markdown"]\n'
+            'built_in_plugins_enabled = ["memory"]\n'
         )
         loaded = plugins_mod.load(is_subagent=False)
         _, add_memory = loaded.tools()["add_memory"]
@@ -879,8 +880,8 @@ def test_add_memory_tool() -> None:
         )
         assert "saved pg_deadlock.md under 'Database'" == result, result
 
-        memories_dir = cfg / "plugins" / "memory-markdown" / "memories"
-        index_path = cfg / "plugins" / "memory-markdown" / "MEMORY.md"
+        memories_dir = cfg / "plugins" / "memory" / "memories"
+        index_path = cfg / "plugins" / "memory" / "MEMORY.md"
         index = index_path.read_text()
         assert "## Database" in index, index
         assert "(no memories yet)" not in index, index
@@ -1015,7 +1016,7 @@ def test_update_memory_hook() -> None:
     cfg, restore = _isolated_config_dir()
     try:
         (cfg / "config.toml").write_text(
-            'built_in_plugins_enabled = ["memory-markdown"]\n'
+            'built_in_plugins_enabled = ["memory"]\n'
         )
         loaded = plugins_mod.load(is_subagent=False)
         _, add_memory = loaded.tools()["add_memory"]
@@ -1043,7 +1044,7 @@ def test_update_memory_hook() -> None:
         assert "updated hook for uv_choice.md" == result, result
 
         index = (
-            cfg / "plugins" / "memory-markdown" / "MEMORY.md"
+            cfg / "plugins" / "memory" / "MEMORY.md"
         ).read_text()
         # New hook is in place.
         assert "Why we picked uv over poetry" in index, index
@@ -1055,7 +1056,7 @@ def test_update_memory_hook() -> None:
         # Empty hook clears the trailing portion of the bullet.
         update_memory_hook(filename="naming.md", new_hook="")
         index2 = (
-            cfg / "plugins" / "memory-markdown" / "MEMORY.md"
+            cfg / "plugins" / "memory" / "MEMORY.md"
         ).read_text()
         for ln in index2.splitlines():
             if "naming.md" in ln:
@@ -1088,7 +1089,7 @@ def test_write_memory_preserves_frontmatter() -> None:
     cfg, restore = _isolated_config_dir()
     try:
         (cfg / "config.toml").write_text(
-            'built_in_plugins_enabled = ["memory-markdown"]\n'
+            'built_in_plugins_enabled = ["memory"]\n'
         )
         loaded = plugins_mod.load(is_subagent=False)
         _, add_memory = loaded.tools()["add_memory"]
@@ -1101,7 +1102,7 @@ def test_write_memory_preserves_frontmatter() -> None:
             filename="x.md",
         )
         body_path = (
-            cfg / "plugins" / "memory-markdown" / "memories" / "x.md"
+            cfg / "plugins" / "memory" / "memories" / "x.md"
         )
         original = body_path.read_text()
         assert original.startswith("---\ncreated_at:"), original[:80]
@@ -1139,12 +1140,12 @@ def test_read_memory_strips_frontmatter() -> None:
     cfg, restore = _isolated_config_dir()
     try:
         (cfg / "config.toml").write_text(
-            'built_in_plugins_enabled = ["memory-markdown"]\n'
+            'built_in_plugins_enabled = ["memory"]\n'
         )
         loaded = plugins_mod.load(is_subagent=False)
         _, read_memory = loaded.tools()["read_memory"]
 
-        memories_dir = cfg / "plugins" / "memory-markdown" / "memories"
+        memories_dir = cfg / "plugins" / "memory" / "memories"
         memories_dir.mkdir(parents=True, exist_ok=True)
 
         # With frontmatter.
@@ -1172,7 +1173,7 @@ def test_atomic_write_helper() -> None:
     """_atomic_write writes via <path>.tmp then os.replace. Verify a
     crash mid-write (simulated by an exception during write_text)
     leaves the prior file intact rather than truncating."""
-    from pyagent.plugins.memory_markdown import _atomic_write
+    from pyagent.plugins.memory import _atomic_write
 
     tmpd = Path(tempfile.mkdtemp(prefix="atomic-"))
     try:
@@ -1192,7 +1193,7 @@ def test_atomic_write_helper() -> None:
 def test_insert_index_bullet_unit() -> None:
     """_insert_index_bullet covers the placement edge cases:
     new section, existing section, multi-section, EOF append."""
-    from pyagent.plugins.memory_markdown import _insert_index_bullet
+    from pyagent.plugins.memory import _insert_index_bullet
 
     # Empty + placeholder → strip, append new section.
     seed = "# Memory\n\n(no memories yet)\n"
@@ -1333,8 +1334,9 @@ def test_write_session_attachment_with_session() -> None:
 
 def test_graceful_degradation_when_memory_disabled() -> None:
     """With built_in_plugins_enabled=[], the memory tools don't load,
-    but their declared_tool_provenance still cites memory-markdown so
-    the rich missing-tool error works for a session that calls one."""
+    but their declared_tool_provenance still cites the memory plugin
+    so the rich missing-tool error works for a session that calls
+    one."""
     cfg, restore = _isolated_config_dir()
     try:
         # Default fixture state: built_in_plugins_enabled = []
@@ -1345,20 +1347,21 @@ def test_graceful_degradation_when_memory_disabled() -> None:
             "write_user",
             "add_memory",
             "update_memory_hook",
+            "recall_memory",
         ):
             assert t not in loaded.tools()
         # But the bundled plugin was DISCOVERED (just not loaded), so
         # declared_tool_provenance can cite it for the rich error.
         assert (
             loaded.declared_tool_provenance.get("read_memory")
-            == "memory-markdown"
+            == "memory"
         )
         err = plugins_mod.format_missing_tool_error(
             name="read_memory",
             available=["read_file", "grep"],
             declared_tool_provenance=loaded.declared_tool_provenance,
         )
-        assert "memory-markdown" in err
+        assert "memory" in err
         assert "read_memory" in err
         print(
             "✓ graceful degradation: tools gone, missing-tool error "
@@ -1563,9 +1566,9 @@ def main() -> None:
     test_message_wrapping()
     test_immutable_returns()
     test_builtin_tool_takes_precedence_in_agent()
-    test_bundled_memory_markdown_loads()
+    test_bundled_memory_loads()
     test_memory_round_trip()
-    test_memory_vector_recall()
+    test_recall_memory()
     test_add_memory_tool()
     test_update_memory_hook()
     test_write_memory_preserves_frontmatter()

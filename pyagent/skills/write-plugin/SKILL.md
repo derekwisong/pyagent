@@ -65,9 +65,9 @@ otherwise. Confirm scope once if unclear; don't guess.
 ## manifest.toml
 
 ```toml
-name = "memory-vector"           # globally unique; the plugin's identity
+name = "my-plugin"               # globally unique; the plugin's identity
 version = "0.1.0"                # the plugin's own version
-description = "Vector-backed memory backend."
+description = "What the plugin does, in one sentence."
 api_version = "1"                # the pyagent plugin API version
 
 # What the plugin promises to register. Validated at load time:
@@ -278,5 +278,5 @@ developer-side workflow, not something to do from the agent.
 For deeper context — design rationale, the v2 runtime vision
 (`api.create_agent`, `api.deliver`, controlling hooks, external
 triggers), and competitive landscape — read `docs/plugin-design.md`
-in the pyagent repo. The bundled `pyagent/plugins/memory_markdown/`
-plugin is a complete worked example exercising every v1 element.
+in the pyagent repo. The bundled `pyagent/plugins/memory/` plugin
+is a complete worked example exercising every v1 element.

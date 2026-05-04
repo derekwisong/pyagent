@@ -1,6 +1,6 @@
-name = "memory-markdown"
-version = "0.1.0"
-description = "Markdown-file memory backend — the original ledger system."
+name = "memory"
+version = "0.2.0"
+description = "Markdown-file memory ledger plus semantic recall via fastembed."
 api_version = "1"
 
 # What this plugin promises to register. Validated at load time:
@@ -15,13 +15,13 @@ tools = [
   "write_memory",
   "add_memory",
   "update_memory_hook",
+  "recall_memory",
 ]
 prompt_sections = ["memory-guidance", "user-ledger", "memory-index"]
 
-# Spawn-tree behavior. Default true: the plugin loads in every agent
-# process, including subagents. memory-markdown does full-overwrite
-# writes that are not parallel-safe, so we set false here — root
-# loads it, subagents skip it. A future memory-sqlite or memory-vector
-# plugin with proper concurrency could leave this true.
+# Spawn-tree behavior. Subagents skip the memory plugin: writes are
+# not parallel-safe, and a subagent that touches USER/MEMORY would
+# clobber the root agent's view. Root loads it; subagents don't see
+# any memory tools.
 [load]
 in_subagents = false

@@ -27,8 +27,8 @@ Layered output (in order):
                       system block
 
 User-facing memory (USER.md / MEMORY.md) is contributed by the
-bundled `memory-markdown` plugin's prompt sections, not auto-loaded
-here. Disabling that plugin removes its sections cleanly.
+bundled `memory` plugin's prompt sections, not auto-loaded here.
+Disabling that plugin removes its sections cleanly.
 """
 
 from __future__ import annotations
@@ -144,10 +144,9 @@ class SystemPromptBuilder:
                     sections.append(rendered)
 
         # USER ledger auto-load was here pre-plugin; now owned by the
-        # memory-markdown plugin's "user-ledger" prompt section. With
-        # the plugin disabled, USER content does not appear in the
-        # system prompt at all — that is the clean-replacement
-        # contract.
+        # memory plugin's "user-ledger" prompt section. With the
+        # plugin disabled, USER content does not appear in the system
+        # prompt at all — that is the clean-replacement contract.
 
         sections.append(self._persona_footer())
 

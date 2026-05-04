@@ -15,7 +15,7 @@ dependencies = [
     # DuckDuckGo HTML scraper used by the bundled `web-search` plugin.
     "ddgs>=9",
     "docstring_parser>=0.16",
-    # Powers the bundled memory-vector plugin's recall_memory tool.
+    # Powers the bundled memory plugin's recall_memory tool.
     # Pulls in onnxruntime + tokenizers (~150MB on disk) plus a
     # one-time ~130MB embedding-model download on first non-empty
     # recall.

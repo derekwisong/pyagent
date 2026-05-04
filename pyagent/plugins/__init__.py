@@ -879,10 +879,10 @@ def _load_module(record: PluginRecord) -> Any | None:
         synth_name = (
             f"pyagent_plugin_{record.manifest.name.replace('-', '_')}"
         )
-        # Detect synth-name collision (e.g. "memory-vector" and
-        # "memory_vector" both map to pyagent_plugin_memory_vector).
-        # Skip the second to avoid silently overwriting sys.modules
-        # and corrupting the first plugin's relative imports.
+        # Detect synth-name collision (e.g. "my-plugin" and
+        # "my_plugin" both map to pyagent_plugin_my_plugin). Skip
+        # the second to avoid silently overwriting sys.modules and
+        # corrupting the first plugin's relative imports.
         if synth_name in sys.modules:
             logger.warning(
                 "plugin %s: synthetic module name %r already taken "
@@ -1549,8 +1549,8 @@ def load(*, is_subagent: bool = False) -> LoadedPlugins:
 
     Returns aggregated state ready for the agent to consume. If
     `is_subagent`, plugins with `[load] in_subagents = false` are
-    skipped (so naive plugins like memory-markdown only run in the
-    root agent).
+    skipped (so naive plugins like memory only run in the root
+    agent).
     """
     records = discover()
 

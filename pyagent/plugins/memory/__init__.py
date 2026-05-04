@@ -1,4 +1,7 @@
-"""memory-markdown — bundled markdown ledger backend.
+"""memory — bundled ledger + semantic recall.
+
+Backs USER and MEMORY persistence with markdown files plus a
+fastembed-backed vector index for `recall_memory`.
 
 USER ledger  — splatted: auto-loaded into every system prompt
                 (small, always-relevant: preferences, conventions,
@@ -9,31 +12,93 @@ MEMORY       — index + per-memory files. MEMORY.md is the catalog
                 own markdown file under memories/ in the plugin's
                 data dir. Agent reads the catalog in the prompt,
                 fetches a body with read_memory(file="foo.md") only
-                when it needs it.
+                when it needs it. Bodies carry a `created_at` YAML
+                frontmatter that the read tools strip on the way out.
+
+Recall: `recall_memory(query)` runs cosine search over an L2-
+normalized vector index of hooks + bodies, rebuilt on mtime change.
+Index files (vectors.npy, index.json) live alongside MEMORY.md in
+the plugin's data dir.
 
 Companion files in this directory:
   manifest.toml
   defaults/MEMORY.md   — seed template for the index file
   defaults/USER.md     — seed template for the per-user notes file
-  defaults/PROMPT.md   — the "how to use the ledgers" instructional
-                         prose, lifted from SOUL.md
+  defaults/PROMPT.md   — pure tool reference; persona-flavored
+                         memory prose lives in SOUL.md
 """
 
 from __future__ import annotations
 
 import datetime
+import json
+import logging
 import os
 import re
 import shutil
 from difflib import SequenceMatcher
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 _LEDGERS = {"USER": "USER.md", "MEMORY": "MEMORY.md"}
 _MEMORIES_DIRNAME = "memories"
 
+# ---- Recall (vector) constants ----------------------------------
+#
+# Embedding model for `recall_memory`. fastembed downloads it on first
+# use (~130 MB once-only). bge-small-en-v1.5 is the current sweet
+# spot for English embedding speed × quality at agent-memory scale.
+_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+
+# Bullet shape recall_memory parses out of MEMORY.md to map filename
+# → (title, hook) at query time. Loose enough for `-`, `*`, `+`
+# bullets and the various dash/colon separators we've seen between
+# title and hook.
+_INDEX_LINE_RE = re.compile(
+    r"\s*[-*+]\s*\[(?P<title>[^\]]+)\]\((?P<file>[^)]+\.md)\)"
+    r"(?:\s*[—\-:]\s*(?P<hook>.+))?\s*$"
+)
+
+# Process-local cache so multiple recalls in one session don't
+# re-instantiate the embedding model. fastembed itself caches model
+# weights on disk, but the Python-side ONNX session has nontrivial
+# init cost.
+_model = None
+
+
+def _filename_search_terms(filename: str) -> str:
+    """Convert a memory filename into search-friendly tokens.
+
+    ``stack_choices.md`` → ``stack choices``. The ``.md`` suffix and
+    ``_``/``-`` separators carry no semantic content; replacing them
+    with spaces lets the embedder pick up the descriptive tokens the
+    agent chose when naming the file. A query like "stack choices"
+    now scores against the filename even when the title and hook
+    use different wording.
+    """
+    stem = filename.removesuffix(".md")
+    return stem.replace("_", " ").replace("-", " ").strip()
+
+
+def _get_model():
+    """Lazy-init the fastembed TextEmbedding once per process.
+
+    fastembed isn't imported until the first recall — it pulls in
+    onnxruntime + tokenizers (~150 MB on disk) plus a one-time
+    ~130 MB model download on first non-empty recall. Other memory
+    tools (add_memory, read_memory, write_*) don't pay this cost.
+    """
+    global _model
+    if _model is None:
+        from fastembed import TextEmbedding
+
+        _model = TextEmbedding(model_name=_MODEL_NAME)
+    return _model
+
 # Memory filenames must be lowercase snake_case with a .md suffix.
-# Why this strict: filenames are now embedded into recall_memory's
-# searchable text (memory_vector._filename_search_terms), so a
+# Why this strict: filenames are embedded into recall_memory's
+# searchable text via _filename_search_terms (above), so a
 # consistent shape keeps recall predictable. Also stops the agent
 # from drifting into mixed-case or spaced filenames that look
 # inconsistent in the index.
@@ -337,7 +402,7 @@ def register(api):
     plugin_dir = Path(__file__).parent
     seeds = plugin_dir / "defaults"
 
-    # Persistent ledger storage: <data-dir>/plugins/memory-markdown/.
+    # Persistent ledger storage: <data-dir>/plugins/memory/.
     # Lazy-created on first access.
     storage = api.user_data_dir
 
@@ -631,11 +696,272 @@ def register(api):
         _atomic_write(index_path, new_text)
         return f"updated hook for {filename}"
 
+    # ---- Recall (vector) -------------------------------------------
+    #
+    # Fastembed is a hard dep in pyproject.toml. If it's missing the
+    # install is broken — log a clear note and skip just the recall
+    # tool rather than failing the whole plugin so add/read/write
+    # still work. The plugin's [provides] manifest still declares
+    # recall_memory, which means a missing-fastembed install fails
+    # `_validate_provides` and the loader rejects the plugin entirely.
+    # That's intentional: recall is part of the memory contract and
+    # half-loading it silently is worse than refusing.
+    try:
+        import fastembed  # noqa: F401
+        import numpy as np
+    except ImportError as exc:
+        api.log(
+            "warning",
+            f"memory: required dependency missing ({exc.name}); "
+            "reinstall pyagent. Plugin disabled.",
+        )
+        return
+
+    def _vec_index_paths() -> tuple[Path, Path]:
+        return storage / "vectors.npy", storage / "index.json"
+
+    def _parse_index_entries() -> list[tuple[str, str, str, str]]:
+        """Walk MEMORY.md; return (category, title, filename, hook)
+        tuples. category is the most recent ## heading above each
+        bullet, or "" if the bullet appears before any heading.
+        hook may be empty."""
+        index_path = _ledger_path("MEMORY")
+        if not index_path.exists():
+            return []
+        out: list[tuple[str, str, str, str]] = []
+        current_category = ""
+        for line in index_path.read_text().splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("## "):
+                current_category = stripped[3:].strip()
+                continue
+            m = _INDEX_LINE_RE.match(line)
+            if not m:
+                continue
+            out.append((
+                current_category,
+                m.group("title").strip(),
+                m.group("file").strip(),
+                (m.group("hook") or "").strip(),
+            ))
+        return out
+
+    def _gather_chunks() -> list[dict]:
+        """Walk MEMORY.md + memories/*.md; return list of chunks
+        ready to embed. Each chunk is {kind, filename, text}.
+
+        Filename tokens are prepended to both hook and body chunks so
+        descriptive filenames the agent chose ("stack_choices.md" →
+        "stack choices") contribute to recall match — searches for
+        the filename's words now hit even when the title and hook
+        use different wording. Frontmatter is stripped from bodies
+        before embedding so created_at tokens don't dilute topical
+        signal.
+        """
+        chunks: list[dict] = []
+        for _category, title, filename, hook in _parse_index_entries():
+            fn_terms = _filename_search_terms(filename)
+            text = (
+                f"{fn_terms} {title}: {hook}"
+                if hook
+                else f"{fn_terms} {title}"
+            )
+            chunks.append({"kind": "hook", "filename": filename, "text": text})
+        memories_dir = storage / _MEMORIES_DIRNAME
+        if memories_dir.exists():
+            for body_path in sorted(memories_dir.glob("*.md")):
+                fn_terms = _filename_search_terms(body_path.name)
+                _meta, body = _split_frontmatter(body_path.read_text())
+                # Filename tokens prepended on their own line so the
+                # body text is preserved as-is for the embedder; the
+                # double newline keeps them as a "topic anchor"
+                # rather than fusing with the body's first sentence.
+                chunks.append({
+                    "kind": "body",
+                    "filename": body_path.name,
+                    "text": f"{fn_terms}\n\n{body}",
+                })
+        return chunks
+
+    def _is_index_stale() -> bool:
+        vec_path, idx_path = _vec_index_paths()
+        if not vec_path.exists() or not idx_path.exists():
+            return True
+        idx_mtime = min(
+            vec_path.stat().st_mtime, idx_path.stat().st_mtime
+        )
+        index_path = _ledger_path("MEMORY")
+        if (
+            index_path.exists()
+            and index_path.stat().st_mtime > idx_mtime
+        ):
+            return True
+        memories_dir = storage / _MEMORIES_DIRNAME
+        if memories_dir.exists():
+            for f in memories_dir.glob("*.md"):
+                if f.stat().st_mtime > idx_mtime:
+                    return True
+        return False
+
+    def _build_and_save():
+        chunks = _gather_chunks()
+        vec_path, idx_path = _vec_index_paths()
+        vec_path.parent.mkdir(parents=True, exist_ok=True)
+        if not chunks:
+            # Wipe stale on-disk artifacts so an empty store doesn't
+            # serve old hits.
+            for p in (vec_path, idx_path):
+                if p.exists():
+                    p.unlink()
+            return None, []
+        model = _get_model()
+        texts = [c["text"] for c in chunks]
+        vectors = np.asarray(list(model.embed(texts)), dtype=np.float32)
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        vectors = vectors / np.maximum(norms, 1e-9)
+        np.save(vec_path, vectors)
+        # Strip the embedded text before saving — we re-derive
+        # snippets from source files at query time, no need to
+        # store twice.
+        meta = [{"kind": c["kind"], "filename": c["filename"]} for c in chunks]
+        idx_path.write_text(json.dumps(meta))
+        return vectors, meta
+
+    def _load_or_build():
+        vec_path, idx_path = _vec_index_paths()
+        if _is_index_stale():
+            return _build_and_save()
+        try:
+            vectors = np.load(vec_path)
+            meta = json.loads(idx_path.read_text())
+            return vectors, meta
+        except Exception as exc:
+            logger.warning(
+                "memory: failed to load saved vector index (%s); "
+                "rebuilding",
+                exc,
+            )
+            return _build_and_save()
+
+    def _snippet_for(meta: dict, hook_lookup: dict[str, str]) -> str:
+        """Return a human-readable snippet for a hit. For hook hits,
+        the hook line; for body hits, the first non-blank lines of
+        the body (frontmatter stripped)."""
+        if meta["kind"] == "hook":
+            return hook_lookup.get(meta["filename"], "")
+        body_path = storage / _MEMORIES_DIRNAME / meta["filename"]
+        if not body_path.exists():
+            return ""
+        _m, body = _split_frontmatter(body_path.read_text())
+        lines = [ln for ln in body.splitlines() if ln.strip()]
+        return "\n".join(lines[:3])
+
+    def recall_memory(
+        query: str,
+        k: int = 5,
+        min_score: float = 0.0,
+        category: str | None = None,
+    ) -> str:
+        """Semantic search over the memory ledger.
+
+        Use when scanning the MEMORY.md index in your prompt isn't
+        enough — long catalog, cross-cutting topic, or you remember
+        the gist of what you wrote down but not the title or
+        filename. Each hit names a file under `memories/` and a
+        short snippet; fetch the full body with
+        `read_memory(file=<filename>)` only when you need it.
+
+        Args:
+            query: What you're looking for, in natural language.
+            k: Maximum number of files in the result. Default 5.
+            min_score: Drop hits below this cosine similarity.
+                Useful range 0.2–0.5; defaults to 0.0 (no threshold).
+            category: Restrict to memories filed under this H2
+                heading in MEMORY.md (case-insensitive). Use when
+                you already know the topic area; avoids dilution
+                from off-topic memories sharing keywords.
+
+        Returns:
+            A formatted list of hits, or a `<...>` error string.
+        """
+        if not query or not query.strip():
+            return "<empty query>"
+        if k < 1:
+            return "<k must be >= 1>"
+        vectors, meta = _load_or_build()
+        if vectors is None or len(meta) == 0:
+            return "<no memories indexed yet>"
+        model = _get_model()
+        q_vec = np.asarray(
+            next(iter(model.embed([query]))), dtype=np.float32
+        )
+        q_vec = q_vec / max(float(np.linalg.norm(q_vec)), 1e-9)
+        scores = vectors @ q_vec  # cosine since normalized
+        entries = _parse_index_entries()
+        file_to_cat = {f: c for c, _t, f, _h in entries}
+        hook_lookup = {f: h for _c, _t, f, h in entries if h}
+        # Group by filename: keep highest-scoring chunk per file so a
+        # body and its hook don't both show up.
+        best: dict[str, tuple[float, dict]] = {}
+        for i, m in enumerate(meta):
+            score = float(scores[i])
+            existing = best.get(m["filename"])
+            if existing is None or score > existing[0]:
+                best[m["filename"]] = (score, m)
+
+        target_cat = category.strip().lower() if category else None
+        filtered: list[tuple[str, tuple[float, dict]]] = []
+        for filename, (score, m) in best.items():
+            if score < min_score:
+                continue
+            if target_cat is not None:
+                actual = file_to_cat.get(filename, "")
+                if actual.lower() != target_cat:
+                    continue
+            filtered.append((filename, (score, m)))
+        ranked = sorted(filtered, key=lambda kv: -kv[1][0])[:k]
+
+        # Header reflects active filters so the agent knows what
+        # was applied; unfiltered output is unchanged.
+        filter_parts = []
+        if min_score > 0:
+            filter_parts.append(f"min_score={min_score:.2f}")
+        if category:
+            filter_parts.append(f"category={category!r}")
+        filter_suffix = (
+            f" ({', '.join(filter_parts)})" if filter_parts else ""
+        )
+
+        if not ranked:
+            if filter_parts:
+                return (
+                    f"<no matches for {query!r} with "
+                    f"{', '.join(filter_parts)}; "
+                    "try a broader filter or drop the threshold>"
+                )
+            return f"<no matches for {query!r}>"
+
+        lines = [
+            f"Top {len(ranked)} matches for {query!r}{filter_suffix}:"
+        ]
+        for filename, (score, m) in ranked:
+            lines.append(
+                f"  • memories/{filename}  "
+                f"(score={score:.3f}, via {m['kind']})"
+            )
+            snippet = _snippet_for(m, hook_lookup)
+            for s_line in snippet.splitlines()[:3]:
+                lines.append(f"      {s_line}")
+        lines.append("")
+        lines.append('Fetch a body with: read_memory(file="<filename>")')
+        return "\n".join(lines)
+
     api.register_tool("read_memory", read_memory)
     api.register_tool("write_user", write_user)
     api.register_tool("write_memory", write_memory)
     api.register_tool("add_memory", add_memory)
     api.register_tool("update_memory_hook", update_memory_hook)
+    api.register_tool("recall_memory", recall_memory)
 
     # ---- Prompt sections --------------------------------------------
     #
@@ -717,9 +1043,9 @@ def register(api):
         # One-time orphan notice. Users coming from the pre-plugin
         # era have memory at <config-dir>/MEMORY.md and
         # <config-dir>/USER.md. The plugin's storage is at
-        # <config-dir>/plugins/memory-markdown/, so legacy files now
-        # sit on disk unused. We don't touch user data — just point
-        # them out once so the user knows they can delete by hand.
+        # <data-dir>/plugins/memory/, so legacy files now sit on
+        # disk unused. We don't touch user data — just point them
+        # out once so the user knows they can delete by hand.
         sentinel = storage / ".legacy-notice-shown"
         if not sentinel.exists():
             legacy = []
@@ -730,7 +1056,7 @@ def register(api):
             if legacy:
                 api.log(
                     "info",
-                    "memory-markdown: legacy ledger files at "
+                    "memory: legacy ledger files at "
                     f"{', '.join(legacy)} are no longer used. "
                     "Delete them manually if you wish.",
                 )

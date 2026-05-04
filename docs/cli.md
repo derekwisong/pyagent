@@ -130,7 +130,7 @@ The destructive reset (`--reset-skills`) prompts before doing anything;
 spec-doc resets don't, since those are pure revert-to-ship-state.
 
 Plugin data lives at `<config-dir>/plugins/<name>/`; wipe it with
-`pyagent-plugins reset <name>` (e.g. `pyagent-plugins reset memory-markdown`
+`pyagent-plugins reset <name>` (e.g. `pyagent-plugins reset memory`
 to clear USER and MEMORY ledgers).
 
 ## Companion CLIs

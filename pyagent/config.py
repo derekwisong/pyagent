@@ -65,8 +65,7 @@ DEFAULTS: dict[str, Any] = {
         "pdf-from-markdown",
     ],
     "built_in_plugins_enabled": [
-        "memory-markdown",
-        "memory-vector",
+        "memory",
         "html-tools",
         "code-mapper",
         "web-search",

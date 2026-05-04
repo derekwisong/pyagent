@@ -26,7 +26,7 @@ default_model = "anthropic"
 
 built_in_skills_enabled = ["write-skill", "write-plugin", "pdf-from-markdown"]
 built_in_plugins_enabled = [
-  "memory-markdown", "memory-vector", "html-tools",
+  "memory", "html-tools",
   "web-search", "reddit-search", "hn-search",
   "code-mapper", "claude-code-cli", "ollama", "py-dev-toolkit",
 ]
@@ -87,7 +87,7 @@ roles in `config.toml` override or extend them.
 | User config | `~/.config/pyagent/` (Linux) / `~/Library/Application Support/pyagent/` (macOS) / `%APPDATA%\pyagent\` (Windows) |
 | Project config | `./.pyagent/config.toml` |
 | Persona files | `<config-dir>/SOUL.md`, `TOOLS.md`, `PRIMER.md` (overridable per-project by placing in cwd) |
-| Plugin data | `<config-dir>/plugins/<name>/` (e.g. `memory-markdown/MEMORY.md`) |
+| Plugin data | `<config-dir>/plugins/<name>/` (e.g. `memory/MEMORY.md`) |
 | Sessions | `./.pyagent/sessions/<session-id>/` |
 
 See [docs/cli.md](cli.md) for resetting any of these to bundled defaults.

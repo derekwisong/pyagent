@@ -18,7 +18,7 @@ auto-loads beyond what you pass in:
 |---|---|
 | Your custom tools (via `agent.add_tool(...)`) | ✓ whatever you add |
 | LLM client (passed to `Agent(client=...)`) | ✓ |
-| Plugins — `web_search`, `doc_tools`, `memory_markdown`, etc. | ✗ |
+| Plugins — `web_search`, `doc_tools`, `memory`, etc. | ✗ |
 | Skills catalog + `read_skill` tool | ✗ |
 | Built-in file/shell tools (`read_file`, `write_file`, `execute`, `grep`, `fetch_url`, …) | ✗ |
 | Subagent meta-tools (`spawn_subagent`, `call_subagent`, …) | ✗ |

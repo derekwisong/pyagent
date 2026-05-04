@@ -635,8 +635,8 @@ def _register_tools(
     _add("kill_process", agent_tools.kill_process, auto_offload=False)
     _add("fetch_url", agent_tools.fetch_url)
     # Memory tools (read_memory / write_memory / write_user /
-    # add_memory / update_memory_hook) come from the bundled
-    # memory-markdown plugin (see pyagent/plugins/memory_markdown/).
+    # add_memory / update_memory_hook / recall_memory) come from
+    # the bundled memory plugin (see pyagent/plugins/memory/).
     # Disabling that plugin removes the tools entirely — clean
     # replacement surface for alternative memory backends.
     # Skill bodies are single-shot reference content: the model reads

@@ -28,8 +28,7 @@ warnings when a higher-tier plugin shadows a lower-tier one.
 
 | Plugin | What it provides | Default enabled? |
 | --- | --- | --- |
-| `memory-markdown` | Markdown ledger storage — `add_memory`, `read_memory`, `write_memory`, `write_user`, `update_memory_hook`, plus USER/MEMORY prompt sections. Root-only (does not load in subagents). | yes |
-| `memory-vector` | Semantic recall (`recall_memory`) over `memory-markdown`'s files via fastembed. Root-only. | yes |
+| `memory` | Markdown ledger storage + semantic recall — `add_memory`, `read_memory`, `write_memory`, `write_user`, `update_memory_hook`, `recall_memory`, plus USER/MEMORY prompt sections. Root-only (does not load in subagents). | yes |
 | `html-tools` | `html_to_md` / `html_select` — convert or query saved HTML attachments (or any local HTML file). | yes |
 | `code-mapper` | `map_code` / `probe_grammar` — tree-sitter symbol map for source files (Python in v1; multi-language ready). | yes |
 | `web-search` | `web_search` / `web_search_instant` — DuckDuckGo-backed list search and instant answers. Side-saves structured JSON. | yes |
@@ -72,8 +71,8 @@ tools = ["hello"]
 ```
 
 Restart pyagent. The LLM has a `hello` tool. See
-`pyagent/plugins/memory_markdown/` for a complete bundled example
-exercising tools, prompt sections, and lifecycle hooks.
+`pyagent/plugins/memory/` for a complete bundled example exercising
+tools, prompt sections, and lifecycle hooks.
 
 The bundled `write-plugin` skill (enabled by default) walks the agent
 through writing a plugin for you — load it with `read_skill("write-plugin")`.
