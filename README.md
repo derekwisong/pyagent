@@ -79,5 +79,4 @@ Local Ollama needs no key — just the daemon running and a model pulled.
 
 ## License
 
-Copyright © 2026 Derek Wisong. All rights reserved. No license is
-granted for use, modification, or redistribution at this time.
+MIT — see [LICENSE](LICENSE).
