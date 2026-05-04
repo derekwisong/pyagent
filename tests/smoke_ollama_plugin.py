@@ -327,9 +327,22 @@ def _check_respond_request_shape_and_response_parse() -> None:
     )
     _check("user message present", msgs[1] == {"role": "user", "content": "hello"})
     _check("assistant content carried", msgs[2]["role"] == "assistant")
+    # Mixed turn (prose + tool_call) must inline the call into content
+    # using the dialect's native envelope and drop the structured
+    # tool_calls field. /api/show isn't separately mocked here so
+    # detection falls back to the qwen default — that's intentional,
+    # the default is what gets used for unknown models in production.
     _check(
-        "assistant tool_calls translated",
-        msgs[2]["tool_calls"][0]["function"]["name"] == "lookup",
+        "mixed-turn assistant inlines tool_calls into content",
+        "<tool_call>" in msgs[2]["content"]
+        and '"name": "lookup"' in msgs[2]["content"]
+        and '"arguments": {"q": "weather"}' in msgs[2]["content"]
+        and "calling lookup\n<tool_call>" in msgs[2]["content"],
+        repr(msgs[2]),
+    )
+    _check(
+        "mixed-turn assistant omits structured tool_calls field",
+        "tool_calls" not in msgs[2],
         repr(msgs[2]),
     )
     _check(
@@ -373,6 +386,165 @@ def _check_respond_request_shape_and_response_parse() -> None:
         "usage.model is provider/model",
         out["usage"]["model"] == "ollama/llama3.2",
         out["usage"]["model"],
+    )
+
+
+def _check_tool_call_only_turn_keeps_structured_field() -> None:
+    """Tool-call-only assistant turns (no narrative prose) must keep
+    using the structured ``tool_calls`` field. Ollama's per-template
+    rendering handles the right envelope per family — the dialect
+    inlining is reserved for mixed turns where the template would
+    otherwise drop information."""
+    captured: dict = {}
+
+    def fake_post(url, json=None, timeout=None, stream=False):
+        captured["body"] = json
+        return _FakeResponse(
+            {
+                "message": {"role": "assistant", "content": "ok", "tool_calls": []},
+                "prompt_eval_count": 1,
+                "eval_count": 1,
+            }
+        )
+
+    client = ollama_client_mod.OllamaClient(model="llama3.2")
+    with mock.patch.object(
+        ollama_client_mod.requests, "post", side_effect=fake_post
+    ):
+        client.respond(
+            conversation=[
+                {"role": "user", "content": "go"},
+                {
+                    "role": "assistant",
+                    "text": "",  # no narrative
+                    "tool_calls": [
+                        {"id": "abc", "name": "lookup", "args": {"q": "x"}}
+                    ],
+                },
+                {
+                    "role": "user",
+                    "tool_results": [
+                        {"id": "abc", "name": "lookup", "content": "found"}
+                    ],
+                },
+            ],
+        )
+    # No system prompt in this fixture, so the assistant turn is at
+    # index 1 (user → assistant → tool, no system prefix).
+    assistant_msg = captured["body"]["messages"][1]
+    _check(
+        "tool-call-only turn keeps structured tool_calls field",
+        "tool_calls" in assistant_msg
+        and assistant_msg["tool_calls"][0]["function"]["name"] == "lookup",
+        repr(assistant_msg),
+    )
+    _check(
+        "tool-call-only turn does NOT inline into content",
+        "<tool_call>" not in (assistant_msg.get("content") or ""),
+        repr(assistant_msg),
+    )
+
+
+def _check_dialect_detection() -> None:
+    """Template-string sniffing classifies Ollama models into the
+    right wire-format dialect. Detection is deliberately literal —
+    we look for envelope tokens each family bakes into its template
+    rather than maintaining a model-name registry, because Ollama
+    users keep pulling new tags / custom Modelfiles / fine-tunes."""
+    from pyagent.plugins.ollama import dialects
+
+    qwen_template = (
+        "{{ if .Tools }}You may call one or more functions...\n"
+        "<tool_call>\n{\"name\": ..., \"arguments\": ...}\n</tool_call>\n"
+        "{{ end }}"
+    )
+    llama_template = (
+        "<|start_header_id|>assistant<|end_header_id|>\n"
+        '{"name": "...", "parameters": {...}}\n'
+    )
+
+    qd = dialects.detect_from_template(qwen_template)
+    _check("qwen template → QwenDialect", qd.name == "qwen", qd.name)
+    ld = dialects.detect_from_template(llama_template)
+    _check("llama template → LlamaDialect", ld.name == "llama", ld.name)
+    default = dialects.detect_from_template("")
+    _check(
+        "empty template falls back to default (qwen)",
+        default.name == "qwen",
+        default.name,
+    )
+    unknown = dialects.detect_from_template("some custom template body")
+    _check(
+        "unrecognized template falls back to default (qwen)",
+        unknown.name == "qwen",
+        unknown.name,
+    )
+
+    # Envelope shape: qwen wraps in <tool_call> with `arguments`,
+    # llama emits bare JSON with `parameters`. These exact strings
+    # are what each family's model was trained to recognize as a
+    # tool call in the assistant content channel.
+    calls = [{"name": "lookup", "args": {"q": "x"}}]
+    qwen_out = dialects.QwenDialect().render_tool_calls_in_content(calls)
+    _check(
+        "qwen envelope wraps in <tool_call> with arguments key",
+        qwen_out.startswith("<tool_call>")
+        and qwen_out.endswith("</tool_call>")
+        and '"arguments": {"q": "x"}' in qwen_out,
+        repr(qwen_out),
+    )
+    llama_out = dialects.LlamaDialect().render_tool_calls_in_content(calls)
+    _check(
+        "llama envelope is bare JSON with parameters key",
+        "<tool_call>" not in llama_out
+        and '"parameters": {"q": "x"}' in llama_out
+        and llama_out.startswith("{"),
+        repr(llama_out),
+    )
+
+
+def _check_dialect_resolves_from_show_payload() -> None:
+    """Client.dialect lazy-resolves from the cached /api/show payload;
+    ``/api/show`` failures fall back to the default without raising."""
+    show_calls: list[str] = []
+
+    def fake_post(url, json=None, timeout=None, stream=False):
+        if "/api/show" in url:
+            show_calls.append((json or {}).get("name", ""))
+            return _FakeResponse(
+                {"template": "<|start_header_id|>{{.Content}} \"parameters\""}
+            )
+        return _FakeResponse({})
+
+    client = ollama_client_mod.OllamaClient(model="llama3.1:8b")
+    with mock.patch.object(
+        ollama_client_mod.requests, "post", side_effect=fake_post
+    ):
+        d1 = client.dialect
+        d2 = client.dialect  # cached — no second /api/show call
+        # context_window also reads from the cached payload.
+        _ = client.context_window
+    _check("llama template detected", d1.name == "llama", d1.name)
+    _check("dialect cached across reads", d1 is d2)
+    _check(
+        "single /api/show call shared by dialect + context_window",
+        len(show_calls) == 1,
+        repr(show_calls),
+    )
+
+    # /api/show failure → default dialect, no raise.
+    def fail_post(url, json=None, timeout=None, stream=False):
+        raise ConnectionError("server gone")
+
+    fresh = ollama_client_mod.OllamaClient(model="qwen2.5:7b")
+    with mock.patch.object(
+        ollama_client_mod.requests, "post", side_effect=fail_post
+    ):
+        d = fresh.dialect
+    _check(
+        "show failure falls back to default dialect",
+        d.name == "qwen",
+        d.name,
     )
 
 
@@ -834,6 +1006,10 @@ def _check_no_tools_auto_retry() -> None:
     posts: list[dict] = []
 
     def fake_post(url, json=None, timeout=None, stream=False):
+        # /api/show probes (used by the num_ctx lookup) are noise for
+        # this test — only chat POSTs are part of the retry contract.
+        if "/api/chat" not in url:
+            return _FakeResponse({})
         # Deep-copy: respond() mutates the dict in place during the
         # tools-stripping retry, so a shallow capture would lose the
         # pre-mutation state.
@@ -932,6 +1108,9 @@ def main() -> None:
     _check_ollama_model_env_feeds_default()
     _check_resolve_host_normalises()
     _check_respond_request_shape_and_response_parse()
+    _check_tool_call_only_turn_keeps_structured_field()
+    _check_dialect_detection()
+    _check_dialect_resolves_from_show_payload()
     _check_list_ollama_models_formatting()
     _check_list_ollama_models_error_path()
     _check_list_ollama_models_empty()

@@ -37,6 +37,8 @@ from typing import Any, Callable
 
 import requests
 
+from pyagent.plugins.ollama import dialects
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,6 +47,16 @@ DEFAULT_HOST = "http://localhost:11434"
 # waiting for Ollama to mmap/load a multi-GB GGUF before any tokens
 # come back.
 DEFAULT_TIMEOUT = 600
+# Ollama's server defaults to num_ctx=2048/4096 regardless of what the
+# model architecture supports, silently truncating tool-heavy pyagent
+# prompts. We override that. Floor (when the architecture window is
+# unknown) is 2x the server default so basic prompts fit; cap (when
+# the architecture window is huge, e.g. llama3.2's 128k) bounds KV-
+# cache memory on small local boxes — at fp16 a 3B-class model burns
+# ~110 KB/token, so 16k ≈ ~2 GB just for KV. Override with
+# PYAGENT_OLLAMA_NUM_CTX to bypass both.
+NUM_CTX_FLOOR = 8192
+NUM_CTX_CAP = 16384
 
 
 def _raise_with_body(resp: requests.Response, where: str) -> None:
@@ -155,10 +167,34 @@ class OllamaClient:
         # contract holds — the cost is exactly one extra failed
         # request the first time a no-tools model is used.
         self._skip_tools = False
-        # Cached context-window lookup. None = not yet asked; 0 =
-        # asked-and-unknown (server pre-0.5 / model lacks the field).
-        # Populated by the `context_window` property on first read.
+        # /api/show is consulted by both the context-window lookup
+        # and the dialect detection. We cache the whole payload so
+        # both can read from it without paying for two round trips
+        # on the first turn. None = not yet fetched; {} = fetched-
+        # and-failed (server unreachable, /api/show errored). Both
+        # downstream consumers latch their own derived values, so
+        # transient failures stick — same behavior the prior
+        # context-window cache had.
+        self._show_payload: dict[str, Any] | None = None
         self._context_window: int | None = None
+        self._dialect: dialects.Dialect | None = None
+
+    def _show(self) -> dict[str, Any]:
+        """Lazy-cached ``/api/show`` payload, with empty-dict fallback
+        on any failure.
+
+        Both :attr:`context_window` and :attr:`dialect` need this
+        payload, and ``/api/show`` is a real network call — so we
+        consolidate. Failure latches to ``{}`` so a transient blip
+        doesn't get retried forever, matching what the prior
+        ``_context_window = 0`` behavior did.
+        """
+        if self._show_payload is None:
+            try:
+                self._show_payload = show_model(self.model, host=self.host)
+            except Exception:
+                self._show_payload = {}
+        return self._show_payload
 
     @property
     def context_window(self) -> int:
@@ -174,16 +210,11 @@ class OllamaClient:
         """
         if self._context_window is not None:
             return self._context_window
-        try:
-            info = show_model(self.model, host=self.host)
-        except Exception:
-            self._context_window = 0
-            return 0
         # Ollama's /api/show puts the architecture's context length
         # under model_info["<family>.context_length"]. The family
         # name varies (llama, qwen2, mistral, ...), so scan all keys
         # ending with `.context_length` and take the first hit.
-        model_info = info.get("model_info") or {}
+        model_info = self._show().get("model_info") or {}
         if isinstance(model_info, dict):
             for key, val in model_info.items():
                 if key.endswith(".context_length") and isinstance(val, int):
@@ -191,6 +222,54 @@ class OllamaClient:
                     return val
         self._context_window = 0
         return 0
+
+    @property
+    def dialect(self) -> dialects.Dialect:
+        """Per-family wire-format dialect, sniffed from the model's
+        template via ``/api/show`` and cached for the session.
+
+        Only consulted when we have to inline a tool call into the
+        assistant content channel ourselves (mixed turns — see
+        :meth:`_to_ollama`). Tool-call-only turns ride the structured
+        ``tool_calls`` field and Ollama's own template renders the
+        right envelope per model, so the dialect doesn't matter
+        there.
+
+        Falls back to the default dialect when ``/api/show`` failed
+        or the template is unrecognized — see
+        :func:`dialects.detect_from_template` for the precedence.
+        """
+        if self._dialect is None:
+            template = self._show().get("template") or ""
+            self._dialect = dialects.detect_from_template(template)
+        return self._dialect
+
+    def _resolve_num_ctx(self) -> int:
+        """Pick the ``num_ctx`` value to send with each chat request.
+
+        Priority: ``PYAGENT_OLLAMA_NUM_CTX`` env var (raw passthrough,
+        for users who know what their hardware can hold) → the model's
+        architectural context length capped at ``NUM_CTX_CAP`` → a
+        ``NUM_CTX_FLOOR`` fallback when the lookup fails. Anything is
+        better than letting Ollama default to 4096 silently — that
+        dwarfs the user message under tool-doc system prompts and
+        produces nonsense replies.
+        """
+        env = os.environ.get("PYAGENT_OLLAMA_NUM_CTX", "").strip()
+        if env:
+            try:
+                n = int(env)
+                if n > 0:
+                    return n
+            except ValueError:
+                logger.warning(
+                    "PYAGENT_OLLAMA_NUM_CTX=%r is not a positive int; ignoring",
+                    env,
+                )
+        window = self.context_window
+        if window > 0:
+            return min(window, NUM_CTX_CAP)
+        return NUM_CTX_FLOOR
 
     def respond(
         self,
@@ -226,6 +305,7 @@ class OllamaClient:
             "model": self.model,
             "messages": messages,
             "stream": streaming,
+            "options": {"num_ctx": self._resolve_num_ctx()},
         }
         if tools and not self._skip_tools:
             body["tools"] = [
@@ -408,8 +488,7 @@ class OllamaClient:
         }
         return self._build_response(synthetic)
 
-    @staticmethod
-    def _to_ollama(message: dict[str, Any]) -> list[dict[str, Any]]:
+    def _to_ollama(self, message: dict[str, Any]) -> list[dict[str, Any]]:
         if message["role"] == "user":
             if "tool_results" in message:
                 # Ollama's tool-result wire shape is just role="tool"
@@ -427,11 +506,27 @@ class OllamaClient:
 
         # assistant — content is required even when only tool_calls
         # are present, so default to "" rather than omitting.
-        msg: dict[str, Any] = {
-            "role": "assistant",
-            "content": message.get("text") or "",
-        }
-        if message.get("tool_calls"):
+        text = message.get("text") or ""
+        tool_calls = message.get("tool_calls") or []
+
+        if tool_calls and text:
+            # Mixed turn (prose + tool_call). Most chat templates
+            # render assistant ``.Content`` OR ``.ToolCalls`` but
+            # never both — qwen-style drops the calls when content
+            # is set, llama-style does the inverse. Either way the
+            # next turn loses information and the model gets confused.
+            # Inline the calls into content using the family's native
+            # envelope, then omit the structured tool_calls field so
+            # the template's content branch renders our hand-built
+            # block unchanged. See pyagent.plugins.ollama.dialects
+            # for the per-family envelope and detection rules.
+            inlined = self.dialect.render_tool_calls_in_content(tool_calls)
+            return [
+                {"role": "assistant", "content": f"{text}\n{inlined}"}
+            ]
+
+        msg: dict[str, Any] = {"role": "assistant", "content": text}
+        if tool_calls:
             msg["tool_calls"] = [
                 {
                     "function": {
@@ -439,6 +534,6 @@ class OllamaClient:
                         "arguments": tc["args"],
                     },
                 }
-                for tc in message["tool_calls"]
+                for tc in tool_calls
             ]
         return [msg]

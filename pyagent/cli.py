@@ -81,86 +81,37 @@ def _on_text(text: str, agent_id: str | None = None) -> None:
     console.print()
 
 
-# Per-agent streaming state. Keys are agent_id strings (or "root" for
-# the main agent); each value is a dict tracking what we've streamed
-# so the closing `assistant_text` event can erase it cleanly and
-# re-render the same text as markdown (recovering bold/headers/code-
-# blocks the streamed plain text loses).
-#
-# Fields per state entry:
-#   - "buffer":   plain text streamed so far (no ANSI). Used to count
-#                 visual rows the cursor has advanced.
-#   - "width":    terminal width snapshot at the start of streaming.
-#                 We don't react to mid-turn resize; the cursor math
-#                 would lie if we did.
-#   - "header_advances": how many rows the cursor moved down BEFORE the
-#                 first chunk (leading blank line + optional agent
-#                 label). Tracked separately because it's plain
-#                 newlines with no soft-wrap component.
-_streaming_state: dict[str, dict[str, Any]] = {}
-
-# Strip ANSI control sequences when measuring visible character count.
-# Models occasionally emit `\033[...m` color codes inline; without this
-# strip, our per-row width math would treat them as visible chars and
-# the cursor-up math would over-count.
-_ANSI_RE = re.compile(r"\x1b\[[\d;]*[a-zA-Z]")
-
-
-def _count_cursor_advance(buffer: str, width: int) -> int:
-    """Count how many rows the cursor advanced from where streaming
-    started, given the streamed buffer and the terminal width.
-
-    Each `\\n` counts as one row. Each over-width segment between
-    newlines contributes ``(visible_len - 1) // width`` extra rows
-    from soft-wrapping. ANSI escape sequences are stripped before
-    measuring because they don't occupy visual columns.
-
-    Returns 0 for an empty buffer or non-positive width — both mean
-    "nothing to clear / nowhere safe to compute," and the caller
-    short-circuits the ANSI move.
-    """
-    if not buffer or width <= 0:
-        return 0
-    advance = 0
-    visible = _ANSI_RE.sub("", buffer)
-    segments = visible.split("\n")
-    for i, seg in enumerate(segments):
-        if i > 0:
-            advance += 1  # the newline itself
-        if seg:
-            advance += (len(seg) - 1) // width
-    return advance
+# Per-agent streaming flags. Keys are agent_id strings (or "root" for
+# the main agent); presence means at least one delta was printed for
+# this turn's text segment. The closing `assistant_text` event uses it
+# to decide whether to skip the per-segment header (already emitted by
+# the first delta) when re-rendering as markdown below the streamed
+# dim text.
+_streaming_active: set[str] = set()
 
 
 def _on_text_delta(chunk: str, agent_id: str | None = None) -> None:
     """Print one streaming text chunk inline, no markdown formatting.
 
-    Markdown rendering happens at end-of-turn — the closing
-    `assistant_text` event clears the streamed plain text and
-    re-renders the same buffer through `_on_text`, recovering
-    bold/headers/code blocks the streamed dim text loses. The brief
-    reflow on completion is acceptable for the UX win of seeing
-    tokens land in real time AND keeping markdown formatting.
+    The closing ``assistant_text`` event re-renders the same text as
+    markdown *below* the streamed dim block — separated by blank
+    lines, not via cursor walk-back. Walk-back doesn't compose with
+    prompt_toolkit's ``patch_stdout`` (the escape bytes get re-emitted
+    at a cursor position prompt_toolkit chooses on its next render
+    tick, not where Rich left off), and the resulting drift was
+    eating one row per turn out of the scrollback above the stream.
+    Trading a short visual duplication for buffer integrity.
 
     Each text segment in a turn (one per LLM call before/between/
     after tool batches) gets its own leading blank line + agent
     label exactly once, on the first delta.
     """
     key = agent_id or "root"
-    state = _streaming_state.get(key)
-    if state is None:
+    if key not in _streaming_active:
         console.print()
-        header_advances = 1
         if agent_id:
             console.print(_agent_label(agent_id))
-            header_advances += 1
-        state = {
-            "buffer": "",
-            "width": console.width or 0,
-            "header_advances": header_advances,
-        }
-        _streaming_state[key] = state
-    state["buffer"] += chunk
+        _streaming_active.add(key)
     # `style="dim"` matches the non-streaming render so the streamed
     # text doesn't visually pop while the user's prompt is still the
     # most-prominent thing on screen.
@@ -1310,29 +1261,21 @@ def _print_event(event: dict) -> None:
         return
     if kind == "assistant_text":
         key = agent_id or "root"
-        state = _streaming_state.pop(key, None)
-        if state is None:
+        was_streaming = key in _streaming_active
+        _streaming_active.discard(key)
+        if not was_streaming:
             # Non-streaming provider — full markdown render as before.
             _on_text(event["text"], agent_id=agent_id)
         else:
-            # Provider streamed — wipe the dim plain text we just
-            # printed, then call _on_text so the same text re-renders
-            # with full markdown formatting (bold, headers, lists,
-            # code blocks). Cursor-prev-line + clear-to-end works on
-            # any ANSI-aware terminal; we only emit it when the
-            # console is a real terminal so piped output (test
-            # captures, log redirects) doesn't get garbled by
-            # control sequences.
-            advance = _count_cursor_advance(
-                state["buffer"], state["width"]
-            ) + state["header_advances"]
-            if advance > 0 and console.is_terminal:
-                import sys
-                # `\x1b[<n>F` = Cursor Previous Line: up n lines, col 1.
-                # `\x1b[J`   = Erase from cursor to end of screen.
-                sys.stdout.write(f"\x1b[{advance}F\x1b[J")
-                sys.stdout.flush()
-            _on_text(event["text"], agent_id=agent_id)
+            # Provider streamed — close off the streamed text row so
+            # the markdown render below has a clean blank line above
+            # it, then re-render the same text with full markdown
+            # formatting (bold, headers, lists, code blocks). Skip
+            # the agent-label header that `_on_text` would emit since
+            # the first delta already printed it for this segment.
+            console.print()
+            console.print(Markdown(event["text"]), style="dim")
+            console.print()
     elif kind == "tool_call_started":
         _on_tool_call(event["name"], event["args"], agent_id=agent_id)
     elif kind == "tool_result":
