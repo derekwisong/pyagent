@@ -220,7 +220,7 @@ def _check_create_memory_rejects_drift_filenames() -> None:
         filename="choices_for_python_packaging.md",
         description="the trade-offs",
     )
-    assert "saved" in out, out
+    assert "created" in out, out
 
     # Drift shapes → rejected with the explicit marker.
     for bad in ["MyMemory.md", "Code Style.md", "code-style.md"]:

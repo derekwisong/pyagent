@@ -127,6 +127,34 @@ _CATEGORY_FUZZY_THRESHOLD = 0.85
 _CATEGORY_SUMMARY_MIN = 5
 
 
+def _parse_index_entries_at(index_text: str) -> list[tuple[str, str, str, str]]:
+    """Walk MEMORY.md text; return (category, title, filename,
+    description) tuples in document order.
+
+    Module-level so update_memory can match a bullet by anchored
+    shape instead of raw substring (preventing it from clobbering
+    another bullet whose description happens to reference the
+    target memory by relative-link).
+    """
+    out: list[tuple[str, str, str, str]] = []
+    current_category = ""
+    for line in index_text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("## "):
+            current_category = stripped[3:].strip()
+            continue
+        m = _INDEX_LINE_RE.match(line)
+        if not m:
+            continue
+        out.append((
+            current_category,
+            m.group("title").strip(),
+            m.group("file").strip(),
+            (m.group("hook") or "").strip(),
+        ))
+    return out
+
+
 def _extract_categories(index_text: str) -> list[str]:
     """Walk ``MEMORY.md``-style text and return its ``## <heading>``
     names in document order, deduplicated case-insensitively (the
@@ -517,6 +545,13 @@ def register(api):
                 "<update_memory needs at least one of `content`, "
                 "`description`, or `category` to be set>"
             )
+        # Reject empty content — degenerate state. Use delete_memory
+        # to actually remove the body.
+        if content is not None and not content.strip():
+            return (
+                "<update_memory content is empty; use delete_memory "
+                "to remove the body>"
+            )
         if description is not None:
             err = _validate_inline_field("description", description)
             if err:
@@ -529,14 +564,23 @@ def register(api):
                 return err
 
         body_path = _memory_file_path(filename)
+        # Seed MEMORY.md if a user wiped it manually — the missing
+        # bullet error below is more useful than "MEMORY.md not found".
+        _seed_if_missing("MEMORY")
         index_path = _ledger_path("MEMORY")
         if not index_path.exists():
             return "<MEMORY.md not found>"
         index_text = index_path.read_text()
 
-        needle = f"]({filename})"
-        bullet_present = needle in index_text
-        if (description is not None or category is not None) and not bullet_present:
+        # Locate the bullet via the parsed index so we can match by
+        # filename anchored to bullet shape (not raw substring).
+        # Prevents clobbering another bullet whose description happens
+        # to reference this memory by relative-link.
+        entries = _parse_index_entries_at(index_text)
+        bullet_entry: tuple[str, str, str, str] | None = next(
+            (e for e in entries if e[2] == filename), None
+        )
+        if (description is not None or category is not None) and bullet_entry is None:
             return f"<no bullet for {filename!r} in MEMORY.md>"
 
         if category is not None and not confirm_new_category:
@@ -561,14 +605,17 @@ def register(api):
                 return f"<body memories/{filename} not found>"
             old_meta, _ = _split_frontmatter(body_path.read_text())
             new_meta, new_body = _split_frontmatter(content)
-            if not new_meta and old_meta:
-                if not new_body.endswith("\n"):
-                    new_body = new_body + "\n"
-                final = _format_frontmatter(old_meta) + new_body
+            # Per-key merge: caller's keys win, absent keys preserved.
+            # Without this, caller content with frontmatter that
+            # lacks created_at would silently drop the existing
+            # created_at — losing the memory's age.
+            merged_meta = {**old_meta, **new_meta}
+            if not new_body.endswith("\n"):
+                new_body = new_body + "\n"
+            if merged_meta:
+                final = _format_frontmatter(merged_meta) + new_body
             else:
-                final = (
-                    content if content.endswith("\n") else content + "\n"
-                )
+                final = new_body
             body_path.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write(body_path, final)
             actions.append("body")
@@ -580,31 +627,43 @@ def register(api):
         if description is not None or category is not None:
             new_index = index_text
             if description is not None:
+                # Anchor the rewrite to bullet shape so a description
+                # on another bullet that references this memory by
+                # link doesn't get clobbered. Break after first hit.
+                needle = f"]({filename})"
                 rewritten: list[str] = []
+                done = False
                 for line in new_index.splitlines():
-                    idx = line.find(needle)
-                    if idx == -1:
-                        rewritten.append(line)
-                        continue
-                    prefix = line[: idx + len(needle)]
-                    tail = (
-                        f" — {description.strip()}"
-                        if description and description.strip()
-                        else ""
-                    )
-                    rewritten.append(prefix + tail)
+                    if not done:
+                        m = _INDEX_LINE_RE.match(line)
+                        if m and m.group("file").strip() == filename:
+                            idx = line.find(needle)
+                            prefix = line[: idx + len(needle)]
+                            tail = (
+                                f" — {description.strip()}"
+                                if description and description.strip()
+                                else ""
+                            )
+                            rewritten.append(prefix + tail)
+                            done = True
+                            continue
+                    rewritten.append(line)
                 new_index = "\n".join(rewritten)
                 if not new_index.endswith("\n"):
                     new_index += "\n"
                 actions.append("description")
 
             if category is not None:
+                # Anchor to bullet shape; break on first hit. Same
+                # rationale as the description rewrite above.
                 bullet_line: str | None = None
                 kept: list[str] = []
                 for line in new_index.splitlines():
-                    if bullet_line is None and needle in line:
-                        bullet_line = line
-                        continue
+                    if bullet_line is None:
+                        m = _INDEX_LINE_RE.match(line)
+                        if m and m.group("file").strip() == filename:
+                            bullet_line = line
+                            continue
                     kept.append(line)
                 if bullet_line is None:
                     return f"<no bullet for {filename!r} in MEMORY.md>"
@@ -741,9 +800,10 @@ def register(api):
 
         # Index update is atomic via temp-then-rename so a crash
         # leaves either the prior index or the new — never a
-        # truncated one. Body is already on disk; if the rename
-        # fails, the body is recoverable (recall_memory finds it,
-        # or the agent can re-link via update_memory).
+        # truncated one. If the rename fails (disk full, perms, etc.)
+        # the body is already on disk; clean it up so a retry
+        # doesn't collide on its own orphan via O_EXCL while the
+        # index check still passes.
         bullet = (
             f"- [{title.strip()}]({filename})"
             + (
@@ -756,8 +816,18 @@ def register(api):
             index_text, category.strip(), bullet
         )
         index_path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(index_path, new_index)
-        return f"saved {filename} under '{category.strip()}'"
+        try:
+            _atomic_write(index_path, new_index)
+        except OSError as e:
+            try:
+                body_path.unlink()
+            except OSError:
+                pass
+            return (
+                f"<index write failed for memories/{filename}; body "
+                f"cleaned up. Retry create_memory. Error: {e}>"
+            )
+        return f"created {filename}: category='{category.strip()}'"
 
     # ---- Recall (vector) -------------------------------------------
     #
@@ -784,30 +854,13 @@ def register(api):
         return storage / "vectors.npy", storage / "index.json"
 
     def _parse_index_entries() -> list[tuple[str, str, str, str]]:
-        """Walk MEMORY.md; return (category, title, filename, hook)
-        tuples. category is the most recent ## heading above each
-        bullet, or "" if the bullet appears before any heading.
-        hook may be empty."""
+        """Read MEMORY.md and parse its bullet entries. Thin wrapper
+        around the module-level ``_parse_index_entries_at`` so the
+        recall path uses the same parser as ``update_memory``."""
         index_path = _ledger_path("MEMORY")
         if not index_path.exists():
             return []
-        out: list[tuple[str, str, str, str]] = []
-        current_category = ""
-        for line in index_path.read_text().splitlines():
-            stripped = line.lstrip()
-            if stripped.startswith("## "):
-                current_category = stripped[3:].strip()
-                continue
-            m = _INDEX_LINE_RE.match(line)
-            if not m:
-                continue
-            out.append((
-                current_category,
-                m.group("title").strip(),
-                m.group("file").strip(),
-                (m.group("hook") or "").strip(),
-            ))
-        return out
+        return _parse_index_entries_at(index_path.read_text())
 
     def _gather_chunks() -> list[dict]:
         """Walk MEMORY.md + memories/*.md; return list of chunks
@@ -861,6 +914,14 @@ def register(api):
             return True
         memories_dir = storage / _MEMORIES_DIRNAME
         if memories_dir.exists():
+            # Stat the directory itself: its mtime updates when any
+            # entry is added or removed. Catches deletes (a deleted
+            # body file no longer appears in glob, so the per-file
+            # loop below wouldn't notice it). Without this check, a
+            # delete_memory orphan-body unlink could leave stale
+            # rows in the vec index pointing at a nonexistent body.
+            if memories_dir.stat().st_mtime > idx_mtime:
+                return True
             for f in memories_dir.glob("*.md"):
                 if f.stat().st_mtime > idx_mtime:
                     return True
@@ -924,14 +985,15 @@ def register(api):
         k: int = 5,
         min_score: float = 0.0,
         category: str | None = None,
+        created_within_days: int | None = None,
     ) -> str:
         """Semantic search over the memory ledger.
 
         Use when scanning the MEMORY.md index in your prompt isn't
         enough — long catalog, cross-cutting topic, or you remember
         the gist of what you wrote down but not the title or
-        filename. Each hit names a file under `memories/` and a
-        short snippet; fetch the full body with
+        filename. Each hit names a file under `memories/`, its
+        category, and a short snippet; fetch the full body with
         `read_memory(file=<filename>)` only when you need it.
 
         Args:
@@ -943,6 +1005,12 @@ def register(api):
                 heading in MEMORY.md (case-insensitive). Use when
                 you already know the topic area; avoids dilution
                 from off-topic memories sharing keywords.
+            created_within_days: Drop hits whose `created_at` is
+                older than `now - days`. Memories with no
+                `created_at` frontmatter are also dropped when this
+                filter is set (the ask is "recent stuff"; undated
+                doesn't qualify). Topical ranking is unchanged
+                within the window. Default None = no filter.
 
         Returns:
             A formatted list of hits, or a `<...>` error string.
@@ -951,6 +1019,8 @@ def register(api):
             return "<empty query>"
         if k < 1:
             return "<k must be >= 1>"
+        if created_within_days is not None and created_within_days < 1:
+            return "<created_within_days must be >= 1>"
         vectors, meta = _load_or_build()
         if vectors is None or len(meta) == 0:
             return "<no memories indexed yet>"
@@ -973,6 +1043,12 @@ def register(api):
                 best[m["filename"]] = (score, m)
 
         target_cat = category.strip().lower() if category else None
+        cutoff: datetime.datetime | None = None
+        if created_within_days is not None:
+            cutoff = datetime.datetime.now(
+                datetime.timezone.utc
+            ) - datetime.timedelta(days=created_within_days)
+
         filtered: list[tuple[str, tuple[float, dict]]] = []
         for filename, (score, m) in best.items():
             if score < min_score:
@@ -980,6 +1056,24 @@ def register(api):
             if target_cat is not None:
                 actual = file_to_cat.get(filename, "")
                 if actual.lower() != target_cat:
+                    continue
+            if cutoff is not None:
+                # Read the body's frontmatter to find created_at.
+                # Drop on missing-frontmatter when the filter is set:
+                # the ask is "recent stuff", and undated entries
+                # can't qualify. Cheap because k is small.
+                body_path = storage / _MEMORIES_DIRNAME / filename
+                if not body_path.exists():
+                    continue
+                fm, _ = _split_frontmatter(body_path.read_text())
+                created_str = fm.get("created_at", "")
+                if not created_str:
+                    continue
+                try:
+                    created_dt = datetime.datetime.fromisoformat(created_str)
+                except ValueError:
+                    continue
+                if created_dt < cutoff:
                     continue
             filtered.append((filename, (score, m)))
         ranked = sorted(filtered, key=lambda kv: -kv[1][0])[:k]
@@ -991,6 +1085,8 @@ def register(api):
             filter_parts.append(f"min_score={min_score:.2f}")
         if category:
             filter_parts.append(f"category={category!r}")
+        if created_within_days is not None:
+            filter_parts.append(f"created_within_days={created_within_days}")
         filter_suffix = (
             f" ({', '.join(filter_parts)})" if filter_parts else ""
         )
@@ -1008,9 +1104,11 @@ def register(api):
             f"Top {len(ranked)} matches for {query!r}{filter_suffix}:"
         ]
         for filename, (score, m) in ranked:
+            cat = file_to_cat.get(filename, "")
+            cat_str = f", category='{cat}'" if cat else ""
             lines.append(
                 f"  • memories/{filename}  "
-                f"(score={score:.3f}, via {m['kind']})"
+                f"(score={score:.3f}, via {m['kind']}{cat_str})"
             )
             snippet = _snippet_for(m, hook_lookup)
             for s_line in snippet.splitlines()[:3]:

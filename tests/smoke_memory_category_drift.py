@@ -119,7 +119,7 @@ def _check_create_memory_refuses_close_category() -> None:
         filename="python_style.md",
         description="py style",
     )
-    assert "saved" in out, out
+    assert "created" in out, out
 
     # Drift attempt: "Code Style" is close to "Style" → refused.
     out = create_memory(
@@ -142,7 +142,7 @@ def _check_create_memory_refuses_close_category() -> None:
         description="h",
         confirm_new_category=True,
     )
-    assert "saved" in out, out
+    assert "created" in out, out
 
     # Genuine new category (not close to any existing) → succeeds
     # without override.
@@ -153,7 +153,7 @@ def _check_create_memory_refuses_close_category() -> None:
         filename="service_boundaries.md",
         description="h",
     )
-    assert "saved" in out, out
+    assert "created" in out, out
 
     # Exact case-insensitive match → falls through to existing
     # case-insensitive collapse, no drift warning.
@@ -164,7 +164,7 @@ def _check_create_memory_refuses_close_category() -> None:
         filename="python_style_3.md",
         description="h",
     )
-    assert "saved" in out, out
+    assert "created" in out, out
     assert "close to existing" not in out, out
 
     print("✓ create_memory: refuses close-existing; confirm_new_category=True overrides")

@@ -21,6 +21,7 @@ Run with:
 
 from __future__ import annotations
 
+import datetime
 import os
 import queue
 import shutil
@@ -717,7 +718,7 @@ def test_memory_round_trip() -> None:
             content="# stack choices\nWe use Postgres.\n",
             filename="stack_choices.md",
         )
-        assert "saved" in result, result
+        assert "created" in result, result
         body = read_memory(file="stack_choices.md")
         assert "We use Postgres" in body, body
 
@@ -878,7 +879,7 @@ def test_create_memory() -> None:
             filename="pg_deadlock.md",
             description="FK + concurrent update → SHARE-lock deadlock",
         )
-        assert "saved pg_deadlock.md under 'Database'" == result, result
+        assert result == "created pg_deadlock.md: category='Database'", result
 
         memories_dir = cfg / "plugins" / "memory" / "memories"
         index_path = cfg / "plugins" / "memory" / "MEMORY.md"
@@ -1002,7 +1003,7 @@ def test_create_memory() -> None:
             filename="drift_x.md",
             confirm_new_category=True,
         )
-        assert "saved" in forced, forced
+        assert "created" in forced, forced
 
         print("✓ create_memory: body + index, frontmatter, validation, derive")
     finally:
@@ -1316,6 +1317,239 @@ def test_role_only_plugin_tool_gating() -> None:
         assert "dangerous" in loaded.role_only_tool_names()
         assert "safe" not in loaded.role_only_tool_names()
         print("✓ role_only plumbing: registered + tracked + discoverable")
+    finally:
+        restore()
+
+
+def test_update_memory_anchored_match() -> None:
+    """B1: update_memory matches the bullet by anchored shape, not
+    raw substring. A description on another bullet that references
+    the target memory by relative-link must not be clobbered."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        (cfg / "config.toml").write_text(
+            'built_in_plugins_enabled = ["memory"]\n'
+        )
+        loaded = plugins_mod.load(is_subagent=False)
+        _, create_memory = loaded.tools()["create_memory"]
+        _, update_memory = loaded.tools()["update_memory"]
+
+        create_memory(
+            category="Style",
+            title="UV choice",
+            content="# uv\n",
+            filename="uv.md",
+            description="Why we picked uv",
+        )
+        # A second memory whose description references uv.md by link.
+        # The substring `](uv.md)` will appear inside this bullet's
+        # description but the bullet itself is for related.md.
+        create_memory(
+            category="Style",
+            title="Related note",
+            content="# related\n",
+            filename="related.md",
+            description="see also [uv writeup](uv.md) for context",
+        )
+
+        # Update uv.md's description. The naive substring matcher
+        # would clobber related.md's bullet because its description
+        # contains `](uv.md)`. Anchored matcher only touches uv.md's
+        # actual bullet line.
+        update_memory(
+            filename="uv.md",
+            description="Why we picked uv over poetry — perf",
+        )
+        index = (cfg / "plugins" / "memory" / "MEMORY.md").read_text()
+        # New uv.md description in place.
+        assert "Why we picked uv over poetry — perf" in index, index
+        # related.md's bullet is unchanged (still has the link to uv.md).
+        related_lines = [
+            ln for ln in index.splitlines() if "related.md" in ln
+        ]
+        assert len(related_lines) == 1, related_lines
+        assert "[uv writeup](uv.md)" in related_lines[0], related_lines[0]
+        assert "for context" in related_lines[0], related_lines[0]
+
+        print("✓ update_memory: anchored bullet match preserves cross-references")
+    finally:
+        restore()
+
+
+def test_update_memory_per_key_frontmatter_merge() -> None:
+    """B3: caller content with frontmatter that lacks created_at
+    preserves the existing date by per-key merge."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        (cfg / "config.toml").write_text(
+            'built_in_plugins_enabled = ["memory"]\n'
+        )
+        loaded = plugins_mod.load(is_subagent=False)
+        _, create_memory = loaded.tools()["create_memory"]
+        _, update_memory = loaded.tools()["update_memory"]
+
+        create_memory(
+            category="Style",
+            title="Frontmatter test",
+            content="# original\n",
+            filename="fm_merge.md",
+        )
+        body_path = (
+            cfg / "plugins" / "memory" / "memories" / "fm_merge.md"
+        )
+        original = body_path.read_text()
+        original_created = original.split("\n", 2)[1]  # `created_at: ...`
+
+        # Caller content has frontmatter but no created_at — must
+        # preserve the existing one rather than dropping it.
+        update_memory(
+            filename="fm_merge.md",
+            content="---\nfoo: bar\n---\n# revised\n",
+        )
+        revised = body_path.read_text()
+        # Both original created_at and the new foo key are present.
+        assert original_created in revised, revised
+        assert "foo: bar" in revised, revised
+        assert "# revised" in revised, revised
+
+        print("✓ update_memory: per-key frontmatter merge preserves created_at")
+    finally:
+        restore()
+
+
+def test_update_memory_rejects_empty_content() -> None:
+    """N1: update_memory(content='') is rejected — degenerate state.
+    Use delete_memory to remove the body."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        (cfg / "config.toml").write_text(
+            'built_in_plugins_enabled = ["memory"]\n'
+        )
+        loaded = plugins_mod.load(is_subagent=False)
+        _, create_memory = loaded.tools()["create_memory"]
+        _, update_memory = loaded.tools()["update_memory"]
+
+        create_memory(
+            category="Style",
+            title="X",
+            content="# original\n",
+            filename="x.md",
+        )
+        # Empty content is rejected with a hint pointing at delete_memory.
+        out = update_memory(filename="x.md", content="")
+        assert out.startswith("<update_memory content is empty"), out
+        assert "delete_memory" in out, out
+        # Whitespace-only too.
+        out = update_memory(filename="x.md", content="   \n  ")
+        assert out.startswith("<update_memory content is empty"), out
+
+        print("✓ update_memory: empty content rejected with delete_memory hint")
+    finally:
+        restore()
+
+
+def test_recall_memory_surfaces_category() -> None:
+    """F2: recall_memory result lines include category from the
+    parsed index, so the agent can decide without an extra read."""
+    try:
+        import fastembed  # noqa: F401
+    except ImportError:
+        print("⊘ fastembed not installed; skipping recall category test")
+        return
+
+    cfg, restore = _isolated_config_dir()
+    try:
+        (cfg / "config.toml").write_text(
+            'built_in_plugins_enabled = ["memory"]\n'
+        )
+        mm_storage = cfg / "plugins" / "memory"
+        memories_dir = mm_storage / "memories"
+        memories_dir.mkdir(parents=True, exist_ok=True)
+        (mm_storage / "MEMORY.md").write_text(
+            "# Memory\n\n## Stack\n"
+            "- [Stack choices](stack.md) — what database we picked\n"
+        )
+        (memories_dir / "stack.md").write_text(
+            "# Stack\n\nWe use Postgres.\n"
+        )
+
+        loaded = plugins_mod.load(is_subagent=False)
+        _, recall = loaded.tools()["recall_memory"]
+        out = recall(query="postgres database choice", k=1)
+        # Category is surfaced in the hit line.
+        assert "category='Stack'" in out, out
+
+        print("✓ recall_memory: category surfaces in hit line")
+    finally:
+        restore()
+
+
+def test_recall_memory_temporal_filter() -> None:
+    """Temporal: created_within_days drops hits older than the window
+    and any without created_at frontmatter."""
+    try:
+        import fastembed  # noqa: F401
+    except ImportError:
+        print("⊘ fastembed not installed; skipping recall temporal test")
+        return
+
+    cfg, restore = _isolated_config_dir()
+    try:
+        (cfg / "config.toml").write_text(
+            'built_in_plugins_enabled = ["memory"]\n'
+        )
+        mm_storage = cfg / "plugins" / "memory"
+        memories_dir = mm_storage / "memories"
+        memories_dir.mkdir(parents=True, exist_ok=True)
+        (mm_storage / "MEMORY.md").write_text(
+            "# Memory\n\n## Stack\n"
+            "- [Recent](recent.md) — postgres just last week\n"
+            "- [Old](old.md) — postgres choice from way back\n"
+            "- [Undated](undated.md) — postgres legacy entry\n"
+        )
+        # Recent: today minus 5 days.
+        recent_iso = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(days=5)
+        ).isoformat(timespec="seconds")
+        # Old: today minus 200 days.
+        old_iso = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(days=200)
+        ).isoformat(timespec="seconds")
+        (memories_dir / "recent.md").write_text(
+            f"---\ncreated_at: {recent_iso}\n---\n# recent\n\nUse postgres.\n"
+        )
+        (memories_dir / "old.md").write_text(
+            f"---\ncreated_at: {old_iso}\n---\n# old\n\nUse postgres.\n"
+        )
+        # Undated: no frontmatter at all (legacy memory).
+        (memories_dir / "undated.md").write_text(
+            "# undated\n\nUse postgres.\n"
+        )
+
+        loaded = plugins_mod.load(is_subagent=False)
+        _, recall = loaded.tools()["recall_memory"]
+
+        # Without filter: all three appear.
+        out = recall(query="postgres", k=10)
+        assert "recent.md" in out, out
+        assert "old.md" in out, out
+        assert "undated.md" in out, out
+
+        # With 30-day window: only recent.md (old is past, undated drops).
+        out = recall(query="postgres", k=10, created_within_days=30)
+        assert "recent.md" in out, out
+        assert "old.md" not in out, out
+        assert "undated.md" not in out, out
+        # Filter shows up in the header.
+        assert "created_within_days=30" in out, out
+
+        # Invalid arg.
+        bad = recall(query="postgres", created_within_days=0)
+        assert "<created_within_days must be" in bad, bad
+
+        print("✓ recall_memory: created_within_days drops old + undated")
     finally:
         restore()
 
@@ -1722,6 +1956,11 @@ def main() -> None:
     test_recall_memory()
     test_create_memory()
     test_update_memory()
+    test_update_memory_anchored_match()
+    test_update_memory_per_key_frontmatter_merge()
+    test_update_memory_rejects_empty_content()
+    test_recall_memory_surfaces_category()
+    test_recall_memory_temporal_filter()
     test_delete_memory_role_only()
     test_delete_memory_orphan_tolerant()
     test_role_only_plugin_tool_gating()
