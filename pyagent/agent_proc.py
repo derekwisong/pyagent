@@ -820,6 +820,10 @@ def _bootstrap(
             )
         except OSError:
             pass
+        # Subagents skip SOUL — that's the root conversation's
+        # persona file. Subagents take voice from their role body
+        # (or model defaults). PRIMER + TOOLS still apply; behavior
+        # floor stays universal.
         system: SystemPromptBuilder = SystemPromptBuilder(
             soul=Path(config["soul_path"]),
             tools=Path(config["tools_path"]),
@@ -829,23 +833,27 @@ def _bootstrap(
             role_body=config.get("role_body", ""),
             task_body=config.get("task_body", ""),
             plugin_loader=loaded_plugins,
+            include_soul=False,
         )
     else:
         session = Session(
             session_id=config["session_id"],
             attachment_dir_cap_mb=cap_mb,
         )
+        # Top-level `--role <name>` invocations layer the role's
+        # persona body in place of SOUL — the role IS the persona
+        # for that session. Without --role the root agent loads
+        # SOUL (Ace's voice). PRIMER + TOOLS load either way.
+        role_body = config.get("role_body", "")
         system = SystemPromptBuilder(
             soul=Path(config["soul_path"]),
             tools=Path(config["tools_path"]),
             primer=Path(config["primer_path"]),
             skills_catalog=skills_mod.live_catalog,
             roles_catalog=catalog_for_roles,
-            # Top-level `--role <name>` invocations layer the role's
-            # persona body onto the universal SOUL/TOOLS/PRIMER, the
-            # same way subagents do. Empty when --role wasn't passed.
-            role_body=config.get("role_body", ""),
+            role_body=role_body,
             plugin_loader=loaded_plugins,
+            include_soul=not role_body,
         )
 
     # Now that the session exists, expose it to plugins so

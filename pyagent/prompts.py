@@ -63,6 +63,7 @@ class SystemPromptBuilder:
         role_body: str = "",
         task_body: str = "",
         plugin_loader: "LoadedPlugins | None" = None,
+        include_soul: bool = True,
     ) -> None:
         self.soul = Path(soul)
         self.tools = Path(tools)
@@ -72,6 +73,13 @@ class SystemPromptBuilder:
         self.role_body = role_body
         self.task_body = task_body
         self.plugin_loader = plugin_loader
+        # SOUL is the root-conversation persona — voice, "How you
+        # work", memory framing. Subagents take their voice from
+        # their role file (or model defaults), so they pass
+        # include_soul=False and skip SOUL entirely. The behavior
+        # floor (Core Directives, "You are Never") lives in PRIMER
+        # which everyone loads.
+        self.include_soul = include_soul
 
     def build(self, ctx: "PromptContext | None" = None) -> str:
         """Concatenated stable+volatile segments. Use only when cache
@@ -91,11 +99,11 @@ class SystemPromptBuilder:
         if ctx is None:
             ctx = _PromptContext()
 
-        sections: list[str] = [
-            self.soul.read_text(),
-            self.tools.read_text(),
-            self.primer.read_text(),
-        ]
+        sections: list[str] = []
+        if self.include_soul:
+            sections.append(self.soul.read_text())
+        sections.append(self.tools.read_text())
+        sections.append(self.primer.read_text())
         if self.role_body:
             sections.append(self.role_body)
 
@@ -174,12 +182,17 @@ class SystemPromptBuilder:
             f"- venv: {venv_line}\n"
             "\n"
             "## Where your persona lives\n"
-            "Your SOUL, TOOLS, and PRIMER are loaded from the paths "
-            "below. They define who you are. Don't edit them on your "
-            "own initiative — self-modification without an ask is "
-            "drift, not a feature. When the user asks (even casually), "
-            "go ahead.\n"
-            f"- SOUL:   {self.soul.resolve()}\n"
-            f"- TOOLS:  {self.tools.resolve()}\n"
+            f"{'SOUL, ' if self.include_soul else ''}"
+            "TOOLS, and PRIMER are loaded from the paths below. They "
+            "define who you are. Don't edit them on your own "
+            "initiative — self-modification without an ask is drift, "
+            "not a feature. When the user asks (even casually), go "
+            "ahead.\n"
+            + (
+                f"- SOUL:   {self.soul.resolve()}\n"
+                if self.include_soul
+                else ""
+            )
+            + f"- TOOLS:  {self.tools.resolve()}\n"
             f"- PRIMER: {self.primer.resolve()}"
         )
