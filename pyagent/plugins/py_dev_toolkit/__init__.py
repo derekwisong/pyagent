@@ -31,6 +31,10 @@ from pyagent.plugins.py_dev_toolkit import typecheck as _typecheck
 
 
 def register(api):
-    api.register_tool("lint", _lint.run)
-    api.register_tool("typecheck", _typecheck.run)
-    api.register_tool("run_pytest", _pytest_runner.run)
+    # Role-only: Python dev tools belong in PYTHON_ENGINEER's
+    # allowlist, not on the root agent (which rarely needs to lint
+    # or run pytest in routine work). Working agents that need
+    # Python verification spawn the python-engineer role.
+    api.register_tool("lint", _lint.run, role_only=True)
+    api.register_tool("typecheck", _typecheck.run, role_only=True)
+    api.register_tool("run_pytest", _pytest_runner.run, role_only=True)

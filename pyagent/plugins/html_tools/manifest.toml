@@ -1,16 +1,17 @@
 name = "html-tools"
-version = "0.1.0"
-description = "Interrogate saved HTML attachments — convert to markdown, select by CSS."
+version = "0.2.0"
+description = "Run CSS selectors against saved HTML attachments."
 api_version = "1"
 
-# These tools operate on saved attachments produced by fetch_url (or any
-# local HTML file the agent has access to). fetch_url itself also calls
-# into this plugin's extraction module as a convenience for its default
-# format="md" path; if the plugin is disabled, fetch_url falls back to
-# raw-attachment-only and the agent loses the markdown convenience but
-# can still grep / read_file the saved HTML.
+# html_select operates on saved attachments produced by fetch_url (or
+# any local HTML file the agent has access to). fetch_url itself also
+# calls into this plugin's extraction module as a convenience for its
+# default format="md" path; if the plugin is disabled, fetch_url falls
+# back to raw-attachment-only and the agent loses the markdown
+# convenience but can still grep / read_file the saved HTML.
+# html_select is role-only; allowlisted in the bundled researcher role.
 [provides]
-tools = ["html_to_md", "html_select"]
+tools = ["html_select"]
 
 # Stateless and read-only — safe to load in subagents.
 [load]

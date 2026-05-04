@@ -7,7 +7,6 @@ tools = [
   "hn_search",
   "fetch_url",
   "html_select",
-  "html_to_md",
   "read_file",
   "list_directory",
   "grep",

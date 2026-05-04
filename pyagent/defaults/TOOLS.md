@@ -82,7 +82,7 @@ thing started.
   candidate URLs to assess relevance later, `fetch_url(url,
   format="void")` skips the inline markdown so you don't pay for
   previews you won't read. The raw is still saved; come back with
-  `html_to_md` / `html_select` on the ones you want.
+  `read_file` / `grep` on the ones you want.
 - **`main_content=False`** when the page *is* a document and the
   boilerplate is part of it (Wikipedia, docs, reference pages). The
   default `True` is right for news / blogs / articles where chrome

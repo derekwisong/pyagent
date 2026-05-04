@@ -382,12 +382,8 @@ class Agent:
             "file"
         ),
         "fetch_url": (
-            "use `html_to_md` on the saved path or `read_file` with a "
-            "smaller range"
-        ),
-        "html_to_md": (
-            "use `html_to_md` on the saved path or `read_file` with a "
-            "smaller range"
+            "`read_file` the saved path with a smaller range, or "
+            "`html_select` (researcher role) for a CSS slice"
         ),
     }
 

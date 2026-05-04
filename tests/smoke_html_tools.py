@@ -5,7 +5,7 @@ Three concerns:
 
   1. **Plugin loads, registers expected tools.** With "html-tools" in
      built_in_plugins_enabled, `discover()` and `load()` produce the
-     two tools (`html_to_md`, `html_select`).
+     `html_select` (role-only; allowlisted in researcher).
 
   2. **Conversion behaves.** `html_to_markdown` produces clean markdown
      (headings, lists, links survive); `html_to_markdown(...,
@@ -125,7 +125,6 @@ def _check_plugin_loads_under_default_config() -> None:
             )
             loaded = plugins.load()
             tool_names = set(loaded.tools().keys())
-    assert "html_to_md" in tool_names, tool_names
     assert "html_select" in tool_names, tool_names
     print(f"✓ plugin loads by default; tools = {sorted(tool_names)}")
 
@@ -203,7 +202,7 @@ def _check_fetch_url_non_html() -> None:
 
 def _check_fetch_url_large_md_truncates() -> None:
     """When converted markdown exceeds the inline ceiling, the preview
-    is truncated and points at html_to_md on the saved path."""
+    is truncated and points at read_file on the saved path."""
     big_html = (
         "<html><body><main>"
         + "".join(f"<p>line {i} " + "x " * 200 + "</p>" for i in range(60))
@@ -215,7 +214,7 @@ def _check_fetch_url_large_md_truncates() -> None:
         result = tools.fetch_url("https://example.com/big")
     assert isinstance(result, Attachment), type(result)
     assert "markdown truncated" in result.preview, result.preview
-    assert "html_to_md" in result.preview, result.preview
+    assert "read_file" in result.preview, result.preview
     # Raw still saved untouched.
     assert result.content == big_html
     print(f"✓ fetch_url truncates oversized markdown with a recovery hint")

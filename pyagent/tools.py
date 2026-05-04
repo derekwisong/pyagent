@@ -1268,8 +1268,9 @@ _FETCH_UA = (
 )
 
 # Cap the inline markdown so a giant page can't blow the conversation.
-# Past this size we truncate the inline body and tell the agent to call
-# html_to_md(path, ...) on the saved raw attachment for the full output.
+# Past this size we truncate the inline body and tell the agent to
+# `read_file` the saved raw HTML attachment for the full content (or
+# `html_select` if a researcher role wants a specific CSS slice).
 _FETCH_INLINE_MD_CEILING = 8000
 
 # Soft import: when the html-tools plugin is enabled (the default),
@@ -1320,8 +1321,8 @@ def fetch_url(
 
     The raw response body is *always* saved to a session attachment.
     The returned tool result names that path so you can follow up with
-    `html_to_md`, `html_select`, `grep`, or `read_file` against the
-    saved file — no need to re-fetch.
+    `grep`, `read_file`, or `html_select` (researcher role) against
+    the saved file — no need to re-fetch.
 
     GET-only. Non-2xx responses still save and report normally; the
     HTTP status appears in the result. For POST, custom headers, auth,
@@ -1369,9 +1370,9 @@ def fetch_url(
 
     if format == "void":
         header_lines.append(
-            "No content returned (format=\"void\"). Use `html_to_md`, "
-            "`html_select`, `grep`, or `read_file` on the saved path "
-            "to interrogate."
+            "No content returned (format=\"void\"). Use `grep`, "
+            "`read_file`, or `html_select` (researcher role) on the "
+            "saved path to interrogate."
         )
         preview = "\n".join(header_lines)
         return Attachment(content=body, preview=preview, suffix=suffix)
@@ -1397,8 +1398,7 @@ def fetch_url(
     except Exception as e:
         header_lines.append(
             f"Markdown conversion failed ({type(e).__name__}: {e}). "
-            f"Use `html_to_md` directly on the saved path or fall back "
-            f"to `read_file` / `grep`."
+            f"Fall back to `read_file` / `grep` on the saved path."
         )
         preview = "\n".join(header_lines)
         return Attachment(content=body, preview=preview, suffix=suffix)
@@ -1408,9 +1408,8 @@ def fetch_url(
     if truncated:
         md_inline = (
             md[:_FETCH_INLINE_MD_CEILING]
-            + "\n\n[markdown truncated; call "
-            "`html_to_md(<saved path>, main_content="
-            f"{main_content})` for the full output.]"
+            + "\n\n[markdown truncated; `read_file` the saved path "
+            "for the full raw HTML.]"
         )
     else:
         md_inline = md

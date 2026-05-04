@@ -141,4 +141,9 @@ def register(api):
         )
 
     api.register_tool("map_code", map_code)
-    api.register_tool("probe_grammar", probe_grammar)
+    # probe_grammar is plugin-development infrastructure: dump the
+    # tree-sitter parse tree to debug a query. Working agents rarely
+    # need it, so keep it out of the root schema. Allowlisted in
+    # PYTHON_ENGINEER and SOFTWARE_ENGINEER roles for plugin authors
+    # iterating on tree-sitter queries.
+    api.register_tool("probe_grammar", probe_grammar, role_only=True)

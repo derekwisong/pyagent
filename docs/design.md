@@ -38,7 +38,7 @@ Built-in tools shipped with pyagent:
 | `fetch_url` | HTTP GET. Always saves the raw body to a session attachment; by default also returns markdown of the article body inline. |
 | `list_plugins` | List the plugins currently loaded. Self-improvement helper. |
 
-HTML tools (`html_to_md` / `html_select`) come from the bundled
+HTML tooling (`html_select`) comes from the bundled
 `html-tools` plugin and operate on saved attachments (or any local
 HTML file). Memory tools (`add_memory`, `read_memory`, `write_memory`,
 `write_user`, `set_memory_description`, `recall_memory`) come from the

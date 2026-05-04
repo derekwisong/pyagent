@@ -1,6 +1,24 @@
 +++
 meta_tools = false
 description = "Implements features, fixes bugs, and runs tests. Full file/edit/execute toolset; default model."
+tools = [
+  "read_file",
+  "write_file",
+  "edit_file",
+  "list_directory",
+  "grep",
+  "glob",
+  "execute",
+  "run_background",
+  "read_output",
+  "wait_for",
+  "kill_process",
+  "fetch_url",
+  "read_skill",
+  "list_plugins",
+  "map_code",
+  "probe_grammar",
+]
 +++
 
 # Role: Software Engineer

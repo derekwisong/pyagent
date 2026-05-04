@@ -121,13 +121,12 @@ def _check_offload_read_file_whole_file_consumed() -> None:
 
 
 def _check_offload_tool_specific_hints() -> None:
-    """`execute` / `fetch_url` / `html_to_md` get their own hint lines.
-    `read_file` is exempt (it gets the range-aware variant)."""
+    """`execute` / `fetch_url` get their own hint lines. `read_file`
+    is exempt (it gets the range-aware variant)."""
     fake_path = Path("/tmp/x.txt")
     for tool, needle in [
         ("execute", "stdout was huge"),
-        ("fetch_url", "html_to_md"),
-        ("html_to_md", "html_to_md"),
+        ("fetch_url", "read_file"),
     ]:
         stub = Agent._format_offload_ref(
             fake_path, 9000, "preview", cap_chars=8000, tool_name=tool
@@ -143,7 +142,7 @@ def _check_offload_tool_specific_hints() -> None:
     lines = stub.splitlines()
     # First line is header, then "--- preview ---", then preview body.
     assert lines[1] == "--- preview ---", lines
-    print("✓ tool-specific hints render for execute/fetch_url/html_to_md")
+    print("✓ tool-specific hints render for execute/fetch_url")
 
 
 def _write_synthetic_session(tmp: Path) -> Path:

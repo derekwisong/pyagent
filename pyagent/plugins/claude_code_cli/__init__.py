@@ -364,4 +364,10 @@ def register(api):
         # we just logged.
         return f"session: {label}\n\n{stdout or ''}"
 
-    api.register_tool("claude_code_cli", claude_code_cli)
+    # Role-only: delegating to a separate Claude instance is a
+    # deliberate move, not a routine option for the working agent.
+    # Allowlisted in the bundled CLAUDE_CODE role; working agents
+    # spawn that role when they want to delegate.
+    api.register_tool(
+        "claude_code_cli", claude_code_cli, role_only=True
+    )
