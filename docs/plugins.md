@@ -36,7 +36,7 @@ warnings when a higher-tier plugin shadows a lower-tier one.
 | `hn-search` | `hn_search` — Algolia-backed Hacker News search. Side-saves structured JSON. | yes |
 | `doc-tools` | `extract_doc` / `summarize_doc` — sub-LLM document tools. | no (opt-in; pick a model first) |
 | `claude-code-cli` | `claude_code_cli` — pipe a prompt into Anthropic's `claude -p`. Self-disables when `claude` isn't on PATH. | yes |
-| `ollama` | Registers `ollama` as an LLM provider; `list_ollama_models` tool. | yes |
+| `ollama` | Registers `ollama` as an LLM provider. `pyagent --list-models` enumerates pulled models. | yes |
 | `py-dev-toolkit` | `lint` / `typecheck` / `run_pytest` for Python projects. | yes |
 | `echo-plugin` | Test/demo provider that echoes the most recent user message. Exercises the plugin → llm-router wiring without spending tokens. | yes |
 

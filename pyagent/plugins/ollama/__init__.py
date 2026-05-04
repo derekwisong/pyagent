@@ -1,9 +1,9 @@
 """ollama — bundled plugin: routes through a local Ollama server.
 
 Registers the ``ollama`` LLM provider so ``--model ollama/<name>``
-goes through the local server's native ``/api/chat`` endpoint, plus
-a ``list_ollama_models`` tool the agent can call to enumerate what
-has been pulled locally.
+goes through the local server's native ``/api/chat`` endpoint.
+``pyagent --list-models`` from the CLI enumerates what's pulled
+locally; no agent-facing tool is exposed.
 
 Configuration (all optional, all read at register time so plugin load
 never touches the network):
@@ -16,8 +16,8 @@ never touches the network):
     clear error at call time — startup never fails just because no
     model was chosen.
 
-Network calls are deferred to ``respond()`` and ``list_ollama_models``
-so a missing or stopped server doesn't block pyagent startup or
+Network calls are deferred to ``respond()`` and ``--list-models`` so
+a missing or stopped server doesn't block pyagent startup or
 prevent loading other providers.
 """
 
@@ -46,19 +46,10 @@ def _factory(**kw: Any):
         raise ValueError(
             "ollama provider requires an explicit model. Pass "
             "--model ollama/<name>, or set OLLAMA_MODEL in your "
-            "environment. Use `ollama list` (or call the "
-            "list_ollama_models tool) to see what's installed."
+            "environment. Run `ollama list` or "
+            "`pyagent --list-models` to see what's installed."
         )
     return OllamaClient(model=model)
-
-
-def _format_size(size: Any) -> str:
-    if not isinstance(size, (int, float)) or size <= 0:
-        return ""
-    gb = size / (1024**3)
-    if gb >= 1:
-        return f"{gb:.1f} GB"
-    return f"{size / (1024**2):.0f} MB"
 
 
 def _list_models():
@@ -122,32 +113,3 @@ def register(api):
         list_models=_list_models,
     )
 
-    def list_ollama_models() -> str:
-        """List models pulled into the local Ollama server.
-
-        Use this when the user asks "what ollama models do I have?"
-        or before suggesting ``--model ollama/<name>`` so the choice
-        is one that's actually installed.
-
-        Returns:
-            Markdown bullet list — one line per model, formatted as
-            ``- name (size)``. ``<no models installed>`` if the
-            server is reachable but empty. ``<ollama error: ...>``
-            on connection failure or non-200 response.
-        """
-        from pyagent.plugins.ollama.client import list_models
-
-        try:
-            models = list_models()
-        except Exception as e:
-            return f"<ollama error: {e}>"
-        if not models:
-            return "<no models installed>"
-        lines: list[str] = []
-        for m in models:
-            name = m.get("name") or "(unnamed)"
-            size_str = _format_size(m.get("size"))
-            lines.append(f"- {name} ({size_str})" if size_str else f"- {name}")
-        return "\n".join(lines)
-
-    api.register_tool("list_ollama_models", list_ollama_models)

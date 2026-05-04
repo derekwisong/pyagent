@@ -36,7 +36,6 @@ Built-in tools shipped with pyagent:
 | `execute` | Run a shell command (60s timeout). A small regex blocklist refuses obviously dangerous patterns. |
 | `run_background` / `read_output` / `wait_for` / `kill_process` | Long-running shell quartet. |
 | `fetch_url` | HTTP GET. Always saves the raw body to a session attachment; by default also returns markdown of the article body inline. |
-| `list_plugins` | List the plugins currently loaded. Self-improvement helper. |
 
 HTML tooling (`html_select`) comes from the bundled
 `html-tools` plugin and operate on saved attachments (or any local

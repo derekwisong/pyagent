@@ -4,12 +4,11 @@ Concerns:
 
   1. **Default config carries it.** The plugin loads under default
      ``built_in_plugins_enabled`` and registers the ``ollama``
-     provider plus the ``list_ollama_models`` tool — no env, no
-     network.
+     provider — no env, no network, no agent-facing tool.
   2. **Lazy network.** Plugin load and ``OllamaClient.__init__`` are
-     network-free; only ``respond()`` and ``list_ollama_models`` ever
-     hit the wire. Verified by leaving ``requests`` un-mocked during
-     load and only patching for the call paths.
+     network-free; only ``respond()`` and the ``--list-models``
+     CLI hook ever hit the wire. Verified by leaving ``requests``
+     un-mocked during load and only patching for the call paths.
   3. **Provider routing wires up.** ``get_client("ollama/<name>")``
      returns an ``OllamaClient`` whose ``provider_model`` is
      ``ollama/<name>``. ``get_client("ollama")`` (no model) raises a
@@ -26,13 +25,10 @@ Concerns:
   6. **OLLAMA_HOST normalisation.** Bare ``host:port`` upgrades to
      ``http://host:port`` and a trailing slash is stripped — matches
      what the Ollama CLI accepts.
-  7. **list_ollama_models formatting.** Tags response renders as
-     markdown bullets with size; an unreachable server yields the
-     ``<ollama error: ...>`` marker rather than raising.
-  8. **HTTP error body propagates.** A 4xx from ``/api/chat`` carries
+  7. **HTTP error body propagates.** A 4xx from ``/api/chat`` carries
      Ollama's JSON ``error`` body into the raised ``HTTPError`` so
      callers see the actual cause, not just a bare status code.
-  9. **No-tools auto-retry.** When a model 400s with ``does not
+  8. **No-tools auto-retry.** When a model 400s with ``does not
      support tools``, the client transparently retries without tools,
      latches ``_skip_tools`` so subsequent turns skip the failed
      round trip, and propagates non-tools 4xx errors unchanged.
@@ -112,8 +108,8 @@ def _check_plugin_loads_and_registers() -> None:
         "ollama" in llms._PLUGIN_PROVIDERS,
     )
     _check(
-        "list_ollama_models tool registered",
-        "list_ollama_models" in loaded.tools(),
+        "ollama plugin registers no agent-facing tools",
+        "list_ollama_models" not in loaded.tools(),
         repr(list(loaded.tools())),
     )
 
@@ -148,8 +144,8 @@ def _check_get_client_without_model_raises() -> None:
                 msg,
             )
             _check(
-                "missing-model error mentions list_ollama_models",
-                "list_ollama_models" in msg,
+                "missing-model error mentions --list-models",
+                "--list-models" in msg,
                 msg,
             )
         _check("get_client('ollama') raised when no default", raised)
@@ -545,95 +541,6 @@ def _check_dialect_resolves_from_show_payload() -> None:
         "show failure falls back to default dialect",
         d.name == "qwen",
         d.name,
-    )
-
-
-def _check_list_ollama_models_formatting() -> None:
-    payload = {
-        "models": [
-            {"name": "llama3.2:latest", "size": 2 * 1024**3},
-            {"name": "qwen2.5:1.5b", "size": 950 * 1024**2},
-            {"name": "tiny", "size": 0},
-        ]
-    }
-    from pyagent.plugins.ollama import register as register_plugin
-
-    captured: dict = {}
-
-    class _FakeAPI:
-        def register_provider(self, *a, **kw):
-            pass
-
-        def register_tool(self, name, fn):
-            captured[name] = fn
-
-    register_plugin(_FakeAPI())
-    list_tool = captured["list_ollama_models"]
-
-    with mock.patch.object(
-        ollama_client_mod.requests,
-        "get",
-        return_value=_FakeResponse(payload),
-    ):
-        out = list_tool()
-    _check("output is markdown bullets", out.startswith("- "), repr(out))
-    _check("size in GB rendered", "2.0 GB" in out, out)
-    _check("size in MB rendered", "950 MB" in out, out)
-    _check("zero-size omits parenthetical", out.rstrip().endswith("- tiny"), out)
-
-
-def _check_list_ollama_models_error_path() -> None:
-    from pyagent.plugins.ollama import register as register_plugin
-
-    captured: dict = {}
-
-    class _FakeAPI:
-        def register_provider(self, *a, **kw):
-            pass
-
-        def register_tool(self, name, fn):
-            captured[name] = fn
-
-    register_plugin(_FakeAPI())
-    list_tool = captured["list_ollama_models"]
-
-    def boom(*a, **kw):
-        raise ConnectionError("connection refused")
-
-    with mock.patch.object(ollama_client_mod.requests, "get", side_effect=boom):
-        out = list_tool()
-    _check(
-        "unreachable server → <ollama error: ...> marker",
-        out.startswith("<ollama error:") and "connection refused" in out,
-        out,
-    )
-
-
-def _check_list_ollama_models_empty() -> None:
-    from pyagent.plugins.ollama import register as register_plugin
-
-    captured: dict = {}
-
-    class _FakeAPI:
-        def register_provider(self, *a, **kw):
-            pass
-
-        def register_tool(self, name, fn):
-            captured[name] = fn
-
-    register_plugin(_FakeAPI())
-    list_tool = captured["list_ollama_models"]
-
-    with mock.patch.object(
-        ollama_client_mod.requests,
-        "get",
-        return_value=_FakeResponse({"models": []}),
-    ):
-        out = list_tool()
-    _check(
-        "empty server → <no models installed> marker",
-        out.strip() == "<no models installed>",
-        out,
     )
 
 
@@ -1111,9 +1018,6 @@ def main() -> None:
     _check_tool_call_only_turn_keeps_structured_field()
     _check_dialect_detection()
     _check_dialect_resolves_from_show_payload()
-    _check_list_ollama_models_formatting()
-    _check_list_ollama_models_error_path()
-    _check_list_ollama_models_empty()
     _check_http_error_surfaces_ollama_body()
     _check_no_tools_auto_retry()
     _check_provider_list_models_hook()

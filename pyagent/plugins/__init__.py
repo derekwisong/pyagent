@@ -1683,42 +1683,6 @@ def make_prompt_context(conversation: list[Any]) -> PromptContext:
     )
 
 
-def make_list_plugins_tool(loaded: "LoadedPlugins") -> Callable[[], str]:
-    """Return a tool the agent can call to introspect what plugins
-    are currently loaded.
-
-    Useful for the agent's self-improvement loop: after authoring a
-    plugin and asking the user to restart, the agent calls this tool
-    to confirm the plugin loaded and registered the expected surface.
-    """
-
-    def list_plugins() -> str:
-        """List the plugins currently loaded into the agent.
-
-        Returns:
-            Markdown summary, one block per plugin: name, version,
-            declared tools, declared prompt sections. Empty marker if
-            no plugins are loaded.
-        """
-        if not loaded.states:
-            return "(no plugins loaded)"
-        lines: list[str] = []
-        for state in loaded.states:
-            m = state.manifest
-            tool_list = ", ".join(m.provides_tools) or "(none)"
-            section_list = (
-                ", ".join(m.provides_prompt_sections) or "(none)"
-            )
-            lines.append(
-                f"- **{m.name}** v{m.version}: {m.description}\n"
-                f"  - tools: {tool_list}\n"
-                f"  - prompt_sections: {section_list}"
-            )
-        return "\n".join(lines)
-
-    return list_plugins
-
-
 def format_missing_tool_error(
     name: str,
     available: list[str],

@@ -15,7 +15,6 @@ tools = [
   "kill_process",
   "fetch_url",
   "read_skill",
-  "list_plugins",
   "map_code",
   "probe_grammar",
   "lint",

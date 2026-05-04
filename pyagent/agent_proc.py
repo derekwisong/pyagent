@@ -910,12 +910,6 @@ def _bootstrap(
         checklist=checklist,
     )
 
-    # Plugin introspection tool, available to the agent for self-
-    # improvement workflows.
-    agent.add_tool(
-        "list_plugins", plugins_mod.make_list_plugins_tool(loaded_plugins)
-    )
-
     # Register plugin tools. Built-ins win on conflict — a plugin that
     # tries to claim a built-in tool name is logged and skipped.
     # Tools registered with role_only=True are gated: root agents

@@ -218,15 +218,18 @@ no-preemption reality.
 
 ## Activation lifecycle
 
-1. Pyagent loads plugins **once at agent process startup**. There is
-   no hot reload in v1 — adding, modifying, or removing a plugin
-   requires a `pyagent` restart.
-2. After authoring or editing, run `pyagent-plugins list` to confirm
-   the plugin was discovered and what tier it's in. The next time
-   pyagent starts, it'll be loaded.
-3. Inside the agent, call the `list_plugins` tool to see what's
-   loaded with their tools and prompt sections — useful for
-   confirming a self-authored plugin landed correctly.
+1. New plugins are picked up automatically by pyagent's run-loop
+   rescan: when a plugin directory appears on disk mid-session, the
+   loader registers its tools at the top of the next turn and the
+   agent receives a `[plugin plugin-loader notes]: loaded <name>
+   v<ver>; tools=[…]` system message confirming what landed. No
+   restart needed for new plugins.
+2. *Editing* an already-loaded plugin still requires a restart —
+   the synthetic module name is cached in `sys.modules`. Hot-reload
+   for in-place edits is intentionally out of scope (creation is
+   the rare event reload was built for).
+3. After authoring, run `pyagent-plugins list` to confirm the
+   plugin was discovered and what tier it's in.
 
 ## What plugins MUST NOT do
 
@@ -260,13 +263,11 @@ When the user asks for a new plugin:
    `api.register_tool(...)`, `api.register_prompt_section(...)`,
    `api.on_session_start(...)`, etc. Match what `[provides]` declared
    exactly — pyagent fails plugins loud on mismatch.
-6. **Tell the user a restart is needed**: "Plugin authored at
-   `<path>`. Run `pyagent-plugins list` to see it, then restart
-   pyagent — once it's running, ask me to call `list_plugins` to
-   confirm it loaded."
-7. **After the user restarts**, call `list_plugins` from inside the
-   session to verify the plugin's tools and sections are registered
-   under the expected name.
+6. **The plugin auto-loads on the next turn.** The loader's
+   run-loop rescan picks up new plugin directories and you'll get a
+   `[plugin plugin-loader notes]: loaded <name> ...` message
+   confirming the tools landed. No restart, no `list_plugins`
+   call — the system message is the confirmation.
 
 If the user wants to ship it as a bundled plugin: copy the directory
 under `pyagent/plugins/` in the source tree and add the name to
