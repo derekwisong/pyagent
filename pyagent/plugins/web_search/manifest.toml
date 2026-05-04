@@ -1,14 +1,14 @@
 name = "web-search"
-version = "0.1.0"
-description = "DuckDuckGo-backed web search — list results and instant answers."
+version = "0.2.0"
+description = "DuckDuckGo-backed web search — list results plus saved JSON attachment."
 api_version = "1"
 
-# Two tools:
-#   web_search          — list-style search; returns markdown results
-#                         (auto-offloaded by the agent when large).
-#   web_search_instant  — DDG instant-answer API; short string reply.
+# Single tool:
+#   web_search — list-style search; returns markdown results plus a
+#                JSON attachment with the structured form. Role-only;
+#                advertised to the bundled researcher role.
 [provides]
-tools = ["web_search", "web_search_instant"]
+tools = ["web_search"]
 
 # Stateless and read-only — safe to load in subagents.
 [load]

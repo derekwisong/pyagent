@@ -3,28 +3,24 @@
 Concerns covered:
 
   1. **Plugin loads under the default config.** With "web-search" in
-     `built_in_plugins_enabled`, `discover()` and `load()` produce
-     both tools (`web_search`, `web_search_instant`).
+     `built_in_plugins_enabled`, `discover()` and `load()` register
+     `web_search`.
   2. **Search formatter renders structured results as markdown.**
      `format_search_results` over a fixture list yields the
      numbered-list shape the agent sees, with title/url/snippet
      ordering preserved.
-  3. **Instant-answer formatter picks the right field.** Answer
-     beats abstract beats definition; missing data yields the
-     `<no instant answer ...>` marker; `related=True` appends
-     related-topic links.
-  4. **Tool wrappers translate exceptions and return string shape.**
-     Both tools must return `str` on success and on every error path,
-     never raise into the agent loop.
-  5. **Retry / backoff classifies failures.** Transient
+  3. **Tool wrapper translates exceptions and returns string shape.**
+     `web_search` must return either an Attachment (success) or a
+     string marker (error); never raise into the agent loop.
+  4. **Retry / backoff classifies failures.** Transient
      `DDGSException` / `TimeoutException` get retried with the
      configured backoff (default ``[1.0, 3.0]``); `RatelimitException`
      short-circuits with no retry; non-network exceptions skip the
      retry loop entirely and hit the existing catch-all marker.
-  6. **Distinct error markers** — `<search error: rate limited; ...>`
+  5. **Distinct error markers** — `<search error: rate limited; ...>`
      vs. `<search error: backend unavailable after N attempts; ...>`
      vs. the generic `<search error: ...>` so the agent can branch.
-  7. **Configuration flows through.** ``retry_attempts``,
+  6. **Configuration flows through.** ``retry_attempts``,
      ``retry_backoff_s``, and ``backend`` reach the DDGS call site;
      bogus values produce register-time warnings but tools still
      register and fall back to defaults.
@@ -64,7 +60,7 @@ def _make_fake_api(plugin_config: dict | None = None) -> dict:
         def plugin_config(self):
             return captured["plugin_config"]
 
-        def register_tool(self, name, fn):
+        def register_tool(self, name, fn, *, role_only=False):
             captured["tools"][name] = fn
 
         def log(self, level, message):
@@ -91,38 +87,6 @@ _FIXTURE_RESULTS_RAW = [
         "body": "",
     },
 ]
-
-# A representative DDG instant-answer payload — narrow but enough to
-# exercise the parser and formatter. Real responses are larger.
-_FIXTURE_INSTANT_PAYLOAD = {
-    "Heading": "Python (programming language)",
-    "AbstractText": (
-        "Python is a high-level, general-purpose programming language."
-    ),
-    "AbstractSource": "Wikipedia",
-    "AbstractURL": "https://en.wikipedia.org/wiki/Python_(programming_language)",
-    "Answer": "",
-    "AnswerType": "",
-    "Definition": "",
-    "DefinitionSource": "",
-    "DefinitionURL": "",
-    "RelatedTopics": [
-        {
-            "Text": "CPython - the reference implementation",
-            "FirstURL": "https://duckduckgo.com/CPython",
-        },
-        {
-            "Name": "By type",
-            "Topics": [
-                {
-                    "Text": "Pythonista (mobile IDE)",
-                    "FirstURL": "https://duckduckgo.com/Pythonista",
-                }
-            ],
-        },
-    ],
-}
-
 
 def _check_search_formatter() -> None:
     """`format_search_results` produces the numbered-list shape."""
@@ -152,60 +116,9 @@ def _check_search_formatter_empty() -> None:
     print("✓ format_search_results: empty list → <no results ...> marker")
 
 
-def _check_instant_parser_picks_abstract() -> None:
-    ans = web_search_mod._parse_instant_payload(_FIXTURE_INSTANT_PAYLOAD)
-    assert ans.heading == "Python (programming language)", ans
-    assert "high-level" in ans.abstract, ans
-    assert ans.abstract_source == "Wikipedia", ans
-    # Related topics flattened across plain entries and grouped Topics.
-    related_texts = [t for t, _ in ans.related]
-    assert any("CPython" in t for t in related_texts), related_texts
-    assert any("Pythonista" in t for t in related_texts), related_texts
-    print("✓ _parse_instant_payload extracts abstract + flattens related")
-
-
-def _check_instant_formatter_default() -> None:
-    ans = web_search_mod._parse_instant_payload(_FIXTURE_INSTANT_PAYLOAD)
-    out = web_search_mod.format_instant_answer(ans, "python", related=False)
-    assert "Python (programming language)" in out, out
-    assert "high-level" in out, out
-    assert "Wikipedia" in out, out
-    # related=False: no related-topic block.
-    assert "Related:" not in out, out
-    print("✓ format_instant_answer(default) emits abstract + source")
-
-
-def _check_instant_formatter_with_related() -> None:
-    ans = web_search_mod._parse_instant_payload(_FIXTURE_INSTANT_PAYLOAD)
-    out = web_search_mod.format_instant_answer(ans, "python", related=True)
-    assert "Related:" in out, out
-    assert "CPython" in out, out
-    assert "Pythonista" in out, out
-    print("✓ format_instant_answer(related=True) appends related links")
-
-
-def _check_instant_formatter_answer_beats_abstract() -> None:
-    ans = web_search_mod.InstantAnswer(
-        answer="42",
-        abstract="The Hitchhiker's Guide to the Galaxy",
-        abstract_source="Wikipedia",
-    )
-    out = web_search_mod.format_instant_answer(ans, "meaning of life")
-    assert out.strip() == "42", out
-    print("✓ format_instant_answer prefers Answer over Abstract")
-
-
-def _check_instant_formatter_no_data() -> None:
-    ans = web_search_mod.InstantAnswer()
-    out = web_search_mod.format_instant_answer(ans, "obscure query")
-    assert out.startswith("<no instant answer"), out
-    assert "obscure query" in out, out
-    print("✓ format_instant_answer: empty → <no instant answer ...> marker")
-
-
 def _check_plugin_loads_under_default_config() -> None:
     """With the default config, web-search is in
-    built_in_plugins_enabled and load() exposes both tools."""
+    built_in_plugins_enabled and load() exposes web_search."""
     tmp = Path(tempfile.mkdtemp(prefix="pyagent-smoke-websearch-"))
     with mock.patch.object(paths_mod, "config_dir", return_value=tmp):
         with mock.patch.object(
@@ -218,8 +131,7 @@ def _check_plugin_loads_under_default_config() -> None:
             loaded = plugins.load()
             tool_names = set(loaded.tools().keys())
     assert "web_search" in tool_names, tool_names
-    assert "web_search_instant" in tool_names, tool_names
-    print(f"✓ plugin loads by default; web-search tools present")
+    print("✓ plugin loads by default; web_search tool present")
 
 
 def _check_tool_wrapper_returns_attachment() -> None:
@@ -230,7 +142,7 @@ def _check_tool_wrapper_returns_attachment() -> None:
     from pyagent.session import Attachment as _Attachment
 
     cap = _make_fake_api()
-    assert set(cap["tools"].keys()) == {"web_search", "web_search_instant"}, cap["tools"]
+    assert set(cap["tools"].keys()) == {"web_search"}, cap["tools"]
     web_search = cap["tools"]["web_search"]
 
     fixture = [
@@ -377,7 +289,6 @@ def _check_tool_wrapper_translates_errors() -> None:
     """Network/parser failure → `<search error: ...>`, not a raise."""
     cap = _make_fake_api()
     web_search = cap["tools"]["web_search"]
-    web_search_instant = cap["tools"]["web_search_instant"]
 
     def _boom(*a, **kw):
         raise RuntimeError("network down")
@@ -387,25 +298,16 @@ def _check_tool_wrapper_translates_errors() -> None:
     assert isinstance(out, str), type(out)
     assert out.startswith("<search error:"), out
     assert "network down" in out, out
-
-    with mock.patch.object(
-        web_search_mod, "ddg_instant_answer", side_effect=_boom
-    ):
-        out = web_search_instant("anything")
-    assert isinstance(out, str), type(out)
-    assert out.startswith("<instant-answer error:"), out
-    print("✓ tool wrappers translate exceptions to <... error: ...>")
+    print("✓ tool wrappers translate exceptions to <search error: ...>")
 
 
 def _check_tool_wrapper_validates_inputs() -> None:
     """Empty query, bad `n` → tool-result error string, not a raise."""
     cap = _make_fake_api()
     web_search = cap["tools"]["web_search"]
-    web_search_instant = cap["tools"]["web_search_instant"]
 
     assert web_search("") == "<query is empty>"
     assert web_search("   ") == "<query is empty>"
-    assert web_search_instant("") == "<query is empty>"
     bad_n = web_search("hi", n="not-a-number")
     assert bad_n.startswith("<error: n must be an integer"), bad_n
     bad_n2 = web_search("hi", n=0)
@@ -654,47 +556,9 @@ def _check_register_silent_on_clean_config() -> None:
     print("✓ register-time silent on clean and empty config")
 
 
-def _check_instant_answer_uses_fixture_http() -> None:
-    """`ddg_instant_answer` parses a fixture HTTP body without touching
-    the network. Mocks at urllib.request.urlopen."""
-    body = json.dumps(_FIXTURE_INSTANT_PAYLOAD).encode("utf-8")
-
-    class _FakeResp:
-        def __init__(self, payload: bytes) -> None:
-            self._payload = payload
-            self.headers = self  # has get_content_charset()
-
-        def get_content_charset(self, default="utf-8"):
-            return "utf-8"
-
-        def read(self):
-            return self._payload
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-    with mock.patch.object(
-        web_search_mod.urllib.request,
-        "urlopen",
-        return_value=_FakeResp(body),
-    ):
-        ans = web_search_mod.ddg_instant_answer("python")
-    assert ans.heading == "Python (programming language)", ans
-    assert "high-level" in ans.abstract, ans
-    print("✓ ddg_instant_answer parses fixture HTTP body")
-
-
 def main() -> None:
     _check_search_formatter()
     _check_search_formatter_empty()
-    _check_instant_parser_picks_abstract()
-    _check_instant_formatter_default()
-    _check_instant_formatter_with_related()
-    _check_instant_formatter_answer_beats_abstract()
-    _check_instant_formatter_no_data()
     _check_plugin_loads_under_default_config()
     _check_tool_wrapper_returns_attachment()
     _check_save_structured_disabled_returns_string()
@@ -712,7 +576,6 @@ def main() -> None:
     _check_non_network_exception_not_retried()
     _check_register_warnings_on_bogus_config()
     _check_register_silent_on_clean_config()
-    _check_instant_answer_uses_fixture_http()
     print("smoke_web_search: all checks passed")
 
 

@@ -31,7 +31,7 @@ warnings when a higher-tier plugin shadows a lower-tier one.
 | `memory` | Markdown ledger storage + semantic recall — `add_memory`, `read_memory`, `write_memory`, `write_user`, `set_memory_description`, `recall_memory`, plus USER/MEMORY prompt sections. Root-only (does not load in subagents). | yes |
 | `html-tools` | `html_to_md` / `html_select` — convert or query saved HTML attachments (or any local HTML file). | yes |
 | `code-mapper` | `map_code` / `probe_grammar` — tree-sitter symbol map for source files (Python in v1; multi-language ready). | yes |
-| `web-search` | `web_search` / `web_search_instant` — DuckDuckGo-backed list search and instant answers. Side-saves structured JSON. | yes |
+| `web-search` | `web_search` — DuckDuckGo-backed list search; side-saves structured JSON. Role-only (allowlisted in the bundled `researcher` role). | yes |
 | `reddit-search` | `reddit_search` — public reddit.com/search.json. Side-saves structured JSON. | yes |
 | `hn-search` | `hn_search` — Algolia-backed Hacker News search. Side-saves structured JSON. | yes |
 | `doc-tools` | `extract_doc` / `summarize_doc` — sub-LLM document tools. | no (opt-in; pick a model first) |

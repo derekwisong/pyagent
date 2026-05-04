@@ -1,13 +1,10 @@
 """web-search — bundled plugin for DuckDuckGo-backed web search.
 
-Two tools:
+One tool:
 
   - `web_search(query, n=10)` — list-style search. Returns a markdown
-    numbered list of results. Returned as a plain string; the agent's
-    standard auto-offload threshold (8K chars) takes over for runaway
-    `n` values, so a 50-result call won't bloat the conversation log.
-  - `web_search_instant(query, related=False)` — DDG instant-answer
-    API. Short string reply by definition.
+    numbered list of results plus a saved JSON attachment with the
+    structured `[{title, url, snippet}]` form.
 
 Tool framing pushes the model toward a search-then-fetch loop rather
 than search-as-default — most queries the model thinks "I should
@@ -261,35 +258,8 @@ def register(api):
             suffix=".json",
         )
 
-    def web_search_instant(query: str, related: bool = False) -> str:
-        """Hit DuckDuckGo's instant-answer API for a short factual reply.
-
-        Coverage is narrow; expect `<no instant answer ...>` for
-        most queries (the cue to fall back to `web_search`).
-
-        Args:
-            query: Search query.
-            related: If True, append up to 10 related-topic links.
-                Default False keeps the reply terse.
-
-        Returns:
-            Short markdown reply, or `<no instant answer ...>` /
-            `<instant-answer error: ...>` on miss/failure.
-        """
-        if not query or not query.strip():
-            return "<query is empty>"
-        try:
-            ans = _search.ddg_instant_answer(query)
-        except Exception as e:
-            return f"<instant-answer error: {e}>"
-        return _search.format_instant_answer(ans, query, related=related)
-
-    # Role-only: keeps these out of the root agent's schema list.
-    # Reach for them via `pyagent --role researcher` (or
+    # Role-only: keeps web_search out of the root agent's schema
+    # list. Reach for it via `pyagent --role researcher` (or
     # spawn_subagent(role="researcher", ...)) — the bundled
-    # researcher role's allowlist names them explicitly. Saves ~900
-    # tokens of schema overhead on every root-agent API call.
+    # researcher role's allowlist names it explicitly.
     api.register_tool("web_search", web_search, role_only=True)
-    api.register_tool(
-        "web_search_instant", web_search_instant, role_only=True
-    )
