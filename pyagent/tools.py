@@ -442,36 +442,23 @@ def grep(
     """Search for a regex pattern in a file or directory tree.
 
     First reach for any "where does X appear?" question — cheaper than
-    reading whole files to skim. Searches recursively if `path` is a
-    directory. Files that cannot be decoded as UTF-8 text are skipped.
-    Output line numbers match `read_file`'s `start`/`end` so you can
-    pipe a hit into a targeted read.
-
-    With `before` / `after` / `context` set, surrounding lines come
-    back in the same call so you don't need a follow-up `read_file`.
-    Semantics mirror GNU `grep`'s `-B` / `-A` / `-C`: `context=N` is
-    shorthand for `before=N, after=N`; an explicit non-zero `before`
-    or `after` overrides the corresponding side of `context`.
-
-    Output uses GNU-grep's separator convention: matched lines stay
-    `path:lineno:line` (colon), while context lines use a dash —
-    `path:lineno-line`. Adjacent matches whose context windows touch
-    or overlap collapse into one contiguous excerpt with no duplicate
-    lines. When context is non-zero, runs of output from the same
-    file are separated by a `--` line.
+    reading whole files. Recursive on a directory; skips files that
+    aren't UTF-8 text. Line numbers match `read_file`'s `start`/`end`,
+    so a hit pipes straight into a targeted read.
 
     Args:
-        pattern: Regex pattern to search for.
-        path: File or directory to search.
-        before: Number of lines of leading context per match.
-        after: Number of lines of trailing context per match.
-        context: Shorthand for `before=N, after=N`. Explicit `before`
-            / `after` win when both are non-zero.
+        pattern: Regex pattern.
+        path: File or directory.
+        before: Lines of leading context per match.
+        after: Lines of trailing context per match.
+        context: Shorthand for `before=N, after=N`. Explicit
+            `before`/`after` win when both are non-zero.
 
     Returns:
-        List of matches. Without context: `path:lineno:line` per match.
-        With context: matches keep the colon, surrounding lines use a
-        dash, and same-file runs are separated by `--`.
+        List of matches. Format per line: `path:lineno:line` for the
+        match itself; with context, surrounding lines use a dash
+        (`path:lineno-line`) and same-file runs are separated by
+        `--`. Overlapping context windows collapse into one excerpt.
     """
     try:
         before_i = int(before)
@@ -1319,37 +1306,27 @@ def fetch_url(
     """Fetch a URL via HTTP GET; save the raw response and return a
     convenience preview.
 
-    The raw response body is *always* saved to a session attachment.
-    The returned tool result names that path so you can follow up with
-    `grep`, `read_file`, or `html_select` (researcher role) against
-    the saved file — no need to re-fetch.
-
-    GET-only. Non-2xx responses still save and report normally; the
-    HTTP status appears in the result. For POST, custom headers, auth,
-    or anything beyond a plain GET, drop into `execute` with `curl`.
+    Raw body is always saved as a session attachment. The result
+    names the path so you can follow up with `grep` / `read_file`
+    against the saved file — no re-fetch. GET-only; for POST or
+    custom headers drop into `execute` with `curl`.
 
     Args:
         url: URL to fetch.
-        format: Output format. `"md"` (default) converts HTML responses
-            to markdown and includes it inline alongside the saved-path
-            stub — one tool call covers article-body extraction.
-            `"void"` skips conversion and returns only the path stub
-            with no inline body — use when you'll interrogate the page
-            with `html_select` / `grep` and don't want to pay tokens
-            for a markdown preview you won't read, or when fetching
-            multiple URLs to triage cheaply.
-        main_content: When `format="md"` and the response is HTML, run
-            a readability-style reduction first (drop nav/aside/footer
-            and prefer `<main>` / `<article>`). Default `True` matches
-            the news/blog/article majority. Set False for reference
-            pages (Wikipedia, docs) where the whole document is the
-            content.
+        format: `"md"` (default) converts HTML to markdown inline.
+            `"void"` skips conversion — use when triaging multiple
+            URLs cheaply, or when you'll interrogate the saved file
+            directly.
+        main_content: When `format="md"` and response is HTML, run
+            a readability-style reduction first (drop nav/aside/
+            footer; prefer `<main>` / `<article>`). Default `True`
+            for news/blogs; set `False` for reference pages where
+            the whole document is the content.
 
     Returns:
-        An attachment-style stub naming the saved path, the response
-        status and content type, and — when applicable — the converted
-        markdown inline. Network failures (DNS, connection refused,
-        timeout) come back as `<request failed: ...>` instead.
+        Attachment stub naming the saved path, HTTP status, content
+        type, and (when applicable) inline markdown. Network failure
+        → `<request failed: ...>`.
     """
     try:
         response = requests.get(

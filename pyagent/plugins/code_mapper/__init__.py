@@ -47,34 +47,27 @@ def register(api):
     ) -> str:
         """Return a structured outline of a source file's symbols.
 
-        Reach for this before read_file'ing a file you don't already
-        know — it gives you the function/class/import locations as a
-        compact list (each with a 1-indexed line number you can pass
-        straight to `read_file(path, start=<line>)`). Far cheaper in
-        tokens than reading the whole file just to find a definition.
-
-        The outline is built by tree-sitter (a real parser, not regex),
-        so syntax errors don't break the call — partial files still
-        produce whatever symbols parsed cleanly, with an `errors`
-        array flagging the broken regions.
+        Reach for this before `read_file`'ing a file you don't know
+        — gives function/class/import locations with line numbers
+        you can pass straight to `read_file(path, start=<line>)`.
+        Far cheaper than reading the whole file to find a definition.
+        Partial files with syntax errors still produce whatever
+        parsed cleanly, with broken regions flagged in `errors`.
 
         Args:
-            path: Path to the source file. Must be inside the workspace.
-                Currently supported extensions: .py.
-            kind: Which symbol categories to include. One of:
-                "all" (default — class/function/method/constant/import),
-                "imports", "functions" (functions + methods),
-                "classes", "constants", "calls" (call sites — noisy,
-                use only when chasing a specific reference).
-            include_docstrings: If True, attach the leading docstring
-                of each function/class as a `docstring` field.
-                Defaults False to keep responses small.
+            path: Source file (must be inside the workspace).
+                Supported: .py.
+            kind: Symbol categories. One of: "all" (default —
+                class/function/method/constant/import), "imports",
+                "functions" (incl. methods), "classes", "constants",
+                "calls" (noisy — use when chasing a reference).
+            include_docstrings: Attach the leading docstring of each
+                function/class. Default False.
 
         Returns:
-            JSON string with shape:
-            `{file, language, symbols: [{kind, name, line, parent}], errors}`.
-            `parent` is the enclosing class name when kind=="method",
-            otherwise null. Unsupported file extension returns
+            JSON: `{file, language, symbols: [{kind, name, line,
+            parent}], errors}`. `parent` is the enclosing class for
+            methods; null otherwise. Unsupported extension →
             `{file, error: "unsupported language: …"}`.
         """
         ok, payload = _read_source(path)
