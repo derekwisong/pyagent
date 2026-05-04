@@ -285,44 +285,45 @@ def _dump_prompt(
         out_lines.append("")
         out_lines.append("[no volatile content this turn]")
 
-    schemas_block = ""
-    schema_count = 0
+    # Build tool schemas unconditionally — we want their sizes in the
+    # footer even when the user didn't ask to dump the bulky JSON.
+    # Static built-ins from agent_tools mirror what agent_proc
+    # registers, minus dynamic tools (subagent meta, ask_parent,
+    # checklist) that depend on session/checklist state.
+    builtins = [
+        ("read_file", agent_tools.read_file),
+        ("write_file", agent_tools.write_file),
+        ("edit_file", agent_tools.edit_file),
+        ("list_directory", agent_tools.list_directory),
+        ("grep", agent_tools.grep),
+        ("glob", agent_tools.glob),
+        ("execute", agent_tools.execute),
+        ("run_background", agent_tools.run_background),
+        ("read_output", agent_tools.read_output),
+        ("wait_for", agent_tools.wait_for),
+        ("kill_process", agent_tools.kill_process),
+        ("fetch_url", agent_tools.fetch_url),
+    ]
+    all_schemas: list[dict[str, Any]] = []
+    per_tool_chars: list[tuple[str, int]] = []
+    import json as _json
+
+    def _push_schema(name: str, fn: Any) -> None:
+        try:
+            sch = build_schema(name, fn)
+        except Exception as e:  # noqa: BLE001 — surface but keep going
+            sch = {"name": name, "error": f"<schema build failed: {e}>"}
+        all_schemas.append(sch)
+        per_tool_chars.append((name, len(_json.dumps(sch))))
+
+    for name, fn in builtins:
+        _push_schema(name, fn)
+    for tool_name, (_pname, fn) in loaded.tools().items():
+        _push_schema(tool_name, fn)
+
+    schemas_block = _json.dumps(all_schemas, indent=2)
+    schema_count = len(all_schemas)
     if include_schemas:
-        # Static built-ins from agent_tools — same set agent_proc
-        # registers, minus dynamic tools (subagent meta, ask_parent,
-        # checklist) that depend on session/checklist state.
-        builtins = [
-            ("read_file", agent_tools.read_file),
-            ("write_file", agent_tools.write_file),
-            ("edit_file", agent_tools.edit_file),
-            ("list_directory", agent_tools.list_directory),
-            ("grep", agent_tools.grep),
-            ("glob", agent_tools.glob),
-            ("execute", agent_tools.execute),
-            ("run_background", agent_tools.run_background),
-            ("read_output", agent_tools.read_output),
-            ("wait_for", agent_tools.wait_for),
-            ("kill_process", agent_tools.kill_process),
-            ("fetch_url", agent_tools.fetch_url),
-        ]
-        all_schemas: list[dict[str, Any]] = []
-        for name, fn in builtins:
-            try:
-                all_schemas.append(build_schema(name, fn))
-            except Exception as e:  # noqa: BLE001 — surface but keep going
-                all_schemas.append(
-                    {"name": name, "error": f"<schema build failed: {e}>"}
-                )
-        for tool_name, (_pname, fn) in loaded.tools().items():
-            try:
-                all_schemas.append(build_schema(tool_name, fn))
-            except Exception as e:  # noqa: BLE001
-                all_schemas.append(
-                    {"name": tool_name, "error": f"<schema build failed: {e}>"}
-                )
-        import json as _json
-        schemas_block = _json.dumps(all_schemas, indent=2)
-        schema_count = len(all_schemas)
         out_lines.append("")
         out_lines.append("=" * 72)
         out_lines.append(f"TOOL SCHEMAS ({schema_count} tools)")
@@ -330,35 +331,149 @@ def _dump_prompt(
         out_lines.append("")
         out_lines.append(schemas_block)
 
-    # Token-count footer. char/4 is the conventional rough proxy for
-    # English+code; not a real tokenizer, but useful for relative
-    # comparison between sections.
-    def _tok(s: str) -> int:
-        return len(s) // 4
+    # Per-category breakdown for the size footer. Re-render each
+    # component independently so we can attribute chars to a source —
+    # `stable` itself is the concatenation and can't be partitioned by
+    # `\n\n` since components contain `\n\n` internally.
+    soul_text = soul_path.read_text() if soul_path else ""
+    tools_text = tools_path.read_text() if tools_path else ""
+    primer_text = primer_path.read_text() if primer_path else ""
+    skills_text = skills_mod.live_catalog() or ""
+    skill_count = len(skills_mod.discover())
+    persona_text = builder._persona_footer()
+    plugin_sections: list[tuple[str, int]] = []
+    from pyagent.plugins import PromptContext as _PromptCtx
+    for sec in loaded.sections():
+        try:
+            rendered = sec.renderer(_PromptCtx())
+        except Exception:  # noqa: BLE001
+            rendered = ""
+        if rendered:
+            plugin_sections.append(
+                (f"{sec.plugin_name}:{sec.name}", len(rendered))
+            )
+    plugin_total_chars = sum(c for _, c in plugin_sections)
 
-    stable_chars = len(stable)
-    volatile_chars = len(volatile)
-    schema_chars = len(schemas_block)
-    total_chars = stable_chars + volatile_chars + schema_chars
+    # Targets are tuned for "works on a small local model" — system
+    # prompt + tool schemas combined comfortably under ~7K tokens so a
+    # 16K-context model has runway for the conversation. Adjust per
+    # section as the prose evolves.
+    targets = {
+        "SOUL.md": 1000,
+        "TOOLS.md": 1500,
+        "PRIMER.md": 1500,
+        "skills catalog": 400,
+        "plugin sections": 800,
+        "persona footer": 50,
+        "tool schemas": 1500,
+    }
+
+    def _tok(n_chars: int) -> int:
+        return n_chars // 4
+
+    rows: list[tuple[str, int, int, int]] = [
+        ("SOUL.md", len(soul_text), _tok(len(soul_text)), targets["SOUL.md"]),
+        ("TOOLS.md", len(tools_text), _tok(len(tools_text)), targets["TOOLS.md"]),
+        ("PRIMER.md", len(primer_text), _tok(len(primer_text)), targets["PRIMER.md"]),
+        (
+            f"skills catalog ({skill_count})",
+            len(skills_text),
+            _tok(len(skills_text)),
+            targets["skills catalog"],
+        ),
+        (
+            f"plugin sections ({len(plugin_sections)})",
+            plugin_total_chars,
+            _tok(plugin_total_chars),
+            targets["plugin sections"],
+        ),
+        ("persona footer", len(persona_text), _tok(len(persona_text)), targets["persona footer"]),
+        (
+            f"tool schemas ({schema_count})",
+            len(schemas_block),
+            _tok(len(schemas_block)),
+            targets["tool schemas"],
+        ),
+    ]
+    target_total = sum(targets.values())
+    grand_chars = sum(r[1] for r in rows) + len(volatile)
+    grand_tokens = _tok(grand_chars)
+
     out_lines.append("")
     out_lines.append("=" * 72)
-    out_lines.append("SIZE FOOTER (rough — len(text)//4 token proxy)")
+    out_lines.append("SIZE BREAKDOWN (rough — len(text)//4 token proxy)")
     out_lines.append("=" * 72)
     out_lines.append(
-        f"  stable    {stable_chars:>7} chars  ~{_tok(stable):>5} tokens"
+        f"  {'Section':<28}  {'chars':>7}  {'tokens':>7}  {'target':>7}  status"
     )
-    out_lines.append(
-        f"  volatile  {volatile_chars:>7} chars  ~{_tok(volatile):>5} tokens"
-    )
-    if include_schemas:
+    out_lines.append("  " + "-" * 66)
+    for label, chars, toks, tgt in rows:
+        if toks > tgt:
+            status = f"+{toks - tgt} over"
+        elif toks > int(tgt * 0.8):
+            status = "near limit"
+        else:
+            status = "ok"
         out_lines.append(
-            f"  schemas   {schema_chars:>7} chars  ~{_tok(schemas_block):>5} tokens"
-            f"  ({schema_count} tools)"
+            f"  {label:<28}  {chars:>7}  {toks:>7}  {tgt:>7}  {status}"
         )
-    out_lines.append("  " + "-" * 60)
+    if volatile:
+        out_lines.append(
+            f"  {'volatile (turn-local)':<28}  {len(volatile):>7}  "
+            f"{_tok(len(volatile)):>7}  {'—':>7}  (after cache)"
+        )
+    out_lines.append("  " + "-" * 66)
     out_lines.append(
-        f"  TOTAL     {total_chars:>7} chars  ~{_tok(stable + volatile + schemas_block):>5} tokens"
+        f"  {'GRAND TOTAL':<28}  {grand_chars:>7}  {grand_tokens:>7}  "
+        f"{target_total:>7}  "
+        f"{'+' + str(grand_tokens - target_total) + ' over' if grand_tokens > target_total else 'ok'}"
     )
+
+    # Per-tool schema breakdown — fattest tools are the cheapest wins
+    # for trim. Plugin tools tend to dominate; built-ins are usually
+    # already terse.
+    per_tool_chars.sort(key=lambda x: -x[1])
+    out_lines.append("")
+    out_lines.append("Top tool schemas by size:")
+    for name, chars in per_tool_chars[:10]:
+        out_lines.append(f"  {name:<22} chars={chars:>5}  tokens≈{chars // 4:>4}")
+    if len(per_tool_chars) > 10:
+        out_lines.append(f"  ({len(per_tool_chars) - 10} more)")
+
+    # Trim suggestions: name what's over budget, point to where.
+    overs = [(label, toks - tgt, tgt) for label, _, toks, tgt in rows if toks > tgt]
+    out_lines.append("")
+    out_lines.append("Trim suggestions (largest deltas first):")
+    if not overs:
+        out_lines.append("  - all sections within target. No trim needed.")
+    else:
+        overs.sort(key=lambda x: -x[1])
+        for label, delta, tgt in overs:
+            if label == "SOUL.md":
+                hint = f"edit {soul_path}; aim ≤{tgt} tokens"
+            elif label == "TOOLS.md":
+                hint = f"edit {tools_path}; aim ≤{tgt} tokens"
+            elif label == "PRIMER.md":
+                hint = f"edit {primer_path}; aim ≤{tgt} tokens"
+            elif label.startswith("skills catalog"):
+                hint = (
+                    "uninstall unused skills, or shorten their descriptions "
+                    "(catalog is just `name: description` per skill)"
+                )
+            elif label.startswith("plugin sections"):
+                hint = (
+                    "disable plugins via `[plugins.<name>] enabled = false` "
+                    "in config.toml; their prompt sections will drop"
+                )
+            elif label.startswith("tool schemas"):
+                hint = (
+                    "trim docstrings on heaviest tools above; or move tools "
+                    "to a subagent role so they're absent from the root agent"
+                )
+            else:
+                hint = "review section contents"
+            out_lines.append(f"  - {label}: +{delta} tokens over — {hint}")
+
     out_lines.append("")
     out_lines.append("Sources:")
     out_lines.append(f"  SOUL:   {soul_path}")
@@ -366,7 +481,9 @@ def _dump_prompt(
     out_lines.append(f"  PRIMER: {primer_path}")
     if not include_schemas:
         out_lines.append("")
-        out_lines.append("Tip: pass --prompt-include-schemas for the JSON tool schemas.")
+        out_lines.append(
+            "Tip: pass --prompt-include-schemas to dump the JSON tool schemas."
+        )
 
     print("\n".join(out_lines))
 
