@@ -996,6 +996,11 @@ class LoadedPlugins:
     # (including disabled ones), so the rich missing-tool error can
     # cite an installed-but-disabled plugin.
     declared_tool_provenance: dict[str, str] = field(default_factory=dict)
+    # Whether this loader was built for a subagent process. Recorded
+    # at load() time so `rescan_for_new` can apply the same
+    # `in_subagents = false` filter that `load()` did, without
+    # reaching back to the call site.
+    is_subagent: bool = False
     # Effective (after-conflict-resolution) tool registry; populated
     # by `_resolve_conflicts` at end of load(). Plugin-private — not
     # exposed mutably; consumers use tools() / sections().
@@ -1099,6 +1104,187 @@ class LoadedPlugins:
                     continue
                 seen_providers.add(prov_name)
                 self._resolved_providers[prov_name] = prov
+
+    def rescan_for_new(self, agent: Any) -> int:
+        """Discover plugins that have appeared on disk since `load()` and
+        bring them live in this running session.
+
+        Called from the top of the agent's main run loop so a plugin
+        the LLM authored (via the write-plugin skill) is callable on
+        its very next API turn — no process restart and no explicit
+        reload tool. Existing plugins are left untouched: this is
+        "add new" only. In-place edits to a loaded plugin's source
+        won't be picked up because the synthetic module is already
+        cached in ``sys.modules``; full module-cache invalidation is
+        intentionally out of scope.
+
+        Per newly-discovered record, the same gates ``load()`` runs
+        apply — disabled, ``in_subagents=False`` while ``self.is_subagent``,
+        ``_eligibility_check`` (env vars / binaries) — so a plugin
+        gated out at startup stays gated out on rescan.
+
+        Conflicts (a new plugin claiming a tool/section/provider name
+        already taken by a built-in or earlier plugin) are first-wins
+        skip + log, mirroring ``_resolve_conflicts``. The injected
+        loader note tells the LLM both what loaded *and* what was
+        skipped, so it doesn't try to call a tool the rescan silently
+        dropped.
+
+        Cost on a no-op scan is one ``discover()`` call (four
+        ``iterdir()`` walks plus a ``tomllib.load`` per manifest).
+        Runs every iteration of the agent's main loop; if it ever
+        shows up in profiles, gate on tier-root ``st_mtime``.
+
+        Returns the number of plugins newly loaded by this scan; ``0``
+        means steady state.
+        """
+        records = discover()
+        existing_names = {s.manifest.name for s in self.states}
+
+        # Refresh declared_tool_provenance so a newly-installed-but-
+        # disabled plugin's tools still surface in the rich
+        # missing-tool error. setdefault preserves the original
+        # discoverer when names overlap.
+        for r in records:
+            for tool in r.manifest.provides_tools:
+                self.declared_tool_provenance.setdefault(
+                    tool, r.manifest.name
+                )
+
+        new_states: list[_PluginState] = []
+        for record in records:
+            if record.manifest.name in existing_names:
+                continue
+            if not record.enabled:
+                continue
+            if self.is_subagent and not record.manifest.in_subagents:
+                logger.info(
+                    "plugin %s: skipped in subagent (in_subagents=false)",
+                    record.manifest.name,
+                )
+                continue
+            reason = _eligibility_check(record.manifest)
+            if reason:
+                logger.info(
+                    "plugin %s: skipped (%s)",
+                    record.manifest.name,
+                    reason,
+                )
+                continue
+            state = _load_one_record(record, self)
+            if state is None:
+                continue
+            new_states.append(state)
+            self.states.append(state)
+            if record.shadowed_by:
+                self.shadowed[record.manifest.name] = record.shadowed_by
+
+        if not new_states:
+            return 0
+
+        # Splice each new state's contributions into the resolved
+        # tables and the agent's effective registry. Track per-state
+        # what actually went live vs got skipped so the loader note
+        # can be honest about partial registration.
+        live_tools_by_plugin: dict[str, list[str]] = {}
+        skipped_tools_by_plugin: dict[str, list[str]] = {}
+        live_sections_by_plugin: dict[str, list[str]] = {}
+        new_provider_count = 0
+
+        # Gate on agent.tools (built-ins + already-loaded plugin tools)
+        # rather than _resolved_tools alone — agent.tools is the
+        # source of truth for callability and includes built-ins the
+        # loader registry doesn't know about.
+        for state in new_states:
+            plugin_name = state.manifest.name
+            live_tools: list[str] = []
+            skipped_tools: list[str] = []
+            for tool_name, fn in state.tools.items():
+                if tool_name in agent.tools:
+                    logger.warning(
+                        "tool %r already registered (built-in or "
+                        "earlier plugin); %s's registration skipped",
+                        tool_name,
+                        plugin_name,
+                    )
+                    skipped_tools.append(tool_name)
+                    continue
+                self._resolved_tools[tool_name] = (plugin_name, fn)
+                agent.add_tool(tool_name, fn)
+                live_tools.append(tool_name)
+            live_tools_by_plugin[plugin_name] = live_tools
+            skipped_tools_by_plugin[plugin_name] = skipped_tools
+
+            live_sections: list[str] = []
+            for section in state.sections:
+                if any(
+                    s.name == section.name
+                    for s in self._resolved_sections
+                ):
+                    logger.warning(
+                        "prompt section %r already registered by an "
+                        "earlier plugin; %s's registration skipped",
+                        section.name,
+                        plugin_name,
+                    )
+                    continue
+                self._resolved_sections.append(section)
+                live_sections.append(section.name)
+            live_sections_by_plugin[plugin_name] = live_sections
+
+            for prov_name, prov in state.providers.items():
+                if prov_name in self._resolved_providers:
+                    logger.warning(
+                        "provider %r already registered by an "
+                        "earlier plugin; %s's registration skipped",
+                        prov_name,
+                        plugin_name,
+                    )
+                    continue
+                self._resolved_providers[prov_name] = prov
+                new_provider_count += 1
+
+        if new_provider_count:
+            _publish_plugin_providers(self)
+
+        # Fire on_session_start once per new plugin against the
+        # already-active session. Bench / no-session contexts skip.
+        if self.session is not None:
+            for state in new_states:
+                for fn in state.on_start_hooks:
+                    try:
+                        fn(self.session)
+                    except Exception:
+                        logger.exception(
+                            "plugin %s on_session_start raised",
+                            state.manifest.name,
+                        )
+
+        # Tell the LLM what loaded. Same pending_async_replies channel
+        # the subagent-notes machinery uses; the agent loop drains it
+        # immediately after this rescan call so the message lands on
+        # this turn's API request.
+        for state in new_states:
+            m = state.manifest
+            live = live_tools_by_plugin.get(m.name, [])
+            skipped = skipped_tools_by_plugin.get(m.name, [])
+            sections = live_sections_by_plugin.get(m.name, [])
+            parts = [
+                f"loaded {m.name} v{m.version}",
+                f"tools=[{', '.join(live) or '(none)'}]",
+            ]
+            if skipped:
+                parts.append(
+                    f"tools-skipped-conflict=[{', '.join(skipped)}]"
+                )
+            if sections:
+                parts.append(f"sections=[{', '.join(sections)}]")
+            note = _format_plugin_note(
+                "plugin-loader", "; ".join(parts)
+            )
+            agent.pending_async_replies.put(note)
+
+        return len(new_states)
 
     def call_on_session_start(
         self,
@@ -1290,6 +1476,74 @@ class LoadedPlugins:
         return dispatch
 
 
+def _load_one_record(
+    record: PluginRecord, loaded: "LoadedPlugins"
+) -> _PluginState | None:
+    """Import one plugin's module, run its ``register()``, validate
+    declared-vs-registered names, and return the resulting
+    ``_PluginState``. Returns ``None`` if any step fails (logged).
+
+    Caller is responsible for the upstream gates (``record.enabled``,
+    ``in_subagents``, ``_eligibility_check``) and for splicing the
+    returned state into resolved registries — this helper only handles
+    the import-and-register sequence so ``load()`` and
+    ``rescan_for_new()`` can share it.
+    """
+    module = _load_module(record)
+    if module is None:
+        return None
+    register_fn = getattr(module, "register", None)
+    if not callable(register_fn):
+        logger.warning(
+            "plugin %s: no register() function in plugin module",
+            record.manifest.name,
+        )
+        return None
+    state = _PluginState(manifest=record.manifest)
+    api = PluginAPI(state, loader=loaded)
+    try:
+        register_fn(api)
+    except Exception:
+        logger.exception(
+            "plugin %s: register() raised; skipping plugin",
+            record.manifest.name,
+        )
+        return None
+    problem = _validate_provides(state)
+    if problem:
+        logger.warning(
+            "plugin %s: [provides] mismatch: %s; skipping plugin",
+            record.manifest.name,
+            problem,
+        )
+        return None
+    api._frozen = True
+    return state
+
+
+def _publish_plugin_providers(loaded: "LoadedPlugins") -> None:
+    """Push the loader's resolved provider table into ``pyagent.llms``
+    so ``get_client("<plugin-provider>/<model>")`` can route to it.
+
+    Called by ``load()`` once at startup and by ``rescan_for_new()``
+    whenever a newly-loaded plugin contributes a provider.
+    """
+    from pyagent import llms as _llms
+
+    _llms.set_plugin_providers(
+        {
+            name: _llms.ProviderSpec(
+                name=name,
+                env_vars=tuple(p.env_vars),
+                default_model=p.default_model,
+                factory=p.factory,
+                list_models=p.list_models,
+            )
+            for name, p in loaded._resolved_providers.items()
+        }
+    )
+
+
 def load(*, is_subagent: bool = False) -> LoadedPlugins:
     """Discover, validate, and import all enabled plugins.
 
@@ -1307,7 +1561,10 @@ def load(*, is_subagent: bool = False) -> LoadedPlugins:
         for tool in r.manifest.provides_tools:
             declared_tool_provenance.setdefault(tool, r.manifest.name)
 
-    loaded = LoadedPlugins(declared_tool_provenance=declared_tool_provenance)
+    loaded = LoadedPlugins(
+        declared_tool_provenance=declared_tool_provenance,
+        is_subagent=is_subagent,
+    )
 
     for record in records:
         if not record.enabled:
@@ -1324,35 +1581,9 @@ def load(*, is_subagent: bool = False) -> LoadedPlugins:
                 "plugin %s: skipped (%s)", record.manifest.name, reason
             )
             continue
-        module = _load_module(record)
-        if module is None:
+        state = _load_one_record(record, loaded)
+        if state is None:
             continue
-        register_fn = getattr(module, "register", None)
-        if not callable(register_fn):
-            logger.warning(
-                "plugin %s: no register() function in plugin module",
-                record.manifest.name,
-            )
-            continue
-        state = _PluginState(manifest=record.manifest)
-        api = PluginAPI(state, loader=loaded)
-        try:
-            register_fn(api)
-        except Exception:
-            logger.exception(
-                "plugin %s: register() raised; skipping plugin",
-                record.manifest.name,
-            )
-            continue
-        problem = _validate_provides(state)
-        if problem:
-            logger.warning(
-                "plugin %s: [provides] mismatch: %s; skipping plugin",
-                record.manifest.name,
-                problem,
-            )
-            continue
-        api._frozen = True
         loaded.states.append(state)
         if record.shadowed_by:
             loaded.shadowed[record.manifest.name] = record.shadowed_by
@@ -1364,20 +1595,7 @@ def load(*, is_subagent: bool = False) -> LoadedPlugins:
     # router is the source of truth at call sites; the loader is the
     # only writer. Subagents call `load()` independently, so each
     # process ends up with its own narrowed view of plugin providers.
-    from pyagent import llms as _llms
-
-    _llms.set_plugin_providers(
-        {
-            name: _llms.ProviderSpec(
-                name=name,
-                env_vars=tuple(p.env_vars),
-                default_model=p.default_model,
-                factory=p.factory,
-                list_models=p.list_models,
-            )
-            for name, p in loaded._resolved_providers.items()
-        }
-    )
+    _publish_plugin_providers(loaded)
     return loaded
 
 

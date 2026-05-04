@@ -738,6 +738,16 @@ class Agent:
         self.conversation.append({"role": "user", "content": prompt})
         texts: list[str] = []
         while True:
+            # Pick up any plugin directories that appeared on disk
+            # since the last iteration (e.g. one the LLM just authored
+            # via the write-plugin skill). Loader notes are pushed
+            # onto pending_async_replies so the drain immediately
+            # below surfaces them on this same API call.
+            if self.plugins is not None:
+                try:
+                    self.plugins.rescan_for_new(self)
+                except Exception:
+                    logger.exception("plugin rescan_for_new raised")
             # Drain any async-subagent replies that arrived since the
             # last LLM call so the model sees them on this turn.
             self._drain_pending_async()

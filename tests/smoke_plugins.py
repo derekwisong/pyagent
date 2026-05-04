@@ -22,12 +22,39 @@ Run with:
 from __future__ import annotations
 
 import os
+import queue
 import shutil
 import tempfile
 from pathlib import Path
 
 from pyagent import paths
 from pyagent import plugins as plugins_mod
+
+
+class _FakeAgent:
+    """Minimum agent surface `LoadedPlugins.rescan_for_new` touches.
+
+    Mirrors the real `Agent` just enough: a `tools` dict it mutates
+    via `add_tool`, and a `pending_async_replies` Queue the rescan
+    pushes loader-status notes onto.
+    """
+
+    def __init__(self, tools: dict | None = None) -> None:
+        self.tools: dict = dict(tools or {})
+        self.pending_async_replies: queue.Queue = queue.Queue()
+
+    def add_tool(
+        self, name: str, fn, auto_offload: bool = True, *, evict_after_use: bool = False
+    ) -> None:
+        self.tools[name] = fn
+
+    def drain_replies(self) -> list[str]:
+        out: list[str] = []
+        while True:
+            try:
+                out.append(self.pending_async_replies.get_nowait())
+            except queue.Empty:
+                return out
 
 
 def _write_plugin(
@@ -1092,6 +1119,185 @@ def test_graceful_degradation_when_memory_disabled() -> None:
         restore()
 
 
+def test_rescan_picks_up_new_plugin() -> None:
+    """A plugin directory created after `load()` gets discovered and
+    registered on the next `rescan_for_new` call: its tool lands in
+    both the loader registry and the agent's effective registry, and
+    a status note is enqueued for the LLM.
+
+    Plugin names are test-unique because the synthetic module name
+    used by ``_load_module`` is process-global — re-using plugin
+    names across tests trips the synth-name collision guard."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        baseline_py = (
+            "def register(api):\n"
+            "    def rescan_a_tool() -> str:\n"
+            '        """A tool."""\n'
+            '        return "a"\n'
+            '    api.register_tool("rescan_a_tool", rescan_a_tool)\n'
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="rescan-a",
+            name="rescan-a",
+            provides_tools=["rescan_a_tool"],
+            plugin_py=baseline_py,
+        )
+        loaded = plugins_mod.load()
+        assert "rescan_a_tool" in loaded.tools()
+        assert len(loaded.states) == 1
+
+        agent = _FakeAgent(tools={n: fn for n, (_, fn) in loaded.tools().items()})
+
+        # Steady-state rescan: nothing new on disk.
+        n_new = loaded.rescan_for_new(agent)
+        assert n_new == 0
+        assert agent.drain_replies() == []
+
+        # Drop a new plugin into the same tier root.
+        new_py = (
+            "def register(api):\n"
+            "    def rescan_b_tool() -> str:\n"
+            '        """B tool."""\n'
+            '        return "b"\n'
+            '    api.register_tool("rescan_b_tool", rescan_b_tool)\n'
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="rescan-b",
+            name="rescan-b",
+            provides_tools=["rescan_b_tool"],
+            plugin_py=new_py,
+        )
+
+        n_new = loaded.rescan_for_new(agent)
+        assert n_new == 1
+        assert "rescan_b_tool" in loaded.tools()
+        assert "rescan_b_tool" in agent.tools
+        assert agent.tools["rescan_b_tool"]() == "b"
+        replies = agent.drain_replies()
+        assert len(replies) == 1
+        assert "[plugin plugin-loader notes]:" in replies[0]
+        assert "loaded rescan-b v0.1.0" in replies[0]
+        assert "tools=[rescan_b_tool]" in replies[0]
+
+        # Idempotent: a second call with no new plugins returns 0 and
+        # doesn't re-register the same plugin.
+        n_new = loaded.rescan_for_new(agent)
+        assert n_new == 0
+        assert len(loaded.states) == 2
+        assert agent.drain_replies() == []
+        print("✓ rescan picks up new plugin and notifies the LLM")
+    finally:
+        restore()
+
+
+def test_rescan_skips_conflicting_tool() -> None:
+    """A late-arriving plugin that claims a tool name already taken by
+    the agent (built-in or earlier plugin) is skipped at the agent-
+    registry layer, and the loader note tells the LLM about the
+    skipped name so it doesn't try to call it."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        baseline_py = (
+            "def register(api):\n"
+            "    def conflict_tool() -> str:\n"
+            '        """Original."""\n'
+            '        return "original"\n'
+            "    api.register_tool("
+            '"conflict_tool", conflict_tool)\n'
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="rescan-conflict-original",
+            name="rescan-conflict-original",
+            provides_tools=["conflict_tool"],
+            plugin_py=baseline_py,
+        )
+        loaded = plugins_mod.load()
+        agent = _FakeAgent(tools={n: fn for n, (_, fn) in loaded.tools().items()})
+
+        # A new plugin that *also* declares conflict_tool plus a unique
+        # tool unique_tool.
+        intruder_py = (
+            "def register(api):\n"
+            "    def conflict_tool() -> str:\n"
+            '        """Intruder."""\n'
+            '        return "intruder"\n'
+            "    def unique_tool() -> str:\n"
+            '        """Unique."""\n'
+            '        return "unique"\n'
+            "    api.register_tool("
+            '"conflict_tool", conflict_tool)\n'
+            '    api.register_tool("unique_tool", unique_tool)\n'
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="rescan-conflict-intruder",
+            name="rescan-conflict-intruder",
+            provides_tools=["conflict_tool", "unique_tool"],
+            plugin_py=intruder_py,
+        )
+
+        n_new = loaded.rescan_for_new(agent)
+        assert n_new == 1
+        assert agent.tools["conflict_tool"]() == "original"
+        assert agent.tools["unique_tool"]() == "unique"
+        replies = agent.drain_replies()
+        assert len(replies) == 1
+        assert "tools=[unique_tool]" in replies[0]
+        assert "tools-skipped-conflict=[conflict_tool]" in replies[0]
+        print("✓ rescan respects first-wins and reports skipped tools in the note")
+    finally:
+        restore()
+
+
+def test_rescan_register_failure_is_isolated() -> None:
+    """A new plugin whose register() raises is logged and skipped;
+    other newly-discovered plugins on the same scan still load."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        loaded = plugins_mod.load()
+        agent = _FakeAgent()
+
+        bad_py = (
+            "def register(api):\n"
+            '    raise RuntimeError("nope")\n'
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="01-rescan-bad",
+            name="rescan-bad",
+            plugin_py=bad_py,
+        )
+        good_py = (
+            "def register(api):\n"
+            "    def rescan_good_tool() -> str:\n"
+            '        """Good tool."""\n'
+            '        return "good"\n'
+            '    api.register_tool("rescan_good_tool", rescan_good_tool)\n'
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="02-rescan-good",
+            name="rescan-good",
+            provides_tools=["rescan_good_tool"],
+            plugin_py=good_py,
+        )
+
+        n_new = loaded.rescan_for_new(agent)
+        assert n_new == 1
+        assert "rescan_good_tool" in agent.tools
+        assert [s.manifest.name for s in loaded.states] == ["rescan-good"]
+        replies = agent.drain_replies()
+        assert len(replies) == 1
+        assert "loaded rescan-good" in replies[0]
+        print("✓ rescan isolates failing register(); other new plugins still load")
+    finally:
+        restore()
+
+
 def main() -> None:
     test_basic_load_and_register()
     test_provides_mismatch()
@@ -1116,6 +1322,9 @@ def main() -> None:
     test_write_session_attachment_no_session()
     test_write_session_attachment_with_session()
     test_graceful_degradation_when_memory_disabled()
+    test_rescan_picks_up_new_plugin()
+    test_rescan_skips_conflicting_tool()
+    test_rescan_register_failure_is_isolated()
     print("\nALL CHECKS PASSED")
 
 
