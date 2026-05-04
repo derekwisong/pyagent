@@ -41,6 +41,12 @@ If `--model` is omitted, pyagent picks one in this order:
 The session header prints the resolved provider/model so you can confirm
 what was picked.
 
+Ollama uses the local daemon at `http://localhost:11434` by default. Set
+`OLLAMA_HOST` to point at a different host/port (e.g.,
+`OLLAMA_HOST=http://192.168.1.10:11434`). `OLLAMA_MODEL` sets the default
+model name when `--model ollama` is passed without a `/<name>` suffix.
+Neither variable is required for the standard local setup.
+
 ### Switching models mid-session
 
 At the prompt, type `/model <spec>` to swap the running agent's LLM
