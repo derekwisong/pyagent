@@ -175,6 +175,19 @@ def ddg_text_search(
                         snippet=str(r.get("body") or "").strip(),
                     )
                 )
+            if not out:
+                # Empty result with no exception is the silent-break
+                # signature — could be a genuine niche query or scraper
+                # drift after a DDG HTML change. The agent gets the
+                # `<no results>` marker either way; the warning lets
+                # an operator notice the pattern in logs (and tells
+                # them to check whether ddgs needs an update).
+                logger.warning(
+                    "web_search: backend %r returned 0 results for "
+                    "%r — may be a niche query or scraper drift",
+                    backend,
+                    query,
+                )
             return out
 
     # All attempts exhausted. last_err is set because we only land

@@ -178,50 +178,23 @@ def register(api):
     def web_search(query: str, n: int = 10):
         """Search the web via DuckDuckGo; return up to `n` results.
 
-        Reach for this when `fetch_url` alone isn't enough — i.e. you
-        don't have a URL yet, or you need to compare multiple sources.
-        Most factual questions are better answered from training data;
-        a search burns a network round trip and adds latency. When you
-        do search, treat the result list as a *menu*: pair with
-        `fetch_url` on the most promising URL rather than reading every
-        snippet.
-
-        Transient backend failures are retried with backoff
-        automatically (default 3 attempts, 1s+3s backoff). Persistent
-        failures return distinct markers so you can branch on what
-        happened: ``rate limited`` (back off), ``backend unavailable``
-        (try a different query or fall back to ``fetch_url`` with a
-        known URL), or a generic ``<search error: ...>`` for
-        programmer/parser issues.
-
-        On a successful search the structured ``[{title, url,
-        snippet}]`` list is also saved as a JSON attachment. The
-        markdown above the ``[also saved: ...]`` footer is the
-        complete answer — no need to read the attachment unless
-        you're chaining (passing the structured form to
-        ``extract_doc`` or another tool that consumes it).
-        Disable via ``[plugins.web-search] save_structured = false``
-        for the legacy markdown-only string return.
+        Treat results as a *menu*: pair with `fetch_url` on the most
+        promising URL rather than reading every snippet.
 
         Args:
-            query: Search query. Plain text; DDG handles quoting and
-                operators.
-            n: Number of results (default 10, max 25). Higher values
-                may auto-offload as an attachment.
+            query: Search query. Plain text; DDG handles quoting
+                and operators.
+            n: Number of results (default 10, max 25).
 
         Returns:
-            On success: an Attachment whose inline_text is a markdown
-            numbered list of ``title — url`` lines with snippets, and
-            whose content is the same results as a JSON list. The
-            agent renders the markdown inline with an ``[also saved:
-            <path>]`` footer.
-
-            On miss / failure: a plain string marker. ``<no results
-            ...>`` if every backend returned empty; ``<search error:
-            rate limited; ...>`` if the upstream is explicitly
-            throttling; ``<search error: backend unavailable after N
-            attempts; ...>`` if all retries failed with transient
-            errors; ``<search error: ...>`` for other failures.
+            Markdown numbered list of `title — url` + snippet. On
+            success a `[{title, url, snippet}]` JSON attachment is
+            also saved alongside; the inline markdown is the complete
+            answer. Markers on miss/failure: `<no results ...>`,
+            `<search error: rate limited; ...>` (back off),
+            `<search error: backend unavailable ...>` (try a
+            different query or fall back to fetch_url),
+            `<search error: ...>` (other).
         """
         if not query or not query.strip():
             return "<query is empty>"
@@ -291,19 +264,16 @@ def register(api):
     def web_search_instant(query: str, related: bool = False) -> str:
         """Hit DuckDuckGo's instant-answer API for a short factual reply.
 
-        Use for definitions, well-known entities, and quick lookups
-        where a list of links would be overkill. Coverage is narrow:
-        most queries return `<no instant answer ...>` — that's the
-        cue to fall back to `web_search` (or to answer from training
-        data without searching at all).
+        Coverage is narrow; expect `<no instant answer ...>` for
+        most queries (the cue to fall back to `web_search`).
 
         Args:
             query: Search query.
             related: If True, append up to 10 related-topic links.
-                Default False — keeps the reply terse.
+                Default False keeps the reply terse.
 
         Returns:
-            A short markdown reply, or `<no instant answer ...>` /
+            Short markdown reply, or `<no instant answer ...>` /
             `<instant-answer error: ...>` on miss/failure.
         """
         if not query or not query.strip():
