@@ -74,6 +74,8 @@ callbacks, the permissions gate, and a la carte feature attach.
 | `ANTHROPIC_API_KEY` | `--model anthropic` | |
 | `OPENAI_API_KEY` | `--model openai` | |
 | `GEMINI_API_KEY` | `--model gemini` | `GOOGLE_API_KEY` is accepted as a fallback. |
+| `OLLAMA_HOST` | `--model ollama/...` | Optional. Default `http://localhost:11434`. Set when Ollama runs on a non-default host or port. |
+| `OLLAMA_MODEL` | `--model ollama` | Optional. Default model when no `/<name>` suffix is given. |
 
 Local Ollama needs no key — just the daemon running and a model pulled.
 
