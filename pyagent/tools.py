@@ -182,7 +182,7 @@ def _denied(path: str) -> str:
 
 
 # Memory tools (read_memory / write_memory / write_user / add_memory /
-# update_memory_hook / recall_memory) live in the bundled memory
+# set_memory_description / recall_memory) live in the bundled memory
 # plugin (pyagent/plugins/memory/). Disabling the plugin removes
 # them entirely — clean replacement surface for alternative memory
 # backends.

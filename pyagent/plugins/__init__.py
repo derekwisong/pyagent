@@ -265,6 +265,12 @@ class _PluginState:
 
     manifest: Manifest
     tools: dict[str, Callable[..., Any]] = field(default_factory=dict)
+    # Tools registered with role_only=True. Tracked separately so the
+    # agent bootstrap can skip them for root agents (no allowlist) and
+    # only add them to subagents/role-invocations whose allowlist
+    # explicitly names them. The names also appear in `tools` so the
+    # rich missing-tool error can cite the providing plugin.
+    role_only_tools: dict[str, Callable[..., Any]] = field(default_factory=dict)
     sections: list[_RegisteredSection] = field(default_factory=list)
     providers: dict[str, _RegisteredProvider] = field(default_factory=dict)
     on_start_hooks: list[Callable] = field(default_factory=list)
@@ -452,8 +458,22 @@ class PluginAPI:
                 "registration must happen synchronously inside register()"
             )
 
-    def register_tool(self, name: str, fn: Callable) -> None:
-        """Register a Python function as an LLM tool."""
+    def register_tool(
+        self, name: str, fn: Callable, *, role_only: bool = False
+    ) -> None:
+        """Register a Python function as an LLM tool.
+
+        ``role_only=True`` keeps the tool out of the root agent's
+        default tool set: it registers normally (the rich
+        missing-tool error can still cite the plugin), but the agent
+        bootstrap only adds it to an agent whose role allowlist
+        explicitly names it. Use for capabilities that should only
+        be available within a specific role — e.g.
+        ``delete_memory`` exposed only to a memory-curator role,
+        with the working agent never seeing it. Default ``False``
+        matches the original behavior: the tool is added to every
+        agent that loads the plugin.
+        """
         self._check_open("register_tool")
         if name in self._state.tools:
             raise ValueError(
@@ -461,6 +481,8 @@ class PluginAPI:
                 f"tool {name!r} during this register() call"
             )
         self._state.tools[name] = fn
+        if role_only:
+            self._state.role_only_tools[name] = fn
 
     def register_provider(
         self,
@@ -1005,6 +1027,12 @@ class LoadedPlugins:
     # by `_resolve_conflicts` at end of load(). Plugin-private — not
     # exposed mutably; consumers use tools() / sections().
     _resolved_tools: dict[str, tuple[str, Callable]] = field(default_factory=dict)
+    # Names of resolved tools registered with role_only=True. Tracked
+    # separately so agent_proc can skip them for root agents and add
+    # them only when an allowlist explicitly names them. The names
+    # are still in `_resolved_tools` so the rich missing-tool error
+    # works uniformly.
+    _resolved_role_only: set[str] = field(default_factory=set)
     _resolved_sections: list[_RegisteredSection] = field(default_factory=list)
     _resolved_providers: dict[str, _RegisteredProvider] = field(
         default_factory=dict
@@ -1046,8 +1074,20 @@ class LoadedPlugins:
         """Effective tool name → (plugin_name, fn) after conflict
         resolution. First plugin to register wins; later duplicates
         skipped. Returns an immutable view; mutating would corrupt
-        agent state."""
+        agent state.
+
+        Includes ``role_only=True`` tools too — the gating is the
+        agent bootstrap's job, not the loader's. Use
+        ``role_only_tool_names()`` to discriminate."""
         return MappingProxyType(self._resolved_tools)
+
+    def role_only_tool_names(self) -> frozenset[str]:
+        """Set of resolved-tool names that were registered with
+        ``role_only=True``. Agent bootstrap consults this so the
+        root agent (no allowlist) never sees them; subagents and
+        role-invoked top-level agents whose allowlist explicitly
+        names a role-only tool do."""
+        return frozenset(self._resolved_role_only)
 
     def sections(self) -> tuple[_RegisteredSection, ...]:
         """All effective prompt sections, in registration order.
@@ -1082,6 +1122,8 @@ class LoadedPlugins:
                     state.manifest.name,
                     fn,
                 )
+                if tool_name in state.role_only_tools:
+                    self._resolved_role_only.add(tool_name)
             for section in state.sections:
                 if section.name in seen_sections:
                     logger.warning(

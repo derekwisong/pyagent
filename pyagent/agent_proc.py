@@ -635,7 +635,7 @@ def _register_tools(
     _add("kill_process", agent_tools.kill_process, auto_offload=False)
     _add("fetch_url", agent_tools.fetch_url)
     # Memory tools (read_memory / write_memory / write_user /
-    # add_memory / update_memory_hook / recall_memory) come from
+    # add_memory / set_memory_description / recall_memory) come from
     # the bundled memory plugin (see pyagent/plugins/memory/).
     # Disabling that plugin removes the tools entirely — clean
     # replacement surface for alternative memory backends.
@@ -841,6 +841,10 @@ def _bootstrap(
             primer=Path(config["primer_path"]),
             skills_catalog=skills_mod.live_catalog,
             roles_catalog=catalog_for_roles,
+            # Top-level `--role <name>` invocations layer the role's
+            # persona body onto the universal SOUL/TOOLS/PRIMER, the
+            # same way subagents do. Empty when --role wasn't passed.
+            role_body=config.get("role_body", ""),
             plugin_loader=loaded_plugins,
         )
 
@@ -914,7 +918,14 @@ def _bootstrap(
 
     # Register plugin tools. Built-ins win on conflict — a plugin that
     # tries to claim a built-in tool name is logged and skipped.
+    # Tools registered with role_only=True are gated: root agents
+    # (allowlist is None) never see them; subagents and role-invoked
+    # top-level agents only get them if their allowlist explicitly
+    # names the tool. The name still appears in declared_tool_provenance
+    # so the rich missing-tool error names the providing plugin
+    # consistently.
     builtin_names = set(agent.tools.keys())
+    role_only = loaded_plugins.role_only_tool_names()
     for tool_name, (plugin_name, fn) in loaded_plugins.tools().items():
         if tool_name in builtin_names:
             logger.warning(
@@ -922,6 +933,10 @@ def _bootstrap(
                 plugin_name,
                 tool_name,
             )
+            continue
+        if tool_name in role_only and (
+            allowlist is None or tool_name not in allowlist
+        ):
             continue
         agent.add_tool(tool_name, fn)
 

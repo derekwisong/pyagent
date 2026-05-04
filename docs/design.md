@@ -41,7 +41,7 @@ Built-in tools shipped with pyagent:
 HTML tools (`html_to_md` / `html_select`) come from the bundled
 `html-tools` plugin and operate on saved attachments (or any local
 HTML file). Memory tools (`add_memory`, `read_memory`, `write_memory`,
-`write_user`, `update_memory_hook`, `recall_memory`) come from the
+`write_user`, `set_memory_description`, `recall_memory`) come from the
 bundled `memory` plugin. Other bundled plugins (`code-mapper`,
 `web-search`, `reddit-search`, `hn-search`, `claude-code-cli`,
 `doc-tools`) register additional tools — see
@@ -95,7 +95,7 @@ Long-term memory is provided by the bundled **`memory`** plugin.
   `created_at` YAML frontmatter the read tools strip on the way out.
 - **Tools:** `add_memory` writes the body and updates the index in
   one atomic call. `read_memory(file)` fetches a body. `write_memory`
-  and `write_user` overwrite an existing body or USER. `update_memory_hook`
+  and `write_user` overwrite an existing body or USER. `set_memory_description`
   retunes one bullet line in MEMORY.md without rewriting the index.
 - **Recall:** `recall_memory(query, ...)` runs cosine search over an
   L2-normalized vector index built with fastembed (BGE-small-en-v1.5).

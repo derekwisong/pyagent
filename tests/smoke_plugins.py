@@ -678,7 +678,7 @@ def test_bundled_memory_loads() -> None:
             "write_memory",
             "write_user",
             "add_memory",
-            "update_memory_hook",
+            "set_memory_description",
             "recall_memory",
         ):
             assert t in loaded.tools(), (t, sorted(loaded.tools()))
@@ -855,9 +855,9 @@ def test_recall_memory() -> None:
 def test_add_memory_tool() -> None:
     """add_memory writes body + inserts the index line in one call.
     Covers: new category, case-insensitive append, "(no memories yet)"
-    strip, collision rejection, empty hook, default-filename derive,
-    frontmatter on disk, content/title/category newline rejection,
-    round trip via read_memory."""
+    strip, collision rejection, empty description, default-filename
+    derive, frontmatter on disk, content/title/category newline
+    rejection, round trip via read_memory."""
     cfg, restore = _isolated_config_dir()
     try:
         (cfg / "config.toml").write_text(
@@ -876,7 +876,7 @@ def test_add_memory_tool() -> None:
                 "Deterministic update order or retry-with-backoff.\n"
             ),
             filename="pg_deadlock.md",
-            hook="FK + concurrent update → SHARE-lock deadlock",
+            description="FK + concurrent update → SHARE-lock deadlock",
         )
         assert "saved pg_deadlock.md under 'Database'" == result, result
 
@@ -902,7 +902,7 @@ def test_add_memory_tool() -> None:
             title="Connection pool sizing",
             content="# pool sizing\n\nrule of thumb...\n",
             filename="pool_sizing.md",
-            hook="cpu_count * 2 + spindle_count",
+            description="cpu_count * 2 + spindle_count",
         )
         index2 = index_path.read_text()
         db_headings = [
@@ -921,7 +921,7 @@ def test_add_memory_tool() -> None:
         )
         assert err.startswith("<filename collision"), err
 
-        # Empty hook is allowed; bullet has no em-dash.
+        # Empty description is allowed; bullet has no em-dash.
         add_memory(
             category="Style",
             title="Naming",
@@ -974,15 +974,15 @@ def test_add_memory_tool() -> None:
         )
         assert "title contains a newline" in bad_title, bad_title
 
-        # Newline in hook rejected.
-        bad_hook = add_memory(
+        # Newline in description rejected.
+        bad_desc = add_memory(
             category="Style",
             title="ok",
             content="x",
-            filename="hook_test.md",
-            hook="line\nbreak",
+            filename="desc_test.md",
+            description="line\nbreak",
         )
-        assert "hook contains a newline" in bad_hook, bad_hook
+        assert "description contains a newline" in bad_desc, bad_desc
 
         # Drift guard: "Styles" close to existing "Style" is refused.
         drift = add_memory(
@@ -1009,8 +1009,8 @@ def test_add_memory_tool() -> None:
         restore()
 
 
-def test_update_memory_hook() -> None:
-    """update_memory_hook surgically edits the hook portion of one
+def test_set_memory_description() -> None:
+    """set_memory_description surgically edits the description on one
     bullet in MEMORY.md, leaving everything else (and other bullets)
     untouched."""
     cfg, restore = _isolated_config_dir()
@@ -1020,41 +1020,39 @@ def test_update_memory_hook() -> None:
         )
         loaded = plugins_mod.load(is_subagent=False)
         _, add_memory = loaded.tools()["add_memory"]
-        _, update_memory_hook = loaded.tools()["update_memory_hook"]
+        _, set_memory_description = loaded.tools()["set_memory_description"]
 
         add_memory(
             category="Style",
             title="UV vs poetry",
             content="# uv\n\nFaster, lockfile-compatible.\n",
             filename="uv_choice.md",
-            hook="Notes on uv",
+            description="Notes on uv",
         )
         add_memory(
             category="Style",
             title="Naming",
             content="# naming\n\nsnake_case for vars.\n",
             filename="naming.md",
-            hook="variable conventions",
+            description="variable conventions",
         )
 
-        result = update_memory_hook(
+        result = set_memory_description(
             filename="uv_choice.md",
-            new_hook="Why we picked uv over poetry — perf + lockfile",
+            description="Why we picked uv over poetry — perf + lockfile",
         )
-        assert "updated hook for uv_choice.md" == result, result
+        assert "updated description for uv_choice.md" == result, result
 
         index = (
             cfg / "plugins" / "memory" / "MEMORY.md"
         ).read_text()
-        # New hook is in place.
         assert "Why we picked uv over poetry" in index, index
-        # Old generic hook is gone.
         assert "Notes on uv" not in index, index
         # Other bullets untouched.
         assert "[Naming](naming.md) — variable conventions" in index, index
 
-        # Empty hook clears the trailing portion of the bullet.
-        update_memory_hook(filename="naming.md", new_hook="")
+        # Empty description clears the trailing portion of the bullet.
+        set_memory_description(filename="naming.md", description="")
         index2 = (
             cfg / "plugins" / "memory" / "MEMORY.md"
         ).read_text()
@@ -1064,20 +1062,22 @@ def test_update_memory_hook() -> None:
                 assert ln.rstrip().endswith("(naming.md)"), ln
 
         # Missing file → clear error.
-        miss = update_memory_hook(filename="ghost.md", new_hook="x")
+        miss = set_memory_description(filename="ghost.md", description="x")
         assert miss.startswith("<no bullet for"), miss
 
-        # Newline in new_hook rejected (RISK-2).
-        bad = update_memory_hook(
-            filename="uv_choice.md", new_hook="line\nbreak"
+        # Newline in description rejected.
+        bad = set_memory_description(
+            filename="uv_choice.md", description="line\nbreak"
         )
-        assert "new_hook contains a newline" in bad, bad
+        assert "description contains a newline" in bad, bad
 
         # Bad filename rejected.
-        invalid = update_memory_hook(filename="../escape.md", new_hook="x")
+        invalid = set_memory_description(
+            filename="../escape.md", description="x"
+        )
         assert invalid.startswith("<"), invalid
 
-        print("✓ update_memory_hook: surgical edit, validation, isolation")
+        print("✓ set_memory_description: surgical edit, validation, isolation")
     finally:
         restore()
 
@@ -1165,6 +1165,210 @@ def test_read_memory_strips_frontmatter() -> None:
         assert out2 == "# legacy\n\nbody.\n"
 
         print("✓ read_memory: frontmatter → [created <iso>]; legacy passes through")
+    finally:
+        restore()
+
+
+def test_move_memory() -> None:
+    """move_memory relocates a bullet between categories without
+    touching the body."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        (cfg / "config.toml").write_text(
+            'built_in_plugins_enabled = ["memory"]\n'
+        )
+        loaded = plugins_mod.load(is_subagent=False)
+        _, add_memory = loaded.tools()["add_memory"]
+        _, move_memory = loaded.tools()["move_memory"]
+        _, read_memory = loaded.tools()["read_memory"]
+
+        add_memory(
+            category="Style",
+            title="Misfiled note",
+            content="# misfiled\n\nThis is really a Decision, not Style.\n",
+            filename="misfiled.md",
+            description="really a decision",
+        )
+        body_before = read_memory(file="misfiled.md")
+
+        result = move_memory(
+            filename="misfiled.md",
+            new_category="Decisions",
+        )
+        assert "moved misfiled.md to 'Decisions'" == result, result
+
+        index = (
+            cfg / "plugins" / "memory" / "MEMORY.md"
+        ).read_text()
+        # New category present, bullet under it.
+        assert "## Decisions" in index, index
+        decisions_block = index.split("## Decisions")[1]
+        assert "[Misfiled note](misfiled.md)" in decisions_block, index
+        # Old category gone (Style had only this entry, so the
+        # heading goes with it via the trailing-blank-line cleanup).
+        # If the heading remains it must at least not contain the
+        # bullet.
+        if "## Style" in index:
+            style_block = index.split("## Style")[1].split("##")[0]
+            assert "misfiled.md" not in style_block, index
+
+        # Body untouched.
+        body_after = read_memory(file="misfiled.md")
+        assert body_after == body_before, (body_before, body_after)
+
+        # Drift guard.
+        drift = move_memory(
+            filename="misfiled.md", new_category="Decision"
+        )
+        assert drift.startswith("<new_category 'Decision' is close"), drift
+
+        # Force override.
+        forced = move_memory(
+            filename="misfiled.md",
+            new_category="Decision",
+            force_new_category=True,
+        )
+        assert "moved" in forced, forced
+
+        # Missing bullet.
+        miss = move_memory(filename="ghost.md", new_category="Style")
+        assert miss.startswith("<no bullet"), miss
+
+        print("✓ move_memory: cross-category move, drift guard, body untouched")
+    finally:
+        restore()
+
+
+def test_delete_memory_role_only() -> None:
+    """delete_memory is registered with role_only=True so it shows up
+    in declared_tool_provenance and the loader's role_only_tool_names
+    set, but the bootstrap should keep it out of a root agent's tool
+    list."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        (cfg / "config.toml").write_text(
+            'built_in_plugins_enabled = ["memory"]\n'
+        )
+        loaded = plugins_mod.load(is_subagent=False)
+        # Loader DOES expose delete_memory in tools().
+        assert "delete_memory" in loaded.tools(), sorted(loaded.tools())
+        # And flags it role-only.
+        assert "delete_memory" in loaded.role_only_tool_names()
+        # No other memory tool is role-only.
+        for t in (
+            "read_memory",
+            "write_memory",
+            "add_memory",
+            "set_memory_description",
+            "move_memory",
+            "write_user",
+            "recall_memory",
+        ):
+            assert t not in loaded.role_only_tool_names(), t
+        print("✓ role_only flag: delete_memory tracked separately")
+    finally:
+        restore()
+
+
+def test_delete_memory_orphan_tolerant() -> None:
+    """delete_memory removes whatever exists: bullet only, body only,
+    or both. Refuses only when neither is present."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        (cfg / "config.toml").write_text(
+            'built_in_plugins_enabled = ["memory"]\n'
+        )
+        loaded = plugins_mod.load(is_subagent=False)
+        _, add_memory = loaded.tools()["add_memory"]
+        _, delete_memory = loaded.tools()["delete_memory"]
+
+        # Plant a normal memory (bullet + body).
+        add_memory(
+            category="Style",
+            title="Normal",
+            content="# normal\n",
+            filename="normal.md",
+        )
+        out = delete_memory(filename="normal.md")
+        assert "bullet from MEMORY.md" in out, out
+        assert "memories/normal.md" in out, out
+
+        # Plant another, then orphan the bullet by manually deleting
+        # the body. delete_memory should still strip the bullet.
+        add_memory(
+            category="Style",
+            title="Orphan bullet",
+            content="# x\n",
+            filename="orphan_bullet.md",
+        )
+        body_path = (
+            cfg / "plugins" / "memory" / "memories" / "orphan_bullet.md"
+        )
+        body_path.unlink()
+        out = delete_memory(filename="orphan_bullet.md")
+        assert "bullet from MEMORY.md" in out, out
+        assert "memories/orphan_bullet.md" not in out, out
+
+        # Plant another, then orphan the body by manually editing
+        # MEMORY.md to remove the bullet. delete_memory should still
+        # remove the body file.
+        add_memory(
+            category="Style",
+            title="Orphan body",
+            content="# x\n",
+            filename="orphan_body.md",
+        )
+        index_path = cfg / "plugins" / "memory" / "MEMORY.md"
+        index_text = index_path.read_text()
+        index_text = "\n".join(
+            ln for ln in index_text.splitlines()
+            if "orphan_body.md" not in ln
+        )
+        index_path.write_text(index_text + "\n")
+        out = delete_memory(filename="orphan_body.md")
+        assert "memories/orphan_body.md" in out, out
+        assert "bullet from MEMORY.md" not in out, out
+
+        # Truly nothing → clear error.
+        out = delete_memory(filename="ghost.md")
+        assert out.startswith("<nothing to delete"), out
+
+        print("✓ delete_memory: orphan-tolerant, refuses on nothing")
+    finally:
+        restore()
+
+
+def test_role_only_plugin_tool_gating() -> None:
+    """A plugin tool registered with role_only=True is tracked in
+    role_only_tool_names() and absent from agent.tools when the
+    bootstrap is given allowlist=None (root). When allowlist names
+    the tool, it is added."""
+    cfg, restore = _isolated_config_dir()
+    try:
+        plugin_py = (
+            "def register(api):\n"
+            "    def safe() -> str:\n"
+            '        """Safe."""\n'
+            "        return 'safe'\n"
+            "    def dangerous() -> str:\n"
+            '        """Dangerous."""\n'
+            "        return 'dangerous'\n"
+            "    api.register_tool('safe', safe)\n"
+            "    api.register_tool('dangerous', dangerous, role_only=True)\n"
+        )
+        _write_plugin(
+            cfg / "plugins",
+            dirname="role-only-test",
+            name="role-only-test",
+            provides_tools=["safe", "dangerous"],
+            plugin_py=plugin_py,
+        )
+        loaded = plugins_mod.load()
+        assert "safe" in loaded.tools()
+        assert "dangerous" in loaded.tools()
+        assert "dangerous" in loaded.role_only_tool_names()
+        assert "safe" not in loaded.role_only_tool_names()
+        print("✓ role_only plumbing: registered + tracked + discoverable")
     finally:
         restore()
 
@@ -1346,7 +1550,7 @@ def test_graceful_degradation_when_memory_disabled() -> None:
             "write_memory",
             "write_user",
             "add_memory",
-            "update_memory_hook",
+            "set_memory_description",
             "recall_memory",
         ):
             assert t not in loaded.tools()
@@ -1570,7 +1774,11 @@ def main() -> None:
     test_memory_round_trip()
     test_recall_memory()
     test_add_memory_tool()
-    test_update_memory_hook()
+    test_set_memory_description()
+    test_move_memory()
+    test_delete_memory_role_only()
+    test_delete_memory_orphan_tolerant()
+    test_role_only_plugin_tool_gating()
     test_write_memory_preserves_frontmatter()
     test_read_memory_strips_frontmatter()
     test_atomic_write_helper()

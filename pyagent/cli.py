@@ -1895,6 +1895,16 @@ async def _repl_async(
     help="Skip the confirmation prompt for destructive resets (skills).",
 )
 @click.option(
+    "--role",
+    "role_name",
+    default=None,
+    help="Run the root agent with a named role's persona and tool "
+    "allowlist (e.g. `--role memory-curator`). Roles are loaded from "
+    "the bundled set, <config-dir>/roles/, and ./.pyagent/roles/. "
+    "Without --role the root agent gets the default tool set and no "
+    "role-only tools.",
+)
+@click.option(
     "--verbose",
     "-v",
     is_flag=True,
@@ -1915,6 +1925,7 @@ def main(
     reset_skills: bool,
     reset_all: bool,
     assume_yes: bool,
+    role_name: str | None,
     verbose: bool,
 ) -> None:
     install_traceback(show_locals=False)
@@ -2005,6 +2016,28 @@ def main(
 
     model = _resolve_model(model)
 
+    role_extra: dict[str, Any] = {}
+    if role_name:
+        from pyagent import roles as roles_mod
+
+        roles_dict = roles_mod.load()
+        # Reuse the same case/dash/underscore normalization roles uses
+        # for spawn_subagent lookups, so `--role memory-curator`,
+        # `--role memory_curator`, and `--role MEMORY-CURATOR` all
+        # resolve to the same role.
+        normalized = re.sub(r"[-_]+", "_", role_name.strip().lower())
+        role = roles_dict.get(normalized)
+        if role is None:
+            available = ", ".join(sorted(roles_dict)) or "(none)"
+            raise click.UsageError(
+                f"unknown role {role_name!r}. Available roles: "
+                f"{available}"
+            )
+        role_extra["role_body"] = role.system_prompt
+        role_extra["role_meta_tools"] = role.meta_tools
+        if role.tools is not None:
+            role_extra["role_tools"] = list(role.tools)
+
     cfg = config.load()
     cap_mb = config.resolve_attachment_dir_cap_mb(
         cfg.get("session", {}).get("attachment_dir_cap_mb")
@@ -2037,6 +2070,7 @@ def main(
         "primer_path": str(primer),
         "approved_paths": [str(p) for p in permissions.approved_paths()],
         "attachment_dir_cap_mb": cap_mb,
+        **role_extra,
     }
 
     # spawn (not fork): pickles fresh, doesn't drag the parent's

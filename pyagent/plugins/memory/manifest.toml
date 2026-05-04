@@ -14,7 +14,9 @@ tools = [
   "write_user",
   "write_memory",
   "add_memory",
-  "update_memory_hook",
+  "set_memory_description",
+  "move_memory",
+  "delete_memory",
   "recall_memory",
 ]
 prompt_sections = ["memory-guidance", "user-ledger", "memory-index"]

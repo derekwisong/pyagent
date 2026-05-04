@@ -511,7 +511,7 @@ def register(api):
         title: str,
         content: str,
         filename: str = "",
-        hook: str = "",
+        description: str = "",
         force_new_category: bool = False,
     ) -> str:
         """Add a new memory in one call — body file plus index entry.
@@ -519,8 +519,9 @@ def register(api):
         Writes `memories/<filename>` with `content` (plus a
         `created_at` frontmatter), then inserts a bullet under
         `## <category>` in MEMORY.md. Use for *new* memories;
-        `write_memory` edits existing ones, `update_memory_hook`
-        retunes one bullet without rewriting the index.
+        `write_memory` edits existing ones,
+        `set_memory_description` retunes one bullet without
+        rewriting the index.
 
         Drift guard: a close-but-not-equal `category` is refused
         with a marker pointing at the existing heading. Re-call with
@@ -538,8 +539,10 @@ def register(api):
             filename: Bare filename under `memories/`, lowercase
                 snake_case ASCII ending in `.md`. Empty → derived
                 from `title` (`"Stack choices"` → `stack_choices.md`).
-            hook: One-line description shown after the title in the
-                index. Empty allowed but costs recall accuracy.
+            description: One-line text shown after the title in the
+                index. What future-you reads to decide whether to
+                fetch the body. Empty allowed but costs recall
+                accuracy.
             force_new_category: Skip the drift guard and file under
                 `category` as a new heading.
 
@@ -556,7 +559,7 @@ def register(api):
         err = _validate_inline_field("title", title)
         if err:
             return err
-        err = _validate_inline_field("hook", hook)
+        err = _validate_inline_field("description", description)
         if err:
             return err
 
@@ -626,10 +629,14 @@ def register(api):
         # leaves either the prior index or the new — never a
         # truncated one. Body is already on disk; if the rename
         # fails, the body is recoverable (recall_memory finds it,
-        # or the agent can re-link via update_memory_hook).
+        # or the agent can re-link via set_memory_description).
         bullet = (
             f"- [{title.strip()}]({filename})"
-            + (f" — {hook.strip()}" if hook and hook.strip() else "")
+            + (
+                f" — {description.strip()}"
+                if description and description.strip()
+                else ""
+            )
         )
         new_index = _insert_index_bullet(
             index_text, category.strip(), bullet
@@ -638,18 +645,20 @@ def register(api):
         _atomic_write(index_path, new_index)
         return f"saved {filename} under '{category.strip()}'"
 
-    def update_memory_hook(filename: str, new_hook: str) -> str:
-        """Update the hook line of one bullet in MEMORY.md, in place.
+    def set_memory_description(
+        filename: str, description: str
+    ) -> str:
+        """Set the description on one bullet in MEMORY.md, in place.
 
-        The hook is the description after the title — what future-you
-        reads to decide whether to fetch the body. Use this when a
-        hook is failing recall (generic phrasing, missing distinctive
-        tokens) — far cheaper than re-emitting the whole index via
-        `write_memory`.
+        The description is the text after the title in the index —
+        what future-you reads to decide whether to fetch the body.
+        Reach for this when the description is failing recall
+        (generic phrasing, missing distinctive tokens) — far cheaper
+        than re-emitting the whole index via `write_memory`.
 
         Args:
             filename: Bare memory filename whose bullet to retune.
-            new_hook: Replacement hook text. Empty string clears it.
+            description: Replacement text. Empty string clears it.
 
         Returns:
             Confirmation, or `<...>` error if the bullet isn't found.
@@ -657,7 +666,7 @@ def register(api):
         err = _validate_memory_filename(filename)
         if err:
             return err
-        err = _validate_inline_field("new_hook", new_hook)
+        err = _validate_inline_field("description", description)
         if err:
             return err
 
@@ -669,8 +678,8 @@ def register(api):
         # Locate the bullet by its `](filename)` link target. We
         # don't reparse the bullet as markdown — we splice the
         # trailing portion (after the closing `)`) with the new
-        # hook. Preserves any indentation, bullet style, or list
-        # depth the existing line carries.
+        # description. Preserves any indentation, bullet style, or
+        # list depth the existing line carries.
         needle = f"]({filename})"
         new_lines: list[str] = []
         found = False
@@ -681,8 +690,8 @@ def register(api):
                 continue
             prefix = line[: idx + len(needle)]
             tail = (
-                f" — {new_hook.strip()}"
-                if new_hook and new_hook.strip()
+                f" — {description.strip()}"
+                if description and description.strip()
                 else ""
             )
             new_lines.append(prefix + tail)
@@ -694,7 +703,7 @@ def register(api):
         if not new_text.endswith("\n"):
             new_text += "\n"
         _atomic_write(index_path, new_text)
-        return f"updated hook for {filename}"
+        return f"updated description for {filename}"
 
     # ---- Recall (vector) -------------------------------------------
     #
@@ -956,11 +965,149 @@ def register(api):
         lines.append('Fetch a body with: read_memory(file="<filename>")')
         return "\n".join(lines)
 
+    def move_memory(
+        filename: str,
+        new_category: str,
+        force_new_category: bool = False,
+    ) -> str:
+        """Move a memory's bullet to a different ## category in
+        MEMORY.md. The body file is untouched — only the index
+        changes.
+
+        Drift guard: a close-but-not-equal `new_category` is refused
+        with a marker pointing at the existing heading. Pass
+        `force_new_category=True` to confirm a deliberately new one.
+
+        Args:
+            filename: Bare memory filename whose bullet to move.
+            new_category: Target H2 heading. Created if absent.
+                Existing categories appear in the MEMORY.md section
+                of your prompt.
+            force_new_category: Skip the drift guard and file the
+                bullet under a deliberately new heading.
+
+        Returns:
+            Confirmation, or `<...>` error if the bullet isn't
+            found or the category is rejected.
+        """
+        err = _validate_memory_filename(filename)
+        if err:
+            return err
+        if not new_category or not new_category.strip():
+            return "<new_category is empty>"
+        err = _validate_category(new_category)
+        if err:
+            return err
+
+        index_path = _ledger_path("MEMORY")
+        if not index_path.exists():
+            return "<MEMORY.md not found>"
+        text = index_path.read_text()
+
+        # Drift guard against existing categories (excluding the
+        # current category match — moving from "Style" to "Style"
+        # via case difference shouldn't trip the guard).
+        if not force_new_category:
+            existing_cats = _extract_categories(text)
+            similar = _find_similar_category(
+                new_category, existing_cats
+            )
+            if similar is not None:
+                return (
+                    f"<new_category {new_category!r} is close to "
+                    f"existing category {similar!r} — re-call with "
+                    f"new_category={similar!r} to file under it, "
+                    f"or pass force_new_category=True to confirm a "
+                    f"deliberately new heading>"
+                )
+
+        # Locate and remove the bullet from its current section.
+        needle = f"]({filename})"
+        bullet_line: str | None = None
+        kept_lines: list[str] = []
+        for line in text.splitlines():
+            if bullet_line is None and needle in line:
+                bullet_line = line
+                continue
+            kept_lines.append(line)
+        if bullet_line is None:
+            return f"<no bullet for {filename!r} in MEMORY.md>"
+
+        # Splice the bullet into the new section. _insert_index_bullet
+        # handles "section already exists" vs "create at end" plus
+        # placeholder-stripping; reuse it.
+        rebuilt = "\n".join(kept_lines)
+        new_text = _insert_index_bullet(
+            rebuilt, new_category.strip(), bullet_line
+        )
+        _atomic_write(index_path, new_text)
+        return f"moved {filename} to '{new_category.strip()}'"
+
+    def delete_memory(filename: str) -> str:
+        """Delete a memory: bullet (if present) AND body file (if
+        present). Tolerates orphan state — useful when sweeping a
+        catalog that's drifted out of sync with disk, or when
+        finishing a rename / split that left one side stranded.
+
+        Refuses only if neither the bullet nor the body exists, so
+        the curator gets clear feedback for "nothing to delete here."
+
+        Args:
+            filename: Bare memory filename to remove.
+
+        Returns:
+            Confirmation naming what was actually removed
+            (bullet, body, or both), or `<...>` error.
+        """
+        err = _validate_memory_filename(filename)
+        if err:
+            return err
+
+        index_path = _ledger_path("MEMORY")
+        body_path = _memory_file_path(filename)
+
+        # Strip the bullet line (if present) from MEMORY.md.
+        bullet_removed = False
+        if index_path.exists():
+            text = index_path.read_text()
+            needle = f"]({filename})"
+            kept_lines = []
+            for line in text.splitlines():
+                if not bullet_removed and needle in line:
+                    bullet_removed = True
+                    continue
+                kept_lines.append(line)
+            if bullet_removed:
+                new_text = "\n".join(kept_lines)
+                if not new_text.endswith("\n"):
+                    new_text += "\n"
+                _atomic_write(index_path, new_text)
+
+        body_removed = False
+        if body_path.exists():
+            body_path.unlink()
+            body_removed = True
+
+        if not bullet_removed and not body_removed:
+            return (
+                f"<nothing to delete for {filename!r}: no bullet in "
+                f"MEMORY.md, no body file on disk>"
+            )
+
+        parts: list[str] = []
+        if bullet_removed:
+            parts.append("bullet from MEMORY.md")
+        if body_removed:
+            parts.append(f"memories/{filename}")
+        return f"deleted {' and '.join(parts)}"
+
     api.register_tool("read_memory", read_memory)
     api.register_tool("write_user", write_user)
     api.register_tool("write_memory", write_memory)
     api.register_tool("add_memory", add_memory)
-    api.register_tool("update_memory_hook", update_memory_hook)
+    api.register_tool("set_memory_description", set_memory_description)
+    api.register_tool("move_memory", move_memory)
+    api.register_tool("delete_memory", delete_memory, role_only=True)
     api.register_tool("recall_memory", recall_memory)
 
     # ---- Prompt sections --------------------------------------------

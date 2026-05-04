@@ -263,7 +263,7 @@ breaking the conversation.
 
 `memory-markdown` is the markdown-backed memory ledger ported to the
 plugin API. It provides `add_memory`, `read_memory`, `write_memory`,
-`write_user`, and `update_memory_hook`, plus the USER + MEMORY index
+`write_user`, and `set_memory_description`, plus the USER + MEMORY index
 prompt sections. Disabling it removes the tools entirely — clean
 replacement surface for alternative memory backends. See
 `plugin-memory-migration.md` for historical context on the cutover.
