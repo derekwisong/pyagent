@@ -317,7 +317,15 @@ def _dump_prompt(
 
     for name, fn in builtins:
         _push_schema(name, fn)
+    # Mirror the agent_proc bootstrap: role-only plugin tools never
+    # appear in the root agent's schema list, so don't count them in
+    # the dump either. Otherwise the size footer overstates root's
+    # actual schema cost. (A future --role flag could include them
+    # selectively; today the dump shows the root view.)
+    role_only = loaded.role_only_tool_names()
     for tool_name, (_pname, fn) in loaded.tools().items():
+        if tool_name in role_only:
+            continue
         _push_schema(tool_name, fn)
 
     schemas_block = _json.dumps(all_schemas, indent=2)

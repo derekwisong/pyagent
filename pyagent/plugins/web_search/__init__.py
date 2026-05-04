@@ -314,5 +314,12 @@ def register(api):
             return f"<instant-answer error: {e}>"
         return _search.format_instant_answer(ans, query, related=related)
 
-    api.register_tool("web_search", web_search)
-    api.register_tool("web_search_instant", web_search_instant)
+    # Role-only: keeps these out of the root agent's schema list.
+    # Reach for them via `pyagent --role researcher` (or
+    # spawn_subagent(role="researcher", ...)) — the bundled
+    # researcher role's allowlist names them explicitly. Saves ~900
+    # tokens of schema overhead on every root-agent API call.
+    api.register_tool("web_search", web_search, role_only=True)
+    api.register_tool(
+        "web_search_instant", web_search_instant, role_only=True
+    )

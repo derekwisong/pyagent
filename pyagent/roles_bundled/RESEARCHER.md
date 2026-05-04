@@ -1,6 +1,19 @@
 +++
 meta_tools = false
 description = "Investigates a question end-to-end: fetches sources, cross-references them, returns synthesized findings with citations."
+tools = [
+  "web_search",
+  "web_search_instant",
+  "reddit_search",
+  "hn_search",
+  "fetch_url",
+  "html_select",
+  "html_to_md",
+  "read_file",
+  "list_directory",
+  "grep",
+  "glob",
+]
 +++
 
 # Role: Researcher

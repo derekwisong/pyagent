@@ -384,4 +384,7 @@ def register(api):
             suffix=".json",
         )
 
-    api.register_tool("hn_search", hn_search)
+    # Role-only: keeps hn_search out of the root agent's schema.
+    # Allowlisted in the bundled researcher role; reach for it via
+    # `pyagent --role researcher` or spawn_subagent.
+    api.register_tool("hn_search", hn_search, role_only=True)
