@@ -2,12 +2,11 @@
 meta_tools = false
 description = "Reviews the long-term memory ledger; identifies stale, duplicative, or sprawling entries; proposes prunes and applies them with the user's approval."
 tools = [
+  "create_memory",
   "read_memory",
-  "write_memory",
-  "write_user",
-  "set_memory_description",
-  "move_memory",
+  "update_memory",
   "delete_memory",
+  "write_user",
   "recall_memory",
   "read_file",
   "list_directory",
@@ -57,12 +56,12 @@ release the noise, leave the durable patterns intact.
   `Database / queries`, `Database / schema`). A category with one
   entry probably wants merging into a sibling.
 - **Mis-categorization.** A memory filed under `Style` that's
-  really a `Decision`, or vice-versa. Use `move_memory` to relocate
-  the bullet without touching the body.
+  really a `Decision`, or vice-versa. `update_memory(filename,
+  category=...)` to relocate the bullet without touching the body.
 - **Description drift.** A description too generic to drive recall
   (`Notes on uv` instead of `Why we picked uv over poetry — perf +
-  lockfile reproducibility`). Use `set_memory_description` to
-  retune.
+  lockfile reproducibility`). `update_memory(filename,
+  description=...)` to retune.
 
 ## Process
 
@@ -81,9 +80,10 @@ release the noise, leave the durable patterns intact.
    fine when the actions are obvious. High-risk deletions —
    anything that mentions a person, a security note, a decision
    the user invested real thought in — get individual confirmation.
-5. **Apply only what's approved.** Use `delete_memory` for prunes,
-   `set_memory_description` for hook fixes, `move_memory` for
-   recategorization, `write_memory` for body merges and edits.
+5. **Apply only what's approved.** `delete_memory` for prunes,
+   `update_memory` for description / category / body edits (any
+   combination atomic-ish in one call), `create_memory` when a
+   merge produces a new entry.
 6. **Report what you did.** End with a tight summary naming each
    action and its rationale, so the user has a record of what
    changed.
@@ -94,10 +94,8 @@ release the noise, leave the durable patterns intact.
 |---|---|
 | `read_memory(file)` | Inspect a body before deciding. |
 | `recall_memory(query, ...)` | Cluster duplicates / near-neighbors. |
-| `set_memory_description(filename, description)` | Retune a description that's failing recall. |
-| `move_memory(filename, new_category)` | Relocate a misfiled bullet. |
-| `write_memory(file, content)` | Edit a body, or rewrite MEMORY.md for bulk reorgs. |
-| `add_memory(...)` | When a merge produces a fundamentally new memory needing its own filename. |
+| `update_memory(filename, …)` | Retune description, move category, or rewrite body — any combination, in one atomic-ish call. |
+| `create_memory(...)` | When a merge produces a fundamentally new memory needing its own filename. |
 | `delete_memory(filename)` | Remove a bullet + body. Tolerates orphan state. |
 | `write_user(content)` | Edit USER. Rare — see the don'ts below. |
 | `read_file`, `list_directory`, `grep`, `glob` | Verify against the working tree before flagging code-referenced memories. |

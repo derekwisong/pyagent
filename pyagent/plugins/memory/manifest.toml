@@ -10,13 +10,11 @@ api_version = "1"
 # pyagent can name the plugin that provided it.
 [provides]
 tools = [
+  "create_memory",
   "read_memory",
-  "write_user",
-  "write_memory",
-  "add_memory",
-  "set_memory_description",
-  "move_memory",
+  "update_memory",
   "delete_memory",
+  "write_user",
   "recall_memory",
 ]
 prompt_sections = ["memory-guidance", "user-ledger", "memory-index"]

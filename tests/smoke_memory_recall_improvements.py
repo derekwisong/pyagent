@@ -24,8 +24,10 @@ from pathlib import Path
 from unittest import mock
 
 from pyagent import paths
-from pyagent.plugins.memory_markdown import _validate_memory_filename
-from pyagent.plugins.memory_vector import _filename_search_terms
+from pyagent.plugins.memory import (
+    _filename_search_terms,
+    _validate_memory_filename,
+)
 
 
 def _check_filename_search_terms() -> None:
@@ -81,8 +83,8 @@ def _check_filename_validation_strict_shape() -> None:
 
     # Existing rejection paths still work (regression-guard).
     assert _validate_memory_filename("") == "<memory filename is empty>"
-    assert "no slashes" in _validate_memory_filename("foo/bar.md") or ""
-    assert "no slashes" in _validate_memory_filename("/abs.md") or ""
+    assert "must not contain slashes" in _validate_memory_filename("foo/bar.md") or ""
+    assert "must not be absolute" in _validate_memory_filename("/abs.md") or ""
     assert "invalid" in _validate_memory_filename(".hidden.md") or ""
     assert "must end with .md" in _validate_memory_filename("notmd.txt") or ""
 
@@ -97,11 +99,11 @@ def _check_gather_chunks_includes_filename() -> None:
     a fake memory dir, point the plugin at it, and verify the chunks
     it produces include the filename tokens.
     """
-    from pyagent.plugins import memory_vector as mv_mod
+    from pyagent.plugins import memory as mem_mod
 
     with tempfile.TemporaryDirectory(prefix="pyagent-mem-recall-") as t:
         data_dir = Path(t)
-        plugin_data = data_dir / "plugins" / "memory-markdown"
+        plugin_data = data_dir / "plugins" / "memory"
         plugin_data.mkdir(parents=True)
 
         # Index with one entry, body file matching it. Title and
@@ -120,7 +122,7 @@ def _check_gather_chunks_includes_filename() -> None:
         )
 
         # The plugin reads from `paths.data_dir() / "plugins" /
-        # "memory-markdown"`. Patch paths.data_dir to point at our temp.
+        # "memory"`. Patch paths.data_dir to point at our temp.
         original_data_dir = paths.data_dir
         paths.data_dir = lambda: data_dir  # type: ignore[assignment]
 
@@ -130,15 +132,19 @@ def _check_gather_chunks_includes_filename() -> None:
         captured: dict = {"chunks_fn": None}
 
         class _FakeAPI:
-            user_data_dir = data_dir / "plugins" / "memory-vector"
+            user_data_dir = data_dir / "plugins" / "memory"
+            config_dir = data_dir
 
             def log(self, level, msg):
                 pass
 
-            def register_tool(self, name, fn):
+            def register_tool(self, name, fn, *, role_only=False):
                 pass
 
             def register_prompt_section(self, name, renderer, *, volatile=False):
+                pass
+
+            def on_session_start(self, fn):
                 pass
 
         # The plugin's `register()` defines _gather_chunks inline.
@@ -148,11 +154,11 @@ def _check_gather_chunks_includes_filename() -> None:
         # public end is `recall_memory`. Build the plugin and let
         # it index.
         try:
-            (data_dir / "plugins" / "memory-vector").mkdir(
+            (data_dir / "plugins" / "memory").mkdir(
                 parents=True, exist_ok=True
             )
             api = _FakeAPI()
-            mv_mod.register(api)
+            mem_mod.register(api)
             # `register()` returns synchronously; we just confirmed
             # it doesn't crash on the temp tree. The chunk-text
             # behavior is exercised via `_filename_search_terms`
@@ -166,21 +172,18 @@ def _check_gather_chunks_includes_filename() -> None:
     print("✓ _gather_chunks: register() builds against memory dir without crashing")
 
 
-def _check_add_memory_rejects_drift_filenames() -> None:
-    """End-to-end: add_memory refuses a drift-shaped filename even
+def _check_create_memory_rejects_drift_filenames() -> None:
+    """End-to-end: create_memory refuses a drift-shaped filename even
     if the rest of the args are fine. The new regex check is the
     boundary; this confirms it's wired through."""
-    from pyagent import plugins as plugins_mod
-    import logging
-
     captured: dict = {
         "tools": {},
         "logs": [],
     }
 
     class _FakeAPI:
-        # Module-level data dir for memory-markdown's storage. Use a
-        # tempdir since add_memory will write a body file.
+        # Module-level data dir for memory's storage. Use a
+        # tempdir since create_memory will write a body file.
         _tmp = Path(tempfile.mkdtemp(prefix="pyagent-mem-validate-"))
 
         @property
@@ -194,7 +197,7 @@ def _check_add_memory_rejects_drift_filenames() -> None:
         def log(self, level, msg):
             captured["logs"].append((level, msg))
 
-        def register_tool(self, name, fn):
+        def register_tool(self, name, fn, *, role_only=False):
             captured["tools"][name] = fn
 
         def register_prompt_section(self, name, renderer, *, volatile=False):
@@ -203,35 +206,41 @@ def _check_add_memory_rejects_drift_filenames() -> None:
         def on_session_start(self, fn):
             pass
 
-    from pyagent.plugins.memory_markdown import register as md_register
+    from pyagent.plugins.memory import register as mem_register
 
     api = _FakeAPI()
-    md_register(api)
-    add_memory = captured["tools"]["add_memory"]
+    mem_register(api)
+    create_memory = captured["tools"]["create_memory"]
 
     # Canonical → succeeds.
-    out = add_memory(
-        "Stack",
-        "Why we picked uv",
-        "choices_for_python_packaging.md",
-        "the trade-offs",
-        "We picked uv.",
+    out = create_memory(
+        category="Stack",
+        title="Why we picked uv",
+        content="We picked uv.",
+        filename="choices_for_python_packaging.md",
+        description="the trade-offs",
     )
-    assert "added index entry" in out, out
+    assert "saved" in out, out
 
     # Drift shapes → rejected with the explicit marker.
     for bad in ["MyMemory.md", "Code Style.md", "code-style.md"]:
-        out = add_memory("Stack", "x", bad, "h", "body")
+        out = create_memory(
+            category="Stack",
+            title="x",
+            content="body",
+            filename=bad,
+            description="h",
+        )
         assert out.startswith("<memory filename must be lowercase snake_case"), out
 
-    print("✓ add_memory: rejects drift-shaped filenames before writing")
+    print("✓ create_memory: rejects drift-shaped filenames before writing")
 
 
 def main() -> None:
     _check_filename_search_terms()
     _check_filename_validation_strict_shape()
     _check_gather_chunks_includes_filename()
-    _check_add_memory_rejects_drift_filenames()
+    _check_create_memory_rejects_drift_filenames()
     print("\nALL CHECKS PASSED")
 
 

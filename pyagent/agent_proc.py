@@ -634,11 +634,11 @@ def _register_tools(
     _add("wait_for", agent_tools.wait_for, auto_offload=False)
     _add("kill_process", agent_tools.kill_process, auto_offload=False)
     _add("fetch_url", agent_tools.fetch_url)
-    # Memory tools (read_memory / write_memory / write_user /
-    # add_memory / set_memory_description / recall_memory) come from
-    # the bundled memory plugin (see pyagent/plugins/memory/).
-    # Disabling that plugin removes the tools entirely — clean
-    # replacement surface for alternative memory backends.
+    # Memory tools (create_memory / read_memory / update_memory /
+    # delete_memory / write_user / recall_memory) come from the
+    # bundled memory plugin (see pyagent/plugins/memory/). Disabling
+    # that plugin removes the tools entirely — clean replacement
+    # surface for alternative memory backends.
     # Skill bodies are single-shot reference content: the model reads
     # one to decide what to do next, the next assistant turn records
     # that decision, after which the body is dead weight on every

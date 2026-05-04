@@ -181,11 +181,11 @@ def _denied(path: str) -> str:
     return f"<permission denied (outside workspace): {path}>"
 
 
-# Memory tools (read_memory / write_memory / write_user / add_memory /
-# set_memory_description / recall_memory) live in the bundled memory
-# plugin (pyagent/plugins/memory/). Disabling the plugin removes
-# them entirely — clean replacement surface for alternative memory
-# backends.
+# Memory tools (create_memory / read_memory / update_memory /
+# delete_memory / write_user / recall_memory) live in the bundled
+# memory plugin (pyagent/plugins/memory/). Disabling the plugin
+# removes them entirely — clean replacement surface for alternative
+# memory backends.
 
 
 def read_file(

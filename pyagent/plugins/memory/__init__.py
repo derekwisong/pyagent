@@ -87,7 +87,7 @@ def _get_model():
     fastembed isn't imported until the first recall — it pulls in
     onnxruntime + tokenizers (~150 MB on disk) plus a one-time
     ~130 MB model download on first non-empty recall. Other memory
-    tools (add_memory, read_memory, write_*) don't pay this cost.
+    tools (create_memory, read_memory, update_memory) don't pay this cost.
     """
     global _model
     if _model is None:
@@ -176,7 +176,7 @@ def _find_similar_category(
 
     # If ANY existing category matches case-insensitively, defer to
     # _insert_index_bullet's case-insensitive collapse. Without this
-    # short-circuit, ``add_memory("STYLE")`` against an index that
+    # short-circuit, ``create_memory("STYLE")`` against an index that
     # already has both ``Style`` and ``Code Style`` would trip the
     # subset check on ``Code Style`` and refuse — but the canonical
     # destination is the existing literal-match ``Style``.
@@ -466,74 +466,187 @@ def register(api):
         _atomic_write(target, content)
         return f"updated USER ({len(content)} bytes)"
 
-    def write_memory(file: str, content: str) -> str:
-        """Overwrite an existing memory body, or the MEMORY.md catalog.
+    def update_memory(
+        filename: str,
+        content: str | None = None,
+        description: str | None = None,
+        category: str | None = None,
+        confirm_new_category: bool = False,
+    ) -> str:
+        """Update fields of an existing memory.
 
-        For a body, pass the filename. To create a *new* memory
-        (body + index entry in one call), use `add_memory`. To
-        rewrite the MEMORY.md catalog itself (rare; consolidation),
-        pass `file=""`.
+        Edit body content, the description shown beside the title in
+        MEMORY.md, the category the bullet is filed under, or any
+        combination — the filename keys the existing memory. At
+        least one of `content`, `description`, or `category` must
+        be set.
 
-        When editing a body, an existing `created_at` frontmatter is
-        preserved if `content` doesn't carry one — agents revising
-        bodies rarely re-emit the YAML.
+        Body writes preserve the existing `created_at` frontmatter
+        when the new content lacks one (agents revising a body
+        rarely re-emit the YAML). Index updates are atomic via
+        temp-then-rename. Body and index writes happen in sequence;
+        a crash between them leaves the body in its newer state and
+        the index in its prior state, recoverable via a follow-up
+        `update_memory` call.
+
+        Drift guard fires on `category`: a close-but-not-equal new
+        heading is refused with a marker pointing at the existing
+        match. Pass `confirm_new_category=True` to acknowledge that
+        the new heading is deliberate.
 
         Args:
-            file: Bare memory filename under `memories/`, OR empty
-                string to overwrite MEMORY.md.
-            content: Full new content.
+            filename: Bare memory filename whose entry to update.
+            content: New body markdown (full overwrite). Existing
+                `created_at` frontmatter preserved when absent.
+            description: New text after the title in the index
+                bullet. Empty string clears it.
+            category: New `## <heading>` for the bullet. The bullet
+                is moved (not cloned) from its current section.
+            confirm_new_category: Acknowledge a category that's
+                close to an existing one. Required to bypass the
+                drift guard.
+
+        Returns:
+            Confirmation listing what changed, or `<...>` error.
         """
-        if not file or not file.strip():
-            target = _ledger_path("MEMORY")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_write(target, content)
-            return f"updated MEMORY.md ({len(content)} bytes)"
-        err = _validate_memory_filename(file)
+        err = _validate_memory_filename(filename)
         if err:
             return err
-        target = _memory_file_path(file)
+        if content is None and description is None and category is None:
+            return (
+                "<update_memory needs at least one of `content`, "
+                "`description`, or `category` to be set>"
+            )
+        if description is not None:
+            err = _validate_inline_field("description", description)
+            if err:
+                return err
+        if category is not None:
+            if not category.strip():
+                return "<category is empty>"
+            err = _validate_category(category)
+            if err:
+                return err
 
-        final = content
-        if target.exists():
-            old_meta, _ = _split_frontmatter(target.read_text())
+        body_path = _memory_file_path(filename)
+        index_path = _ledger_path("MEMORY")
+        if not index_path.exists():
+            return "<MEMORY.md not found>"
+        index_text = index_path.read_text()
+
+        needle = f"]({filename})"
+        bullet_present = needle in index_text
+        if (description is not None or category is not None) and not bullet_present:
+            return f"<no bullet for {filename!r} in MEMORY.md>"
+
+        if category is not None and not confirm_new_category:
+            existing_cats = _extract_categories(index_text)
+            similar = _find_similar_category(category, existing_cats)
+            if similar is not None:
+                return (
+                    f"<category {category!r} is close to existing "
+                    f"category {similar!r} — re-call with "
+                    f"category={similar!r} to file under it, or pass "
+                    f"confirm_new_category=True to acknowledge a "
+                    f"deliberately new heading>"
+                )
+
+        actions: list[str] = []
+
+        # Body update first, since a failed index write afterwards
+        # can be retried via update_memory; a failed body write
+        # before any index touch leaves the index untouched.
+        if content is not None:
+            if not body_path.exists():
+                return f"<body memories/{filename} not found>"
+            old_meta, _ = _split_frontmatter(body_path.read_text())
             new_meta, new_body = _split_frontmatter(content)
             if not new_meta and old_meta:
                 if not new_body.endswith("\n"):
                     new_body = new_body + "\n"
                 final = _format_frontmatter(old_meta) + new_body
+            else:
+                final = (
+                    content if content.endswith("\n") else content + "\n"
+                )
+            body_path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write(body_path, final)
+            actions.append("body")
 
-        target.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(target, final)
-        return f"updated {file} ({len(final)} bytes)"
+        # Index update: rewrite the bullet's description (in place)
+        # then relocate (between sections) if both fields set. Order
+        # matters because relocation moves the bullet line as a
+        # whole — including any description we just spliced into it.
+        if description is not None or category is not None:
+            new_index = index_text
+            if description is not None:
+                rewritten: list[str] = []
+                for line in new_index.splitlines():
+                    idx = line.find(needle)
+                    if idx == -1:
+                        rewritten.append(line)
+                        continue
+                    prefix = line[: idx + len(needle)]
+                    tail = (
+                        f" — {description.strip()}"
+                        if description and description.strip()
+                        else ""
+                    )
+                    rewritten.append(prefix + tail)
+                new_index = "\n".join(rewritten)
+                if not new_index.endswith("\n"):
+                    new_index += "\n"
+                actions.append("description")
 
-    def add_memory(
+            if category is not None:
+                bullet_line: str | None = None
+                kept: list[str] = []
+                for line in new_index.splitlines():
+                    if bullet_line is None and needle in line:
+                        bullet_line = line
+                        continue
+                    kept.append(line)
+                if bullet_line is None:
+                    return f"<no bullet for {filename!r} in MEMORY.md>"
+                rebuilt = "\n".join(kept)
+                new_index = _insert_index_bullet(
+                    rebuilt, category.strip(), bullet_line
+                )
+                actions.append(f"category → '{category.strip()}'")
+
+            _atomic_write(index_path, new_index)
+
+        return f"updated {filename}: {', '.join(actions)}"
+
+    def create_memory(
         category: str,
         title: str,
         content: str,
         filename: str = "",
         description: str = "",
-        force_new_category: bool = False,
+        confirm_new_category: bool = False,
     ) -> str:
-        """Add a new memory in one call — body file plus index entry.
+        """Create a new memory in one call — body file plus index
+        entry.
 
         Writes `memories/<filename>` with `content` (plus a
-        `created_at` frontmatter), then inserts a bullet under
-        `## <category>` in MEMORY.md. Use for *new* memories;
-        `write_memory` edits existing ones,
-        `set_memory_description` retunes one bullet without
-        rewriting the index.
+        `created_at` frontmatter the read tools strip on the way
+        out), then inserts a bullet under `## <category>` in
+        MEMORY.md. Use for *new* memories; `update_memory` edits an
+        existing one, `delete_memory` removes one (curator role
+        only).
 
         Drift guard: a close-but-not-equal `category` is refused
         with a marker pointing at the existing heading. Re-call with
-        that heading, or pass `force_new_category=True` to confirm a
-        deliberately new one. Existing categories appear in the
-        MEMORY.md section of your prompt.
+        that heading, or pass `confirm_new_category=True` to
+        acknowledge a deliberately new one. Existing categories
+        appear in the MEMORY.md section of your prompt.
 
         Args:
             category: H2 section ("Database", "Style", "Gotchas",
                 etc). Matched case-insensitively against existing
                 headings; close-but-not-equal matches refused unless
-                `force_new_category=True`.
+                `confirm_new_category=True`.
             title: Short topical name; the link text in the index.
             content: Full body markdown for the new memory.
             filename: Bare filename under `memories/`, lowercase
@@ -543,8 +656,9 @@ def register(api):
                 index. What future-you reads to decide whether to
                 fetch the body. Empty allowed but costs recall
                 accuracy.
-            force_new_category: Skip the drift guard and file under
-                `category` as a new heading.
+            confirm_new_category: Acknowledge a category that's
+                close to an existing one. Required to bypass the
+                drift guard.
 
         Returns:
             Confirmation, or `<...>` error/warning marker.
@@ -593,7 +707,7 @@ def register(api):
                 f'filename, or call read_memory("{filename}") to '
                 "inspect what is there>"
             )
-        if not force_new_category:
+        if not confirm_new_category:
             existing_cats = _extract_categories(index_text)
             similar = _find_similar_category(category, existing_cats)
             if similar is not None:
@@ -601,7 +715,7 @@ def register(api):
                     f"<category {category!r} is close to existing "
                     f"category {similar!r} — re-call with "
                     f"category={similar!r} to file under it, or pass "
-                    f"force_new_category=True to confirm a "
+                    f"confirm_new_category=True to acknowledge a "
                     f"deliberately new heading>"
                 )
 
@@ -629,7 +743,7 @@ def register(api):
         # leaves either the prior index or the new — never a
         # truncated one. Body is already on disk; if the rename
         # fails, the body is recoverable (recall_memory finds it,
-        # or the agent can re-link via set_memory_description).
+        # or the agent can re-link via update_memory).
         bullet = (
             f"- [{title.strip()}]({filename})"
             + (
@@ -644,66 +758,6 @@ def register(api):
         index_path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(index_path, new_index)
         return f"saved {filename} under '{category.strip()}'"
-
-    def set_memory_description(
-        filename: str, description: str
-    ) -> str:
-        """Set the description on one bullet in MEMORY.md, in place.
-
-        The description is the text after the title in the index —
-        what future-you reads to decide whether to fetch the body.
-        Reach for this when the description is failing recall
-        (generic phrasing, missing distinctive tokens) — far cheaper
-        than re-emitting the whole index via `write_memory`.
-
-        Args:
-            filename: Bare memory filename whose bullet to retune.
-            description: Replacement text. Empty string clears it.
-
-        Returns:
-            Confirmation, or `<...>` error if the bullet isn't found.
-        """
-        err = _validate_memory_filename(filename)
-        if err:
-            return err
-        err = _validate_inline_field("description", description)
-        if err:
-            return err
-
-        index_path = _ledger_path("MEMORY")
-        if not index_path.exists():
-            return "<MEMORY.md not found>"
-        text = index_path.read_text()
-
-        # Locate the bullet by its `](filename)` link target. We
-        # don't reparse the bullet as markdown — we splice the
-        # trailing portion (after the closing `)`) with the new
-        # description. Preserves any indentation, bullet style, or
-        # list depth the existing line carries.
-        needle = f"]({filename})"
-        new_lines: list[str] = []
-        found = False
-        for line in text.splitlines():
-            idx = line.find(needle)
-            if idx == -1:
-                new_lines.append(line)
-                continue
-            prefix = line[: idx + len(needle)]
-            tail = (
-                f" — {description.strip()}"
-                if description and description.strip()
-                else ""
-            )
-            new_lines.append(prefix + tail)
-            found = True
-        if not found:
-            return f"<no bullet for {filename!r} in MEMORY.md>"
-
-        new_text = "\n".join(new_lines)
-        if not new_text.endswith("\n"):
-            new_text += "\n"
-        _atomic_write(index_path, new_text)
-        return f"updated description for {filename}"
 
     # ---- Recall (vector) -------------------------------------------
     #
@@ -965,84 +1019,6 @@ def register(api):
         lines.append('Fetch a body with: read_memory(file="<filename>")')
         return "\n".join(lines)
 
-    def move_memory(
-        filename: str,
-        new_category: str,
-        force_new_category: bool = False,
-    ) -> str:
-        """Move a memory's bullet to a different ## category in
-        MEMORY.md. The body file is untouched — only the index
-        changes.
-
-        Drift guard: a close-but-not-equal `new_category` is refused
-        with a marker pointing at the existing heading. Pass
-        `force_new_category=True` to confirm a deliberately new one.
-
-        Args:
-            filename: Bare memory filename whose bullet to move.
-            new_category: Target H2 heading. Created if absent.
-                Existing categories appear in the MEMORY.md section
-                of your prompt.
-            force_new_category: Skip the drift guard and file the
-                bullet under a deliberately new heading.
-
-        Returns:
-            Confirmation, or `<...>` error if the bullet isn't
-            found or the category is rejected.
-        """
-        err = _validate_memory_filename(filename)
-        if err:
-            return err
-        if not new_category or not new_category.strip():
-            return "<new_category is empty>"
-        err = _validate_category(new_category)
-        if err:
-            return err
-
-        index_path = _ledger_path("MEMORY")
-        if not index_path.exists():
-            return "<MEMORY.md not found>"
-        text = index_path.read_text()
-
-        # Drift guard against existing categories (excluding the
-        # current category match — moving from "Style" to "Style"
-        # via case difference shouldn't trip the guard).
-        if not force_new_category:
-            existing_cats = _extract_categories(text)
-            similar = _find_similar_category(
-                new_category, existing_cats
-            )
-            if similar is not None:
-                return (
-                    f"<new_category {new_category!r} is close to "
-                    f"existing category {similar!r} — re-call with "
-                    f"new_category={similar!r} to file under it, "
-                    f"or pass force_new_category=True to confirm a "
-                    f"deliberately new heading>"
-                )
-
-        # Locate and remove the bullet from its current section.
-        needle = f"]({filename})"
-        bullet_line: str | None = None
-        kept_lines: list[str] = []
-        for line in text.splitlines():
-            if bullet_line is None and needle in line:
-                bullet_line = line
-                continue
-            kept_lines.append(line)
-        if bullet_line is None:
-            return f"<no bullet for {filename!r} in MEMORY.md>"
-
-        # Splice the bullet into the new section. _insert_index_bullet
-        # handles "section already exists" vs "create at end" plus
-        # placeholder-stripping; reuse it.
-        rebuilt = "\n".join(kept_lines)
-        new_text = _insert_index_bullet(
-            rebuilt, new_category.strip(), bullet_line
-        )
-        _atomic_write(index_path, new_text)
-        return f"moved {filename} to '{new_category.strip()}'"
-
     def delete_memory(filename: str) -> str:
         """Delete a memory: bullet (if present) AND body file (if
         present). Tolerates orphan state — useful when sweeping a
@@ -1101,13 +1077,11 @@ def register(api):
             parts.append(f"memories/{filename}")
         return f"deleted {' and '.join(parts)}"
 
+    api.register_tool("create_memory", create_memory)
     api.register_tool("read_memory", read_memory)
-    api.register_tool("write_user", write_user)
-    api.register_tool("write_memory", write_memory)
-    api.register_tool("add_memory", add_memory)
-    api.register_tool("set_memory_description", set_memory_description)
-    api.register_tool("move_memory", move_memory)
+    api.register_tool("update_memory", update_memory)
     api.register_tool("delete_memory", delete_memory, role_only=True)
+    api.register_tool("write_user", write_user)
     api.register_tool("recall_memory", recall_memory)
 
     # ---- Prompt sections --------------------------------------------
@@ -1143,7 +1117,7 @@ def register(api):
 
         When the index has many headings, prepend a one-line
         ``Categories in use: ...`` summary so the agent can scan
-        available categories before picking one for ``add_memory``
+        available categories before picking one for ``create_memory``
         without parsing the full bulleted detail. The summary is
         synthesized at render time only — the source MEMORY.md
         file stays clean so ``write_memory`` round-trips don't

@@ -674,11 +674,11 @@ def test_bundled_memory_loads() -> None:
         names = [s.manifest.name for s in loaded.states]
         assert "memory" in names, f"expected memory in {names}"
         for t in (
+            "create_memory",
             "read_memory",
-            "write_memory",
+            "update_memory",
+            "delete_memory",
             "write_user",
-            "add_memory",
-            "set_memory_description",
             "recall_memory",
         ):
             assert t in loaded.tools(), (t, sorted(loaded.tools()))
@@ -697,9 +697,8 @@ def test_bundled_memory_loads() -> None:
 
 
 def test_memory_round_trip() -> None:
-    """write_memory(file, content) creates memories/<file>;
-    read_memory(file) returns it. Validates filename rejection,
-    write_user / write_memory(file="") for USER and catalog."""
+    """create_memory + read_memory + update_memory(content=)
+    round-trip; write_user for USER; filename validation."""
     cfg, restore = _isolated_config_dir()
     try:
         (cfg / "config.toml").write_text(
@@ -707,20 +706,32 @@ def test_memory_round_trip() -> None:
         )
         loaded = plugins_mod.load(is_subagent=False)
         _, read_memory = loaded.tools()["read_memory"]
-        _, write_memory = loaded.tools()["write_memory"]
+        _, create_memory = loaded.tools()["create_memory"]
+        _, update_memory = loaded.tools()["update_memory"]
         _, write_user = loaded.tools()["write_user"]
 
-        # Body round trip — write a fresh body, read it back.
-        result = write_memory(
-            file="stack_choices.md",
+        # Create a body via create_memory + read it back.
+        result = create_memory(
+            category="Style",
+            title="Stack choices",
             content="# stack choices\nWe use Postgres.\n",
+            filename="stack_choices.md",
         )
-        assert "updated" in result, result
+        assert "saved" in result, result
         body = read_memory(file="stack_choices.md")
         assert "We use Postgres" in body, body
 
         memories_dir = cfg / "plugins" / "memory" / "memories"
         assert (memories_dir / "stack_choices.md").exists()
+
+        # Update body via update_memory(content=).
+        upd = update_memory(
+            filename="stack_choices.md",
+            content="# stack choices v2\n\nWe use Postgres + Redis.\n",
+        )
+        assert "updated stack_choices.md: body" == upd, upd
+        body2 = read_memory(file="stack_choices.md")
+        assert "Postgres + Redis" in body2, body2
 
         # Missing memory returns a clear error.
         missing = read_memory(file="not_there.md")
@@ -732,32 +743,21 @@ def test_memory_round_trip() -> None:
         assert (cfg / "plugins" / "memory" / "USER.md").read_text() \
             == "prefers tabs over spaces\n"
 
-        # Catalog overwrite via write_memory(file="").
-        catalog = write_memory(
-            file="",
-            content="# Memory\n\n## Style\n- [Naming](naming.md)\n",
-        )
-        assert "MEMORY.md" in catalog, catalog
-
         # Path traversal / invalid filename rejected via read_memory.
         for bad in ("../escape.md", "sub/dir.md", "..", ".hidden.md"):
             r = read_memory(file=bad)
             assert r.startswith("<"), (bad, r)
 
-        # Non-.md rejected.
         no_ext = read_memory(file="no_ext")
         assert "must end with .md" in no_ext, no_ext
 
-        # Empty filename rejected.
         empty = read_memory(file="")
         assert empty.startswith("<"), empty
 
-        # Validator's split error covers absolute vs slashes
-        # (NIT-3).
         abs_err = read_memory(file="/etc/passwd")
         assert "must not be absolute" in abs_err, abs_err
 
-        print("✓ memory round trip: read_memory / write_memory / write_user")
+        print("✓ memory round trip: create_memory / read_memory / update_memory / write_user")
     finally:
         restore()
 
@@ -852,8 +852,8 @@ def test_recall_memory() -> None:
         restore()
 
 
-def test_add_memory_tool() -> None:
-    """add_memory writes body + inserts the index line in one call.
+def test_create_memory() -> None:
+    """create_memory writes body + inserts the index line in one call.
     Covers: new category, case-insensitive append, "(no memories yet)"
     strip, collision rejection, empty description, default-filename
     derive, frontmatter on disk, content/title/category newline
@@ -864,11 +864,11 @@ def test_add_memory_tool() -> None:
             'built_in_plugins_enabled = ["memory"]\n'
         )
         loaded = plugins_mod.load(is_subagent=False)
-        _, add_memory = loaded.tools()["add_memory"]
+        _, create_memory = loaded.tools()["create_memory"]
         _, read_memory = loaded.tools()["read_memory"]
 
         # First add — creates category, strips "(no memories yet)".
-        result = add_memory(
+        result = create_memory(
             category="Database",
             title="Postgres deadlock from FK locking",
             content=(
@@ -897,7 +897,7 @@ def test_add_memory_tool() -> None:
         assert "retry-with-backoff" in body, body
 
         # Second add — case-insensitive match to existing category.
-        add_memory(
+        create_memory(
             category="database",
             title="Connection pool sizing",
             content="# pool sizing\n\nrule of thumb...\n",
@@ -913,7 +913,7 @@ def test_add_memory_tool() -> None:
         assert "pool_sizing.md" in index2
 
         # Filename collision: index already lists pg_deadlock.md.
-        err = add_memory(
+        err = create_memory(
             category="Database",
             title="duplicate try",
             content="x",
@@ -922,7 +922,7 @@ def test_add_memory_tool() -> None:
         assert err.startswith("<filename collision"), err
 
         # Empty description is allowed; bullet has no em-dash.
-        add_memory(
+        create_memory(
             category="Style",
             title="Naming",
             content="# Naming\n\nsnake_case.\n",
@@ -935,7 +935,7 @@ def test_add_memory_tool() -> None:
                 assert "—" not in ln, ln
 
         # Auto-derive filename when omitted.
-        out = add_memory(
+        out = create_memory(
             category="Style",
             title="Type hint conventions",
             content="# type hints\n\nFavor concrete unions.\n",
@@ -944,7 +944,7 @@ def test_add_memory_tool() -> None:
         assert (memories_dir / "type_hint_conventions.md").exists()
 
         # Filename validation flows through.
-        bad = add_memory(
+        bad = create_memory(
             category="X",
             title="x",
             content="x",
@@ -953,11 +953,11 @@ def test_add_memory_tool() -> None:
         assert bad.startswith("<"), bad
 
         # Empty category rejected.
-        empty_cat = add_memory(category="", title="x", content="x")
+        empty_cat = create_memory(category="", title="x", content="x")
         assert empty_cat.startswith("<category is empty"), empty_cat
 
         # Newline injection in category rejected (RISK-2).
-        bad_cat = add_memory(
+        bad_cat = create_memory(
             category="Style\n## Injected",
             title="x",
             content="x",
@@ -965,17 +965,17 @@ def test_add_memory_tool() -> None:
         assert bad_cat.startswith("<category contains a newline"), bad_cat
 
         # Leading-# in category rejected.
-        hash_cat = add_memory(category="# Heading", title="x", content="x")
+        hash_cat = create_memory(category="# Heading", title="x", content="x")
         assert "cannot start with '#'" in hash_cat, hash_cat
 
         # Newline in title rejected.
-        bad_title = add_memory(
+        bad_title = create_memory(
             category="Style", title="line\nbreak", content="x"
         )
         assert "title contains a newline" in bad_title, bad_title
 
         # Newline in description rejected.
-        bad_desc = add_memory(
+        bad_desc = create_memory(
             category="Style",
             title="ok",
             content="x",
@@ -985,150 +985,169 @@ def test_add_memory_tool() -> None:
         assert "description contains a newline" in bad_desc, bad_desc
 
         # Drift guard: "Styles" close to existing "Style" is refused.
-        drift = add_memory(
+        drift = create_memory(
             category="Styles",
             title="x",
             content="x",
             filename="drift_x.md",
         )
         assert drift.startswith("<category 'Styles' is close to"), drift
-        assert "force_new_category=True" in drift, drift
+        assert "confirm_new_category=True" in drift, drift
 
-        # force_new_category bypasses the drift guard.
-        forced = add_memory(
+        # confirm_new_category bypasses the drift guard.
+        forced = create_memory(
             category="Styles",
             title="x",
             content="x",
             filename="drift_x.md",
-            force_new_category=True,
+            confirm_new_category=True,
         )
         assert "saved" in forced, forced
 
-        print("✓ add_memory: body + index, frontmatter, validation, derive")
+        print("✓ create_memory: body + index, frontmatter, validation, derive")
     finally:
         restore()
 
 
-def test_set_memory_description() -> None:
-    """set_memory_description surgically edits the description on one
-    bullet in MEMORY.md, leaving everything else (and other bullets)
-    untouched."""
+def test_update_memory() -> None:
+    """update_memory(filename, ...) covers description / category /
+    body edits in any combination via filename-keyed CRUD."""
     cfg, restore = _isolated_config_dir()
     try:
         (cfg / "config.toml").write_text(
             'built_in_plugins_enabled = ["memory"]\n'
         )
         loaded = plugins_mod.load(is_subagent=False)
-        _, add_memory = loaded.tools()["add_memory"]
-        _, set_memory_description = loaded.tools()["set_memory_description"]
+        _, create_memory = loaded.tools()["create_memory"]
+        _, update_memory = loaded.tools()["update_memory"]
 
-        add_memory(
+        create_memory(
             category="Style",
             title="UV vs poetry",
-            content="# uv\n\nFaster, lockfile-compatible.\n",
+            content="# uv\n\nFaster.\n",
             filename="uv_choice.md",
             description="Notes on uv",
         )
-        add_memory(
+        create_memory(
             category="Style",
             title="Naming",
-            content="# naming\n\nsnake_case for vars.\n",
+            content="# naming\n\nsnake_case.\n",
             filename="naming.md",
             description="variable conventions",
         )
 
-        result = set_memory_description(
+        index_path = cfg / "plugins" / "memory" / "MEMORY.md"
+        body_path = (
+            cfg / "plugins" / "memory" / "memories" / "uv_choice.md"
+        )
+
+        # No fields set → error.
+        empty = update_memory(filename="uv_choice.md")
+        assert empty.startswith("<update_memory needs at least one"), empty
+
+        # Description only.
+        out = update_memory(
             filename="uv_choice.md",
             description="Why we picked uv over poetry — perf + lockfile",
         )
-        assert "updated description for uv_choice.md" == result, result
-
-        index = (
-            cfg / "plugins" / "memory" / "MEMORY.md"
-        ).read_text()
-        assert "Why we picked uv over poetry" in index, index
-        assert "Notes on uv" not in index, index
+        assert "description" in out, out
+        idx = index_path.read_text()
+        assert "Why we picked uv over poetry" in idx, idx
+        assert "Notes on uv" not in idx, idx
         # Other bullets untouched.
-        assert "[Naming](naming.md) — variable conventions" in index, index
+        assert "[Naming](naming.md) — variable conventions" in idx, idx
 
-        # Empty description clears the trailing portion of the bullet.
-        set_memory_description(filename="naming.md", description="")
-        index2 = (
-            cfg / "plugins" / "memory" / "MEMORY.md"
-        ).read_text()
-        for ln in index2.splitlines():
-            if "naming.md" in ln:
-                assert "—" not in ln, ln
-                assert ln.rstrip().endswith("(naming.md)"), ln
+        # Category only — moves the bullet across sections.
+        out = update_memory(filename="uv_choice.md", category="Decisions")
+        assert "category" in out, out
+        idx = index_path.read_text()
+        assert "## Decisions" in idx, idx
+        decisions_block = idx.split("## Decisions")[1]
+        assert "[UV vs poetry](uv_choice.md)" in decisions_block, idx
 
-        # Missing file → clear error.
-        miss = set_memory_description(filename="ghost.md", description="x")
-        assert miss.startswith("<no bullet for"), miss
-
-        # Newline in description rejected.
-        bad = set_memory_description(
-            filename="uv_choice.md", description="line\nbreak"
+        # Description + category in one call (atomic-ish).
+        out = update_memory(
+            filename="uv_choice.md",
+            description="Tooling choice (perf, lockfile)",
+            category="Architecture",
         )
-        assert "description contains a newline" in bad, bad
+        assert "description" in out and "category" in out, out
+        idx = index_path.read_text()
+        assert "## Architecture" in idx, idx
+        arch_block = idx.split("## Architecture")[1]
+        assert "Tooling choice" in arch_block, idx
 
-        # Bad filename rejected.
-        invalid = set_memory_description(
-            filename="../escape.md", description="x"
-        )
-        assert invalid.startswith("<"), invalid
-
-        print("✓ set_memory_description: surgical edit, validation, isolation")
-    finally:
-        restore()
-
-
-def test_write_memory_preserves_frontmatter() -> None:
-    """write_memory(file=...) on an existing body whose new content
-    lacks frontmatter splices the existing created_at back in. Agents
-    revising a body shouldn't lose the creation date."""
-    cfg, restore = _isolated_config_dir()
-    try:
-        (cfg / "config.toml").write_text(
-            'built_in_plugins_enabled = ["memory"]\n'
-        )
-        loaded = plugins_mod.load(is_subagent=False)
-        _, add_memory = loaded.tools()["add_memory"]
-        _, write_memory = loaded.tools()["write_memory"]
-
-        add_memory(
-            category="Style",
-            title="X",
-            content="# original\n",
-            filename="x.md",
-        )
-        body_path = (
-            cfg / "plugins" / "memory" / "memories" / "x.md"
-        )
+        # Body content with frontmatter preservation.
         original = body_path.read_text()
         assert original.startswith("---\ncreated_at:"), original[:80]
-        original_created = original.split("\n", 2)[1]  # `created_at: ...`
-
-        # Rewrite body — content lacks frontmatter.
-        write_memory(file="x.md", content="# revised\n\nnew content.\n")
+        original_created = original.split("\n", 2)[1]
+        out = update_memory(
+            filename="uv_choice.md",
+            content="# uv revised\n\nnew body content.\n",
+        )
+        assert "body" in out, out
         revised = body_path.read_text()
         assert revised.startswith("---\n"), revised[:80]
         assert original_created in revised, revised
-        assert "new content" in revised, revised
-        assert "original" not in revised, revised
+        assert "new body content" in revised, revised
 
-        # Rewrite with explicit frontmatter — caller's frontmatter is
-        # honored verbatim (allows the agent to set a different
-        # created_at e.g. when migrating old notes).
-        new_frontmatter = "---\ncreated_at: 2020-01-01T00:00:00+00:00\n---\n"
-        write_memory(
-            file="x.md",
-            content=new_frontmatter + "# migrated\n",
+        # Body content with explicit frontmatter — caller's wins.
+        new_fm = "---\ncreated_at: 2020-01-01T00:00:00+00:00\n---\n"
+        update_memory(
+            filename="uv_choice.md", content=new_fm + "# migrated\n"
         )
         migrated = body_path.read_text()
         assert "2020-01-01" in migrated, migrated
         assert original_created not in migrated, migrated
 
-        print("✓ write_memory preserves frontmatter; explicit frontmatter wins")
+        # Drift guard on category.
+        drift = update_memory(filename="uv_choice.md", category="Architectures")
+        assert drift.startswith("<category 'Architectures' is close"), drift
+        assert "confirm_new_category=True" in drift, drift
+
+        # Confirm bypass.
+        forced = update_memory(
+            filename="uv_choice.md",
+            category="Architectures",
+            confirm_new_category=True,
+        )
+        assert "category" in forced, forced
+
+        # Empty description clears the trailing portion of the bullet.
+        update_memory(filename="naming.md", description="")
+        idx = index_path.read_text()
+        for ln in idx.splitlines():
+            if "naming.md" in ln:
+                assert "—" not in ln, ln
+                assert ln.rstrip().endswith("(naming.md)"), ln
+
+        # Missing bullet → clear error (when index-touching fields set).
+        miss = update_memory(filename="ghost.md", description="x")
+        assert miss.startswith("<no bullet for"), miss
+
+        # Missing body → clear error (when content set).
+        miss_body = update_memory(filename="ghost.md", content="x")
+        assert "<body memories/ghost.md not found>" in miss_body, miss_body
+
+        # Newline rejection in description.
+        bad = update_memory(
+            filename="uv_choice.md", description="line\nbreak"
+        )
+        assert "description contains a newline" in bad, bad
+
+        # Newline rejection in category.
+        bad_cat = update_memory(
+            filename="uv_choice.md", category="A\n## B"
+        )
+        assert "category contains a newline" in bad_cat, bad_cat
+
+        # Bad filename rejected.
+        invalid = update_memory(
+            filename="../escape.md", description="x"
+        )
+        assert invalid.startswith("<"), invalid
+
+        print("✓ update_memory: description / category / body / drift / validation")
     finally:
         restore()
 
@@ -1169,76 +1188,6 @@ def test_read_memory_strips_frontmatter() -> None:
         restore()
 
 
-def test_move_memory() -> None:
-    """move_memory relocates a bullet between categories without
-    touching the body."""
-    cfg, restore = _isolated_config_dir()
-    try:
-        (cfg / "config.toml").write_text(
-            'built_in_plugins_enabled = ["memory"]\n'
-        )
-        loaded = plugins_mod.load(is_subagent=False)
-        _, add_memory = loaded.tools()["add_memory"]
-        _, move_memory = loaded.tools()["move_memory"]
-        _, read_memory = loaded.tools()["read_memory"]
-
-        add_memory(
-            category="Style",
-            title="Misfiled note",
-            content="# misfiled\n\nThis is really a Decision, not Style.\n",
-            filename="misfiled.md",
-            description="really a decision",
-        )
-        body_before = read_memory(file="misfiled.md")
-
-        result = move_memory(
-            filename="misfiled.md",
-            new_category="Decisions",
-        )
-        assert "moved misfiled.md to 'Decisions'" == result, result
-
-        index = (
-            cfg / "plugins" / "memory" / "MEMORY.md"
-        ).read_text()
-        # New category present, bullet under it.
-        assert "## Decisions" in index, index
-        decisions_block = index.split("## Decisions")[1]
-        assert "[Misfiled note](misfiled.md)" in decisions_block, index
-        # Old category gone (Style had only this entry, so the
-        # heading goes with it via the trailing-blank-line cleanup).
-        # If the heading remains it must at least not contain the
-        # bullet.
-        if "## Style" in index:
-            style_block = index.split("## Style")[1].split("##")[0]
-            assert "misfiled.md" not in style_block, index
-
-        # Body untouched.
-        body_after = read_memory(file="misfiled.md")
-        assert body_after == body_before, (body_before, body_after)
-
-        # Drift guard.
-        drift = move_memory(
-            filename="misfiled.md", new_category="Decision"
-        )
-        assert drift.startswith("<new_category 'Decision' is close"), drift
-
-        # Force override.
-        forced = move_memory(
-            filename="misfiled.md",
-            new_category="Decision",
-            force_new_category=True,
-        )
-        assert "moved" in forced, forced
-
-        # Missing bullet.
-        miss = move_memory(filename="ghost.md", new_category="Style")
-        assert miss.startswith("<no bullet"), miss
-
-        print("✓ move_memory: cross-category move, drift guard, body untouched")
-    finally:
-        restore()
-
-
 def test_delete_memory_role_only() -> None:
     """delete_memory is registered with role_only=True so it shows up
     in declared_tool_provenance and the loader's role_only_tool_names
@@ -1256,11 +1205,9 @@ def test_delete_memory_role_only() -> None:
         assert "delete_memory" in loaded.role_only_tool_names()
         # No other memory tool is role-only.
         for t in (
+            "create_memory",
             "read_memory",
-            "write_memory",
-            "add_memory",
-            "set_memory_description",
-            "move_memory",
+            "update_memory",
             "write_user",
             "recall_memory",
         ):
@@ -1279,11 +1226,11 @@ def test_delete_memory_orphan_tolerant() -> None:
             'built_in_plugins_enabled = ["memory"]\n'
         )
         loaded = plugins_mod.load(is_subagent=False)
-        _, add_memory = loaded.tools()["add_memory"]
+        _, create_memory = loaded.tools()["create_memory"]
         _, delete_memory = loaded.tools()["delete_memory"]
 
         # Plant a normal memory (bullet + body).
-        add_memory(
+        create_memory(
             category="Style",
             title="Normal",
             content="# normal\n",
@@ -1295,7 +1242,7 @@ def test_delete_memory_orphan_tolerant() -> None:
 
         # Plant another, then orphan the bullet by manually deleting
         # the body. delete_memory should still strip the bullet.
-        add_memory(
+        create_memory(
             category="Style",
             title="Orphan bullet",
             content="# x\n",
@@ -1312,7 +1259,7 @@ def test_delete_memory_orphan_tolerant() -> None:
         # Plant another, then orphan the body by manually editing
         # MEMORY.md to remove the bullet. delete_memory should still
         # remove the body file.
-        add_memory(
+        create_memory(
             category="Style",
             title="Orphan body",
             content="# x\n",
@@ -1546,11 +1493,11 @@ def test_graceful_degradation_when_memory_disabled() -> None:
         # Default fixture state: built_in_plugins_enabled = []
         loaded = plugins_mod.load()
         for t in (
+            "create_memory",
             "read_memory",
-            "write_memory",
+            "update_memory",
+            "delete_memory",
             "write_user",
-            "add_memory",
-            "set_memory_description",
             "recall_memory",
         ):
             assert t not in loaded.tools()
@@ -1773,13 +1720,11 @@ def main() -> None:
     test_bundled_memory_loads()
     test_memory_round_trip()
     test_recall_memory()
-    test_add_memory_tool()
-    test_set_memory_description()
-    test_move_memory()
+    test_create_memory()
+    test_update_memory()
     test_delete_memory_role_only()
     test_delete_memory_orphan_tolerant()
     test_role_only_plugin_tool_gating()
-    test_write_memory_preserves_frontmatter()
     test_read_memory_strips_frontmatter()
     test_atomic_write_helper()
     test_insert_index_bullet_unit()

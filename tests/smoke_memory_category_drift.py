@@ -9,8 +9,8 @@ Locks four behaviors:
      "Style" vs "Code Style" / "Database" vs "Databases" trigger;
      "Style" vs "Stack" doesn't; exact case-insensitive matches
      return None (those collapse via existing matching).
-  3. **`add_memory` refuses close-existing categories**, with an
-     override path via `force_new_category=True`.
+  3. **`create_memory` refuses close-existing categories**, with an
+     override path via `confirm_new_category=True`.
   4. **`render_memory_index` prepends a compact "Categories in use"
      summary** when ≥ 5 categories exist; below threshold, the
      rendered text is unchanged.
@@ -24,12 +24,12 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from pyagent.plugins.memory_markdown import (
+from pyagent.plugins.memory import (
     _CATEGORY_SUMMARY_MIN,
     _extract_categories,
     _find_similar_category,
 )
-from pyagent.plugins.memory_markdown import register as md_register
+from pyagent.plugins.memory import register as md_register
 
 
 def _check_extract_categories() -> None:
@@ -78,9 +78,9 @@ def _check_find_similar_category() -> None:
     print("✓ _find_similar_category: near hits flagged; exact/far ignored")
 
 
-def _check_add_memory_refuses_close_category() -> None:
-    """`add_memory` refuses a close-but-not-equal new category and
-    points at the existing match. `force_new_category=True` overrides.
+def _check_create_memory_refuses_close_category() -> None:
+    """`create_memory` refuses a close-but-not-equal new category and
+    points at the existing match. `confirm_new_category=True` overrides.
     """
     captured: dict = {"tools": {}}
 
@@ -98,7 +98,7 @@ def _check_add_memory_refuses_close_category() -> None:
         def log(self, level, msg):
             pass
 
-        def register_tool(self, name, fn):
+        def register_tool(self, name, fn, *, role_only=False):
             captured["tools"][name] = fn
 
         def register_prompt_section(self, name, renderer, *, volatile=False):
@@ -109,63 +109,71 @@ def _check_add_memory_refuses_close_category() -> None:
 
     api = _FakeAPI()
     md_register(api)
-    add_memory = captured["tools"]["add_memory"]
+    create_memory = captured["tools"]["create_memory"]
 
     # Seed an existing memory under "Style".
-    out = add_memory(
-        "Style", "py conventions", "python_style.md", "py style", "body"
+    out = create_memory(
+        category="Style",
+        title="py conventions",
+        content="body",
+        filename="python_style.md",
+        description="py style",
     )
-    assert "added index entry" in out, out
+    assert "saved" in out, out
 
     # Drift attempt: "Code Style" is close to "Style" → refused.
-    out = add_memory(
-        "Code Style", "more py conventions", "python_style_2.md", "h", "body"
+    out = create_memory(
+        category="Code Style",
+        title="more py conventions",
+        content="body",
+        filename="python_style_2.md",
+        description="h",
     )
     assert out.startswith("<category 'Code Style' is close to existing"), out
     assert "'Style'" in out, out
-    assert "force_new_category=True" in out, out
+    assert "confirm_new_category=True" in out, out
 
-    # Override: pass force_new_category=True → succeeds.
-    out = add_memory(
-        "Code Style",
-        "more py conventions",
-        "python_style_2.md",
-        "h",
-        "body",
-        force_new_category=True,
+    # Override: pass confirm_new_category=True → succeeds.
+    out = create_memory(
+        category="Code Style",
+        title="more py conventions",
+        content="body",
+        filename="python_style_2.md",
+        description="h",
+        confirm_new_category=True,
     )
-    assert "added index entry" in out, out
+    assert "saved" in out, out
 
     # Genuine new category (not close to any existing) → succeeds
     # without override.
-    out = add_memory(
-        "Architecture",
-        "service boundaries",
-        "service_boundaries.md",
-        "h",
-        "body",
+    out = create_memory(
+        category="Architecture",
+        title="service boundaries",
+        content="body",
+        filename="service_boundaries.md",
+        description="h",
     )
-    assert "added index entry" in out, out
+    assert "saved" in out, out
 
     # Exact case-insensitive match → falls through to existing
     # case-insensitive collapse, no drift warning.
-    out = add_memory(
-        "STYLE",  # matches existing "Style"
-        "another py conventions",
-        "python_style_3.md",
-        "h",
-        "body",
+    out = create_memory(
+        category="STYLE",
+        title="another py conventions",
+        content="body",
+        filename="python_style_3.md",
+        description="h",
     )
-    assert "added index entry" in out, out
+    assert "saved" in out, out
     assert "close to existing" not in out, out
 
-    print("✓ add_memory: refuses close-existing; force_new_category=True overrides")
+    print("✓ create_memory: refuses close-existing; confirm_new_category=True overrides")
 
 
 def _check_render_summary_above_threshold() -> None:
     """`render_memory_index` prepends 'Categories in use: ...' once
     the index has at least `_CATEGORY_SUMMARY_MIN` headings."""
-    from pyagent.plugins import memory_markdown as md_mod
+    from pyagent.plugins import memory as md_mod
 
     # Reach into render_memory_index by invoking register() with a
     # fake api against a tempdir, then grabbing the captured renderer.
@@ -185,7 +193,7 @@ def _check_render_summary_above_threshold() -> None:
         def log(self, level, msg):
             pass
 
-        def register_tool(self, name, fn):
+        def register_tool(self, name, fn, *, role_only=False):
             pass
 
         def register_prompt_section(self, name, renderer, *, volatile=False):
@@ -239,7 +247,7 @@ def _check_render_summary_above_threshold() -> None:
 def main() -> None:
     _check_extract_categories()
     _check_find_similar_category()
-    _check_add_memory_refuses_close_category()
+    _check_create_memory_refuses_close_category()
     _check_render_summary_above_threshold()
     print("\nALL CHECKS PASSED")
 

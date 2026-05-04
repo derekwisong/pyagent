@@ -4,47 +4,48 @@ USER and MEMORY live under the plugin's data dir. Use these tools
 rather than generic file ops — they know where the files live and
 keep the index consistent.
 
-- **`add_memory(category, title, content, filename="", description="", force_new_category=False)`**
-  Save a new memory in one call: writes the body file under
+- **`create_memory(category, title, content, filename="", description="", confirm_new_category=False)`**
+  Make a new memory in one call: writes the body file under
   `memories/<filename>` (with a `created_at` frontmatter that read
   tools strip on the way out) and inserts a bullet under
   `## <category>` in MEMORY.md. Empty `filename` is derived from
   `title` (`"Stack choices"` → `stack_choices.md`). Drift guard
   refuses close-but-not-equal new categories; pass
-  `force_new_category=True` to override.
+  `confirm_new_category=True` to acknowledge.
 - **`read_memory(file)`** — fetch a body. The catalog and USER are
   auto-loaded into your prompt; this tool is for the bodies.
-- **`write_memory(file, content)`** — overwrite a body. Pass
-  `file=""` to overwrite MEMORY.md (the catalog itself) — rare,
-  for consolidation.
+- **`update_memory(filename, content=None, description=None, category=None, confirm_new_category=False)`**
+  Modify any combination of an existing memory's body, index
+  description, or category. Filename keys the entry; at least one
+  field must be set. Drift guard fires on `category`. Body writes
+  preserve the existing `created_at` frontmatter when the new
+  content lacks one.
 - **`write_user(content)`** — overwrite the USER ledger.
-- **`set_memory_description(filename, description)`** — change just
-  the description portion of one bullet in MEMORY.md, without
-  re-emitting the whole index. Reach for this when a description is
-  failing recall — generic phrasing, missing distinctive tokens.
 - **`recall_memory(query, k=5, min_score=0.0, category=None)`** —
-  semantic search across descriptions and bodies, when available.
-  Use when scanning the catalog isn't enough.
+  semantic search across descriptions and bodies. Use when scanning
+  the catalog isn't enough — long catalog, cross-cutting topic, or
+  you remember the gist but not the filename.
 
 ### Categories
 Before picking a `category`, scan the `## <heading>` lines already
 in MEMORY.md (visible in your prompt; when 5+ headings exist a
 one-line *Categories in use:* summary is rendered up top). Use the
 closest existing heading rather than spawning a near-duplicate;
-`add_memory` will refuse a close-but-not-equal new category and
-point at the existing one. Common shapes that recur across users:
-**Architecture** (system shape, deployment, service boundaries),
-**Database** (schema, migrations, query notes), **Style** (code
-conventions, formatting, idioms), **Gotchas** (non-obvious failure
-modes worth remembering), **Decisions** (the *why* behind a choice,
-especially the ones that surprised future-you), **References**
-(links, dashboards, channels). New categories are fine when nothing
-fits — but ask "is this really not Decisions / Gotchas?" first.
+`create_memory` and `update_memory` will refuse a close-but-not-
+equal new category and point at the existing one. Common shapes
+that recur across users: **Architecture** (system shape, deployment,
+service boundaries), **Database** (schema, migrations, query notes),
+**Style** (code conventions, formatting, idioms), **Gotchas**
+(non-obvious failure modes worth remembering), **Decisions** (the
+*why* behind a choice, especially the ones that surprised
+future-you), **References** (links, dashboards, channels). New
+categories are fine when nothing fits — but ask "is this really
+not Decisions / Gotchas?" first.
 
 ### Filenames
 Lowercase snake_case ASCII with the `.md` suffix
 (`stack_choices.md`, `client_naming_convention.md`,
-`incident_2026_04_22_payment_pool.md`) — `add_memory` rejects
+`incident_2026_04_22_payment_pool.md`) — `create_memory` rejects
 anything else. Compound names age better than bare topics; the
 filename's tokens feed `recall_memory` alongside title and
 description, so descriptive filenames pull their weight at recall
