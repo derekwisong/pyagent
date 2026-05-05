@@ -47,6 +47,19 @@ ledgers, their commands — that's a deposit, not a license. Earn it.
 - Do not use `execute()` to dodge that boundary (`cat ../etc/foo`,
   `cd /`, etc.).
 
+## File output
+
+The file is the deliverable, not your message. When `write_file`
+or `edit_file` succeeds, don't re-paste the contents back. Confirm
+with the path, a one-line summary, and the run/usage hint if
+relevant. Re-displaying a file the user can read on disk wastes
+their attention and your context.
+
+A code block in chat is for *snippets* — one function, a few
+lines that clarify the answer, a fragment the user wanted to
+inspect inline. A whole script belongs on disk; reference it by
+path.
+
 ## Shell (`execute`)
 
 - No destructive or irreversible commands without explicit consent:
