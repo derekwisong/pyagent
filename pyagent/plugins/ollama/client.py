@@ -342,6 +342,21 @@ class OllamaClient:
             return min(window, NUM_CTX_CAP)
         return NUM_CTX_FLOOR
 
+    @property
+    def effective_context_window(self) -> int:
+        """The context window pyagent actually delivers to Ollama.
+
+        ``context_window`` reports the model's architectural maximum
+        (e.g. 256K for qwen3-30b-a3b). But what we *send* is
+        ``_resolve_num_ctx()``, which caps at ``NUM_CTX_CAP`` (or
+        whatever the user pinned via ``PYAGENT_OLLAMA_NUM_CTX``).
+        Footer percentages need to divide by this — the effective
+        ceiling — not the architectural one, otherwise "ctx: 5%"
+        means "you're 80% of the way to truncation but the UI is
+        lying."
+        """
+        return self._resolve_num_ctx()
+
     def respond(
         self,
         conversation: list[dict[str, Any]],

@@ -993,7 +993,22 @@ def _emit_context_status(
     client = getattr(agent, "client", None)
     if client is None:
         return
-    window = int(getattr(client, "context_window", 0) or 0)
+    # Prefer `effective_context_window` (what the client *actually*
+    # sends to the model) over `context_window` (the model's
+    # architectural maximum). The Ollama client caps num_ctx well
+    # below the architectural max, so dividing by the architectural
+    # max would under-report by 10x or more — "ctx: 5%" while the
+    # request is 80% of the way to truncation. OpenAI / Anthropic
+    # clients send the architectural max as-is, so the property
+    # falls back gracefully.
+    window = int(
+        getattr(
+            client,
+            "effective_context_window",
+            getattr(client, "context_window", 0),
+        )
+        or 0
+    )
     if window <= 0:
         return
     last_usage: dict = {}
