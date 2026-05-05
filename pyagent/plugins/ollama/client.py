@@ -37,6 +37,7 @@ from typing import Any, Callable
 
 import requests
 
+from pyagent import config as _config
 from pyagent.plugins.ollama import dialects
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,13 @@ DEFAULT_TIMEOUT = 600
 # PYAGENT_OLLAMA_NUM_CTX to bypass both.
 NUM_CTX_FLOOR = 8192
 NUM_CTX_CAP = 16384
+# Hardcoded fallback when nothing in env or config supplies a
+# temperature. Kept low because Ollama's 0.8 server default lets
+# multilingual models (qwen 2.5 14b) drift out of English mid-reply
+# and weaker tool-callers (llama 3.1 8b) hallucinate fake JSON tool
+# calls into the message body. Override globally in `[ollama]
+# temperature` or per model in `[ollama.temperature_per_model]`.
+DEFAULT_TEMPERATURE = 0.3
 
 
 def _raise_with_body(resp: requests.Response, where: str) -> None:
@@ -244,6 +252,69 @@ class OllamaClient:
             self._dialect = dialects.detect_from_template(template)
         return self._dialect
 
+    def _resolve_temperature(self) -> float:
+        """Pick the ``temperature`` to send with each chat request.
+
+        Resolution order, first hit wins:
+
+        1. ``PYAGENT_OLLAMA_TEMPERATURE`` env var — kill-switch /
+           one-off override; any non-negative float.
+        2. ``[ollama.temperature_per_model]<model>`` in config —
+           per-model override keyed on the same string passed via
+           ``--model ollama/<model>``.
+        3. ``[ollama] temperature`` in config — section-wide default.
+        4. :data:`DEFAULT_TEMPERATURE` — built-in fallback.
+
+        Each step validates: non-numeric or negative values warn
+        and fall through to the next tier rather than failing the
+        turn. The result is fetched per-call (no caching) so editing
+        config.toml mid-session takes effect on the next turn.
+        """
+        env = os.environ.get("PYAGENT_OLLAMA_TEMPERATURE", "").strip()
+        if env:
+            try:
+                t = float(env)
+                if t >= 0:
+                    return t
+                logger.warning(
+                    "PYAGENT_OLLAMA_TEMPERATURE=%r is negative; ignoring",
+                    env,
+                )
+            except ValueError:
+                logger.warning(
+                    "PYAGENT_OLLAMA_TEMPERATURE=%r is not a float; ignoring",
+                    env,
+                )
+
+        cfg = _config.load().get("ollama") or {}
+        per_model = cfg.get("temperature_per_model") or {}
+        if isinstance(per_model, dict) and self.model in per_model:
+            candidate = per_model[self.model]
+            if isinstance(candidate, (int, float)) and not isinstance(
+                candidate, bool
+            ) and candidate >= 0:
+                return float(candidate)
+            logger.warning(
+                "[ollama.temperature_per_model] %r = %r is not a "
+                "non-negative number; ignoring",
+                self.model,
+                candidate,
+            )
+
+        candidate = cfg.get("temperature")
+        if isinstance(candidate, (int, float)) and not isinstance(
+            candidate, bool
+        ) and candidate >= 0:
+            return float(candidate)
+        if candidate is not None:
+            logger.warning(
+                "[ollama] temperature = %r is not a non-negative "
+                "number; ignoring",
+                candidate,
+            )
+
+        return DEFAULT_TEMPERATURE
+
     def _resolve_num_ctx(self) -> int:
         """Pick the ``num_ctx`` value to send with each chat request.
 
@@ -305,7 +376,10 @@ class OllamaClient:
             "model": self.model,
             "messages": messages,
             "stream": streaming,
-            "options": {"num_ctx": self._resolve_num_ctx()},
+            "options": {
+                "num_ctx": self._resolve_num_ctx(),
+                "temperature": self._resolve_temperature(),
+            },
         }
         if tools and not self._skip_tools:
             body["tools"] = [
@@ -411,7 +485,7 @@ class OllamaClient:
 
         return {
             "role": "assistant",
-            "text": text,
+            "content": text,
             "tool_calls": tool_calls,
             "usage": {
                 "input": int(data.get("prompt_eval_count") or 0),
@@ -506,7 +580,7 @@ class OllamaClient:
 
         # assistant — content is required even when only tool_calls
         # are present, so default to "" rather than omitting.
-        text = message.get("text") or ""
+        text = message.get("content") or ""
         tool_calls = message.get("tool_calls") or []
 
         if tool_calls and text:

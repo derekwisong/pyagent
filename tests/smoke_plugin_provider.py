@@ -72,11 +72,11 @@ def test_get_client_resolves_plugin_provider() -> None:
     out = client.respond(
         conversation=[
             {"role": "user", "content": "first"},
-            {"role": "assistant", "text": "ack", "tool_calls": []},
+            {"role": "assistant", "content": "ack", "tool_calls": []},
             {"role": "user", "content": "ECHO ME"},
         ],
     )
-    _check("respond echoes latest user message", out["text"] == "ECHO ME", repr(out))
+    _check("respond echoes latest user message", out["content"] == "ECHO ME", repr(out))
     _check("respond returns no tool_calls", out["tool_calls"] == [])
 
 

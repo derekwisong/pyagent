@@ -287,7 +287,7 @@ def _check_respond_request_shape_and_response_parse() -> None:
                 {"role": "user", "content": "hello"},
                 {
                     "role": "assistant",
-                    "text": "calling lookup",
+                    "content": "calling lookup",
                     "tool_calls": [
                         {"id": "abc", "name": "lookup", "args": {"q": "weather"}}
                     ],
@@ -352,7 +352,7 @@ def _check_respond_request_shape_and_response_parse() -> None:
         repr(body["tools"]),
     )
 
-    _check("response text parsed", out["text"] == "thinking…", repr(out["text"]))
+    _check("response text parsed", out["content"] == "thinking…", repr(out["content"]))
     _check("two tool_calls returned", len(out["tool_calls"]) == 2)
     _check(
         "first call id synthesized as call_0",
@@ -412,7 +412,7 @@ def _check_tool_call_only_turn_keeps_structured_field() -> None:
                 {"role": "user", "content": "go"},
                 {
                     "role": "assistant",
-                    "text": "",  # no narrative
+                    "content": "",  # no narrative
                     "tool_calls": [
                         {"id": "abc", "name": "lookup", "args": {"q": "x"}}
                     ],
@@ -674,8 +674,8 @@ def _check_streaming_ndjson_path() -> None:
     )
     _check(
         "final text concatenates the deltas",
-        out["text"] == "Hello world",
-        repr(out["text"]),
+        out["content"] == "Hello world",
+        repr(out["content"]),
     )
     _check(
         "usage parsed from done-chunk",
@@ -710,7 +710,7 @@ def _check_streaming_ndjson_path() -> None:
     )
     _check(
         "no callback → full text returned in dict",
-        out["text"] == "non-stream",
+        out["content"] == "non-stream",
         repr(out),
     )
 
@@ -954,7 +954,7 @@ def _check_no_tools_auto_retry() -> None:
         "tools" not in posts[1],
         repr(posts[1]),
     )
-    _check("retry returned success body", out["text"] == "ok", repr(out))
+    _check("retry returned success body", out["content"] == "ok", repr(out))
     _check(
         "client latched the no-tools decision",
         client._skip_tools is True,
@@ -1007,6 +1007,172 @@ def _check_no_tools_auto_retry() -> None:
             _check("non-tools 4xx propagated", False)
 
 
+def _check_temperature_resolution_order() -> None:
+    """Resolution order:
+        env > [ollama.temperature_per_model] > [ollama] > built-in.
+    Each step also validates: bad values fall through with a warning,
+    they don't poison the request."""
+    client = ollama_client_mod.OllamaClient(
+        model="qwen2.5:14b-instruct", host="http://h:1"
+    )
+
+    # Built-in fallback when nothing is set.
+    with mock.patch.dict("os.environ", {}, clear=False), \
+         mock.patch.object(
+             ollama_client_mod._config, "load",
+             return_value={},
+         ):
+        import os as _os
+        _os.environ.pop("PYAGENT_OLLAMA_TEMPERATURE", None)
+        _check(
+            "no env / no config → built-in DEFAULT_TEMPERATURE",
+            client._resolve_temperature() == ollama_client_mod.DEFAULT_TEMPERATURE,
+            f"got {client._resolve_temperature()}",
+        )
+
+    # Section default beats built-in.
+    with mock.patch.dict("os.environ", {}, clear=False), \
+         mock.patch.object(
+             ollama_client_mod._config, "load",
+             return_value={"ollama": {"temperature": 0.55}},
+         ):
+        import os as _os
+        _os.environ.pop("PYAGENT_OLLAMA_TEMPERATURE", None)
+        _check(
+            "[ollama] temperature beats built-in",
+            client._resolve_temperature() == 0.55,
+            f"got {client._resolve_temperature()}",
+        )
+
+    # Per-model override beats section default.
+    with mock.patch.dict("os.environ", {}, clear=False), \
+         mock.patch.object(
+             ollama_client_mod._config, "load",
+             return_value={
+                 "ollama": {
+                     "temperature": 0.55,
+                     "temperature_per_model": {
+                         "qwen2.5:14b-instruct": 0.2,
+                     },
+                 }
+             },
+         ):
+        import os as _os
+        _os.environ.pop("PYAGENT_OLLAMA_TEMPERATURE", None)
+        _check(
+            "[ollama.temperature_per_model] beats [ollama] temperature",
+            client._resolve_temperature() == 0.2,
+            f"got {client._resolve_temperature()}",
+        )
+
+    # Env beats config (kill switch).
+    with mock.patch.dict(
+        "os.environ", {"PYAGENT_OLLAMA_TEMPERATURE": "0.9"}, clear=False
+    ), mock.patch.object(
+        ollama_client_mod._config, "load",
+        return_value={
+            "ollama": {
+                "temperature": 0.55,
+                "temperature_per_model": {"qwen2.5:14b-instruct": 0.2},
+            }
+        },
+    ):
+        _check(
+            "PYAGENT_OLLAMA_TEMPERATURE beats both config tiers",
+            client._resolve_temperature() == 0.9,
+            f"got {client._resolve_temperature()}",
+        )
+
+    # Bad env value falls through to config tier.
+    with mock.patch.dict(
+        "os.environ", {"PYAGENT_OLLAMA_TEMPERATURE": "not-a-float"}, clear=False
+    ), mock.patch.object(
+        ollama_client_mod._config, "load",
+        return_value={"ollama": {"temperature": 0.4}},
+    ):
+        _check(
+            "non-float env warns + falls through",
+            client._resolve_temperature() == 0.4,
+            f"got {client._resolve_temperature()}",
+        )
+
+    # Negative env value falls through.
+    with mock.patch.dict(
+        "os.environ", {"PYAGENT_OLLAMA_TEMPERATURE": "-1.5"}, clear=False
+    ), mock.patch.object(
+        ollama_client_mod._config, "load",
+        return_value={"ollama": {"temperature": 0.4}},
+    ):
+        _check(
+            "negative env warns + falls through",
+            client._resolve_temperature() == 0.4,
+            f"got {client._resolve_temperature()}",
+        )
+
+    # Bad per-model value falls through to section default.
+    with mock.patch.dict("os.environ", {}, clear=False), \
+         mock.patch.object(
+             ollama_client_mod._config, "load",
+             return_value={
+                 "ollama": {
+                     "temperature": 0.4,
+                     "temperature_per_model": {
+                         "qwen2.5:14b-instruct": "hot",
+                     },
+                 }
+             },
+         ):
+        import os as _os
+        _os.environ.pop("PYAGENT_OLLAMA_TEMPERATURE", None)
+        _check(
+            "non-numeric per-model value falls through to [ollama]",
+            client._resolve_temperature() == 0.4,
+            f"got {client._resolve_temperature()}",
+        )
+
+
+def _check_temperature_lands_in_request_body() -> None:
+    """The resolved temperature must reach Ollama's `/api/chat`
+    options dict alongside `num_ctx`. Regression check on the wire
+    shape — this is the actual behavior change users care about."""
+    captured: dict = {}
+
+    def fake_post(url, json=None, timeout=None, stream=False):
+        captured["body"] = json
+        return _FakeResponse(
+            {
+                "message": {"role": "assistant", "content": "ok"},
+                "prompt_eval_count": 5,
+                "eval_count": 1,
+            }
+        )
+
+    client = ollama_client_mod.OllamaClient(model="llama3.2", host="http://h:1")
+    with mock.patch.object(
+        ollama_client_mod.requests, "post", side_effect=fake_post
+    ), mock.patch.object(
+        ollama_client_mod._config, "load",
+        return_value={"ollama": {"temperature": 0.42}},
+    ):
+        import os as _os
+        _os.environ.pop("PYAGENT_OLLAMA_TEMPERATURE", None)
+        client.respond(
+            conversation=[{"role": "user", "content": "hi"}],
+        )
+
+    options = captured["body"]["options"]
+    _check(
+        "request body carries `temperature` in options",
+        options.get("temperature") == 0.42,
+        repr(options),
+    )
+    _check(
+        "request body still carries `num_ctx`",
+        "num_ctx" in options,
+        repr(options),
+    )
+
+
 def main() -> None:
     _check_default_config_lists_ollama()
     _check_plugin_loads_and_registers()
@@ -1023,6 +1189,8 @@ def main() -> None:
     _check_provider_list_models_hook()
     _check_streaming_ndjson_path()
     _check_streaming_tool_calls_accumulate()
+    _check_temperature_resolution_order()
+    _check_temperature_lands_in_request_body()
     print("smoke_ollama_plugin: all checks passed")
 
 

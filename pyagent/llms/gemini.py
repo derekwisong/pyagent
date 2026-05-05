@@ -193,7 +193,7 @@ class GeminiClient:
     ) -> dict[str, Any]:
         return {
             "role": "assistant",
-            "text": text,
+            "content": text,
             "tool_calls": tool_calls,
             "usage": {
                 "input": getattr(usage_meta, "prompt_token_count", 0) or 0,
@@ -229,8 +229,8 @@ class GeminiClient:
 
         # assistant -> "model"
         parts: list[types.Part] = []
-        if message.get("text"):
-            parts.append(types.Part(text=message["text"]))
+        if message.get("content"):
+            parts.append(types.Part(text=message["content"]))
         for tc in message.get("tool_calls", []):
             parts.append(
                 types.Part(

@@ -52,7 +52,7 @@ class _PluginEchoClient:
                 text = content
                 break
         return {
-            "text": text,
+            "content": text,
             "tool_calls": [],
             "usage": {
                 "input": 0,

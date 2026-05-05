@@ -55,13 +55,13 @@ def _check_echo_streams_word_by_word() -> None:
     _check("got at least one delta", len(deltas) > 0, repr(deltas))
     _check(
         "deltas concatenate to returned text",
-        "".join(deltas) == out["text"],
-        f"deltas={deltas!r} text={out['text']!r}",
+        "".join(deltas) == out["content"],
+        f"deltas={deltas!r} text={out['content']!r}",
     )
     _check(
         "echo full text preserved",
-        out["text"] == "hello there friend",
-        out["text"],
+        out["content"] == "hello there friend",
+        out["content"],
     )
 
 
@@ -73,7 +73,7 @@ def _check_echo_no_callback_unchanged() -> None:
     )
     _check(
         "no-callback echo returns full text",
-        out["text"] == "hi" and out["tool_calls"] == [],
+        out["content"] == "hi" and out["tool_calls"] == [],
         repr(out),
     )
 
@@ -84,11 +84,11 @@ def _check_lorem_streams_sentences() -> None:
         conversation=[{"role": "user", "content": "go"}],
         on_text_delta=deltas.append,
     )
-    _check("lorem produced text", bool(out["text"]))
+    _check("lorem produced text", bool(out["content"]))
     _check(
         "lorem deltas concatenate to returned text",
-        "".join(deltas) == out["text"],
-        f"text len={len(out['text'])} sum-of-deltas={len(''.join(deltas))}",
+        "".join(deltas) == out["content"],
+        f"text len={len(out['content'])} sum-of-deltas={len(''.join(deltas))}",
     )
     _check(
         "lorem fired multiple deltas",
@@ -228,8 +228,8 @@ def _check_anthropic_streaming_mocked() -> None:
     )
     _check(
         "anthropic concatenated text matches returned",
-        "".join(deltas) == out["text"] == "Hello world",
-        repr(out["text"]),
+        "".join(deltas) == out["content"] == "Hello world",
+        repr(out["content"]),
     )
     _check(
         "anthropic tool_use captured into tool_calls",
@@ -269,7 +269,7 @@ def _check_anthropic_streaming_mocked() -> None:
     )
     _check(
         "anthropic no-callback returns same dict shape",
-        out2["text"] == "Hello world" and len(out2["tool_calls"]) == 1,
+        out2["content"] == "Hello world" and len(out2["tool_calls"]) == 1,
         repr(out2),
     )
 
@@ -370,8 +370,8 @@ def _check_openai_streaming_mocked() -> None:
     )
     _check(
         "openai concat deltas == returned text",
-        "".join(deltas) == out["text"] == "Looking this up...",
-        repr(out["text"]),
+        "".join(deltas) == out["content"] == "Looking this up...",
+        repr(out["content"]),
     )
     _check(
         "openai accumulates tool_call args across chunks",
@@ -423,7 +423,7 @@ def _check_openai_streaming_mocked() -> None:
     )
     _check(
         "openai no-callback returns full text",
-        out2["text"] == "non-stream",
+        out2["content"] == "non-stream",
         repr(out2),
     )
 
@@ -502,8 +502,8 @@ def _check_gemini_streaming_mocked() -> None:
     )
     _check(
         "gemini concat deltas == returned text",
-        "".join(deltas) == out["text"] == "Hello",
-        repr(out["text"]),
+        "".join(deltas) == out["content"] == "Hello",
+        repr(out["content"]),
     )
     _check(
         "gemini function_call captured",
@@ -559,7 +559,7 @@ def _check_gemini_streaming_mocked() -> None:
     )
     _check(
         "gemini no-callback returns full text",
-        out2["text"] == "non-stream",
+        out2["content"] == "non-stream",
         repr(out2),
     )
 

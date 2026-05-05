@@ -1013,7 +1013,12 @@ def _emit_context_status(
     window = int(getattr(client, "context_window", 0) or 0)
     if window <= 0:
         return
-    used = int(agent.token_usage.get("input", 0) or 0)
+    last_usage: dict = {}
+    for turn in reversed(agent.conversation):
+        if isinstance(turn, dict) and isinstance(turn.get("usage"), dict):
+            last_usage = turn["usage"]
+            break
+    used = int(last_usage.get("input", 0) or 0)
     if used <= 0:
         return
     pct = max(0, min(100, int(used * 100 / window)))

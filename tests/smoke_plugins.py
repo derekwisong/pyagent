@@ -578,9 +578,9 @@ def test_message_wrapping() -> None:
     into Message objects so plugins can read .text uniformly."""
     conv = [
         {"role": "user", "content": "hi there"},
-        {"role": "assistant", "text": "hello back", "tool_calls": []},
+        {"role": "assistant", "content": "hello back", "tool_calls": []},
         {"role": "user", "tool_results": [{"id": "1", "name": "x", "content": "..."}]},
-        {"role": "assistant", "text": "", "tool_calls": [{"id": "1", "name": "x", "args": {}}]},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "name": "x", "args": {}}]},
         {"role": "user", "content": "follow up"},
     ]
     ctx = plugins_mod.make_prompt_context(conv)

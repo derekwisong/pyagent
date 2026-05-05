@@ -324,7 +324,7 @@ class LLMClient(Protocol):
 
       - User text:    {"role": "user", "content": "..."}
       - Tool results: {"role": "user", "tool_results": [{"id", "name", "content"}, ...]}
-      - Assistant:    {"role": "assistant", "text": "...",
+      - Assistant:    {"role": "assistant", "content": "...",
                        "tool_calls": [{"id", "name", "args"}, ...]}
 
     The return value is a single assistant message in that same shape,
@@ -342,8 +342,9 @@ class LLMClient(Protocol):
     callback zero-or-more times with a chunk of plain text each
     (whatever granularity the wire format hands them — tokens,
     sentences, server-sent-event frames). Implementations must
-    accumulate the same text into the returned dict's `text` field
-    so a non-streaming consumer of the dict sees the full reply.
+    accumulate the same text into the returned dict's `content`
+    field so a non-streaming consumer of the dict sees the full
+    reply.
     """
 
     def respond(

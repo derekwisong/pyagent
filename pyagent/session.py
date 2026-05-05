@@ -12,7 +12,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -107,12 +107,30 @@ class Session:
             return [json.loads(line) for line in f if line.strip()]
 
     def append_history(self, entries: list[Any]) -> None:
+        """Append `entries` to ``conversation.jsonl``.
+
+        Each dict entry is stamped with a ``ts`` field in
+        ISO 8601 UTC at write-time so post-hoc analysis can trace
+        per-turn latency. Entries that already carry a ``ts``
+        (in case a caller stamps closer to the actual event) are
+        passed through unchanged. Non-dict entries are written
+        as-is — defensive, but no historical caller emits one.
+
+        Stamping is non-mutating: the in-memory entry referenced
+        by ``agent.conversation`` is left alone; only the
+        on-disk JSONL gets the extra field.
+        """
         if not entries:
             return
         self._ensure_dirs()
+        ts = datetime.now(timezone.utc).isoformat(timespec="microseconds")
         with self.conversation_path.open("a") as f:
             for entry in entries:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                if isinstance(entry, dict) and "ts" not in entry:
+                    payload = {**entry, "ts": ts}
+                else:
+                    payload = entry
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def write_attachment(
         self,

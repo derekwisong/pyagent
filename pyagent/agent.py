@@ -65,6 +65,14 @@ class Agent:
         # (round-trip invariant); eviction is in-memory only.
         # See issue #10.
         self._evict_after_use: dict[str, bool] = {}
+        # Side channel set by `_render_tool_result` whenever a tool
+        # result writes an attachment to disk. The agent loop reads
+        # this immediately after `_route_tool` returns and copies
+        # the metadata onto the tool_result entry as a structured
+        # `attachment` field, so audit / replay tools don't have to
+        # regex the stub out of the tool_result `content` prose.
+        # Reset to None on every render call.
+        self._last_tool_attachment: dict[str, Any] | None = None
         self.conversation: list[Any] = []
         self.plugins = plugins
         # Subagent registry: id -> opaque entry (shape owned by the
@@ -232,6 +240,10 @@ class Agent:
         result: Any,
         args: dict[str, Any] | None = None,
     ) -> str:
+        # Reset every call so the caller in `agent.run` reads either
+        # the metadata for *this* tool's attachment or a clean None
+        # when the tool produced inline-only output.
+        self._last_tool_attachment = None
         if isinstance(result, Attachment):
             if not self.session:
                 # No session → nothing to save. Prefer inline_text if
@@ -245,6 +257,14 @@ class Agent:
             path = self.session.write_attachment(
                 name, result.content, result.suffix
             )
+            self._last_tool_attachment = {
+                "path": str(path),
+                "size_bytes": (
+                    len(result.content)
+                    if isinstance(result.content, (str, bytes))
+                    else 0
+                ),
+            }
             if result.inline_text is not None:
                 # inline_text path: the saved file is *side data*
                 # (structured blob the agent might legitimately re-read
@@ -289,6 +309,10 @@ class Agent:
             )
             if (auto and over_threshold) or over_ceiling or forced_soft:
                 path = self.session.write_attachment(name, text)
+                self._last_tool_attachment = {
+                    "path": str(path),
+                    "size_bytes": len(text),
+                }
                 preview = text[: self.session.preview_chars]
                 # File-shape and read_file range hints are computed
                 # from the rendered text + the original tool args so
@@ -558,7 +582,7 @@ class Agent:
             return False
         if msg.get("role") != "assistant":
             return False
-        if msg.get("text"):
+        if msg.get("content"):
             return True
         if msg.get("tool_calls"):
             return True
@@ -771,7 +795,7 @@ class Agent:
                 if on_usage:
                     on_usage(usage)
 
-            if text := turn.get("text", ""):
+            if text := turn.get("content", ""):
                 texts.append(text)
                 if on_text:
                     on_text(text)
@@ -793,9 +817,19 @@ class Agent:
                     on_tool_call=on_tool_call,
                     on_tool_result=on_tool_result,
                 )
-                results.append(
-                    {"id": call["id"], "name": call["name"], "content": content}
-                )
+                entry: dict[str, Any] = {
+                    "id": call["id"],
+                    "name": call["name"],
+                    "content": content,
+                }
+                # `_render_tool_result` set this side channel iff the
+                # tool's output was offloaded to a session attachment.
+                # Surface as a structured field so audit/replay tools
+                # don't have to regex the path out of `content`.
+                if self._last_tool_attachment is not None:
+                    entry["attachment"] = self._last_tool_attachment
+                    self._last_tool_attachment = None
+                results.append(entry)
             self.conversation.append({"role": "user", "tool_results": results})
             if cancel_event is not None and cancel_event.is_set():
                 raise KeyboardInterrupt

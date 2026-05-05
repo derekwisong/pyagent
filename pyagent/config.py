@@ -21,6 +21,13 @@ Schema (current):
     [session]
     attachment_dir_cap_mb = 25   # soft cap; LRU evict over this. 0 = off.
 
+    [ollama]
+    temperature = 0.3            # default for every ollama-backed model
+
+    [ollama.temperature_per_model]
+    "qwen2.5:14b-instruct" = 0.2
+    "deepseek-r1:14b" = 0.7      # reasoning model — wants more variety
+
 The subagent caps exist to mitigate fork-bomb behavior — a confused
 turn could spawn unboundedly otherwise, amplifying cost per process
 and outpacing the human's ability to hit Esc.
@@ -82,6 +89,17 @@ DEFAULTS: dict[str, Any] = {
     },
     "session": {
         "attachment_dir_cap_mb": 25,
+    },
+    # Ollama-backed model defaults. `temperature` applies to every
+    # ollama model unless `[ollama.temperature_per_model]` overrides
+    # it for a specific model (key = the same string passed via
+    # `--model ollama/<key>`). Lower than Ollama's own 0.8 because
+    # multilingual models (qwen 2.5 14b etc.) drift out of English
+    # at higher temperatures and weaker tool-callers (llama 3.1 8b)
+    # hallucinate fake JSON tool calls into the message body.
+    "ollama": {
+        "temperature": 0.3,
+        "temperature_per_model": {},
     },
 }
 

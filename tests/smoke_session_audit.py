@@ -171,7 +171,7 @@ def _write_synthetic_session(tmp: Path) -> Path:
         {"role": "user", "content": "first prompt"},
         {
             "role": "assistant",
-            "text": "ok",
+            "content": "ok",
             "tool_calls": [
                 {"id": "t1", "name": "fetch_url", "args": {"url": "x"}}
             ],
@@ -191,7 +191,7 @@ def _write_synthetic_session(tmp: Path) -> Path:
         {"role": "user", "content": "second prompt"},
         {
             "role": "assistant",
-            "text": "ok",
+            "content": "ok",
             "tool_calls": [
                 {"id": "t2", "name": "execute", "args": {"command": "ls"}}
             ],
@@ -215,7 +215,7 @@ def _write_synthetic_session(tmp: Path) -> Path:
         },
         {
             "role": "assistant",
-            "text": "done",
+            "content": "done",
             "tool_calls": [],
             "usage": {
                 "input": 50,
@@ -420,7 +420,7 @@ def _check_per_turn_model_pricing() -> None:
             {"role": "user", "content": "first"},
             {
                 "role": "assistant",
-                "text": "ok",
+                "content": "ok",
                 "tool_calls": [],
                 "usage": {
                     "input": 1000,
@@ -433,7 +433,7 @@ def _check_per_turn_model_pricing() -> None:
             {"role": "user", "content": "second"},
             {
                 "role": "assistant",
-                "text": "ok",
+                "content": "ok",
                 "tool_calls": [],
                 "usage": {
                     "input": 1000,

@@ -59,7 +59,7 @@ class EchoClient:
                 chunk = word if i == 0 else f" {word}"
                 on_text_delta(chunk)
         return {
-            "text": text,
+            "content": text,
             "tool_calls": [],
             "usage": {
                 "input": 0,
@@ -137,7 +137,7 @@ class LoremClient:
                 on_text_delta(sent)
                 remaining = remaining[len(sent):]
         return {
-            "text": text,
+            "content": text,
             "tool_calls": [],
             "usage": {
                 "input": 0,

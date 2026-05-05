@@ -194,7 +194,7 @@ class OpenAIClient:
         cache_read = getattr(prompt_details, "cached_tokens", 0) or 0
         return {
             "role": "assistant",
-            "text": text,
+            "content": text,
             "tool_calls": tool_calls,
             "usage": {
                 "input": getattr(usage, "prompt_tokens", 0) or 0,
@@ -220,8 +220,8 @@ class OpenAIClient:
             return [{"role": "user", "content": message["content"]}]
 
         msg: dict[str, Any] = {"role": "assistant"}
-        if message.get("text"):
-            msg["content"] = message["text"]
+        if message.get("content"):
+            msg["content"] = message["content"]
         if message.get("tool_calls"):
             msg["tool_calls"] = [
                 {

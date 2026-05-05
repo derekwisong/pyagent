@@ -205,7 +205,16 @@ def _check_emit_context_status_shape() -> None:
     class _Agent:
         def __init__(self, client, used):
             self.client = client
-            self.token_usage = {"input": used}
+            # Mirror real Agent shape: per-turn usage lives on the
+            # last conversation entry. token_usage is the *cumulative*
+            # running total and must NOT drive the context meter
+            # (regression: prior code used it and saturated to 100%
+            # after a handful of turns even though each turn was
+            # well under the window).
+            self.token_usage = {"input": used * 99}
+            self.conversation = (
+                [{"role": "assistant", "usage": {"input": used}}] if used else []
+            )
 
     class _State:
         def __init__(self):
@@ -282,6 +291,30 @@ def _check_emit_context_status_shape() -> None:
     _check(
         "used=0 emits nothing",
         state.events == [],
+        repr(state.events),
+    )
+
+    # Regression: cumulative `token_usage["input"]` must NOT drive
+    # the meter. Build an agent whose last turn used 14k of a 32,768
+    # window (~42%) but whose running total is 70k (would falsely
+    # read 100%+). Expect the meter to report the per-turn 42%.
+    class _AgentMultiTurn:
+        def __init__(self):
+            self.client = _Client(32_768)
+            self.token_usage = {"input": 70_000}
+            self.conversation = [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "usage": {"input": 13_953}},
+            ]
+
+    state = _State()
+    _emit_context_status(state, _AgentMultiTurn())
+    _check(
+        "meter reads last-turn input, not cumulative running total",
+        state.events
+        and state.events[0][0] == "context_status"
+        and state.events[0][1]["used"] == 13_953
+        and state.events[0][1]["pct"] == 42,
         repr(state.events),
     )
 

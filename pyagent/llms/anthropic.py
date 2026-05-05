@@ -177,7 +177,7 @@ class AnthropicClient:
         usage = getattr(message, "usage", None)
         return {
             "role": "assistant",
-            "text": "".join(text_parts),
+            "content": "".join(text_parts),
             "tool_calls": tool_calls,
             "usage": {
                 "input": getattr(usage, "input_tokens", 0) or 0,
@@ -210,8 +210,8 @@ class AnthropicClient:
 
         # assistant
         content: list[dict[str, Any]] = []
-        if message.get("text"):
-            content.append({"type": "text", "text": message["text"]})
+        if message.get("content"):
+            content.append({"type": "text", "text": message["content"]})
         for tc in message.get("tool_calls", []):
             content.append(
                 {

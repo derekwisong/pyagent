@@ -457,7 +457,7 @@ def _check_subllm_timeout_marker() -> None:
         def respond(self, **_kw):
             # Block long enough to exceed the 1-second cap.
             time.sleep(5)
-            return {"text": "would have been a real reply"}
+            return {"content": "would have been a real reply"}
 
     from pyagent import llms
 

@@ -63,14 +63,20 @@ def _check_stub_not_content() -> None:
     }
     session.append_history([entry])
 
-    # The raw JSONL line must equal `json.dumps(entry) + "\n"` —
-    # nothing else, no transformation.
+    # The persisted entry must equal the input plus a write-time
+    # `ts` field — no other transformation. Compare structurally
+    # rather than byte-equal so the timestamp doesn't make the
+    # round-trip check brittle.
     raw = session.conversation_path.read_text()
-    expected = json.dumps(entry, ensure_ascii=False) + "\n"
-    assert raw == expected, (
-        f"JSONL line was transformed.\n"
-        f"expected: {expected!r}\n"
-        f"got:      {raw!r}"
+    persisted = json.loads(raw)
+    assert "ts" in persisted, (
+        f"every appended entry should carry write-time `ts`: {persisted!r}"
+    )
+    persisted_no_ts = {k: v for k, v in persisted.items() if k != "ts"}
+    assert persisted_no_ts == entry, (
+        f"JSONL entry transformed beyond ts injection.\n"
+        f"expected (modulo ts): {entry!r}\n"
+        f"got:                  {persisted_no_ts!r}"
     )
 
     # The 50_000-char payload must not appear anywhere on the line.
@@ -93,7 +99,10 @@ def _check_stub_not_content() -> None:
 
 
 def _check_round_trip() -> None:
-    """load_history returns exactly what append_history wrote."""
+    """load_history returns the same payload append_history wrote,
+    plus a `ts` write-time timestamp on each dict entry. The `ts`
+    is added only on disk — the in-memory entry the caller passed
+    is never mutated."""
     tmp = Path(tempfile.mkdtemp(prefix="pyagent-smoke-replay-"))
     session = Session(session_id="rt", root=tmp)
 
@@ -101,7 +110,7 @@ def _check_round_trip() -> None:
         {"role": "user", "content": "hello"},
         {
             "role": "assistant",
-            "text": "ack",
+            "content": "ack",
             "tool_calls": [
                 {"id": "c1", "name": "read_file", "args": {"path": "x"}}
             ],
@@ -113,10 +122,59 @@ def _check_round_trip() -> None:
             ],
         },
     ]
+    in_snapshot = [dict(e) for e in entries]
     session.append_history(entries)
+    assert entries == in_snapshot, (
+        f"in-memory entries mutated: {entries} != {in_snapshot}"
+    )
     loaded = session.load_history()
-    assert loaded == entries, f"round-trip mismatch:\n  in:  {entries}\n  out: {loaded}"
-    print(f"✓ round-trip: {len(loaded)} entries identical")
+    assert all("ts" in e for e in loaded), (
+        f"every loaded entry must carry a `ts`: {loaded}"
+    )
+    stripped = [
+        {k: v for k, v in e.items() if k != "ts"} for e in loaded
+    ]
+    assert stripped == entries, (
+        f"round-trip mismatch (ignoring ts):\n  in:  {entries}\n  "
+        f"out: {stripped}"
+    )
+    print(f"✓ round-trip: {len(loaded)} entries identical (modulo ts)")
+
+
+def _check_timestamps_preserved_and_monotonic() -> None:
+    """Two separate `append_history` batches get distinct, ordered
+    `ts` values; an entry that already carries `ts` is passed
+    through untouched (caller-stamped events stay caller-stamped)."""
+    import datetime as _dt
+    import time
+
+    tmp = Path(tempfile.mkdtemp(prefix="pyagent-smoke-ts-"))
+    session = Session(session_id="ts", root=tmp)
+
+    session.append_history([{"role": "user", "content": "first"}])
+    time.sleep(0.005)  # ensure microsecond clock advances
+    session.append_history(
+        [
+            {"role": "assistant", "content": "second"},
+            # Pre-stamped: must survive untouched.
+            {"role": "user", "content": "third", "ts": "preset"},
+        ]
+    )
+
+    loaded = session.load_history()
+    ts1 = loaded[0]["ts"]
+    ts2 = loaded[1]["ts"]
+    assert ts1 != ts2, f"separate writes should get distinct ts: {ts1!r}"
+    # Lexicographic = chronological for ISO 8601 UTC.
+    assert ts1 < ts2, f"ts not monotonic: {ts1!r} >= {ts2!r}"
+    # Both auto-stamped values must parse as UTC ISO 8601.
+    for ts in (ts1, ts2):
+        parsed = _dt.datetime.fromisoformat(ts)
+        assert parsed.tzinfo is not None, f"ts must be timezone-aware: {ts!r}"
+    assert loaded[2]["ts"] == "preset", (
+        f"caller-supplied ts must pass through, got {loaded[2]['ts']!r}"
+    )
+    print("✓ timestamps: ISO-UTC, monotonic across writes, caller-supplied preserved")
 
 
 def _check_attachment_construction_sites() -> None:
@@ -284,14 +342,139 @@ def _check_attachment_inline_text_no_session() -> None:
     print("✓ inline_text path with no session: returns inline_text only")
 
 
+def _check_attachment_metadata_side_channel() -> None:
+    """When `_render_tool_result` offloads to a session attachment,
+    it sets `agent._last_tool_attachment` so the agent loop can
+    surface the path + size as a structured field on the
+    tool_result entry — no need to regex `content`. When the result
+    stays inline, the side channel resets to None.
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="pyagent-smoke-attmeta-"))
+    session = Session(session_id="meta", root=tmp)
+    agent = Agent(client=None, session=session)
+
+    # Big plain-string result → auto-offload path.
+    big = "X" * 20_000
+    rendered = agent._render_tool_result("read_file", big)
+    assert rendered.startswith("[offload "), rendered
+    meta = agent._last_tool_attachment
+    assert isinstance(meta, dict), meta
+    assert meta["size_bytes"] == 20_000, meta
+    assert Path(meta["path"]).exists(), meta
+    assert meta["path"] in rendered, (
+        f"path must still appear in content for the LLM, but got: "
+        f"path={meta['path']!r} content prefix={rendered[:200]!r}"
+    )
+
+    # Attachment-typed result, no inline_text → offload path,
+    # metadata still surfaces.
+    rendered2 = agent._render_tool_result(
+        "fetch_url",
+        Attachment(content="A" * 9_000, preview="A" * 100),
+    )
+    assert rendered2.startswith("[offload "), rendered2
+    meta2 = agent._last_tool_attachment
+    assert meta2 and meta2["size_bytes"] == 9_000, meta2
+
+    # Attachment with inline_text → file is side data, metadata
+    # still surfaces (audit tools want to find the side file too).
+    rendered3 = agent._render_tool_result(
+        "web_search",
+        Attachment(
+            content='[{"title": "x"}]',
+            inline_text="## hits\n- x\n",
+            suffix=".json",
+        ),
+    )
+    meta3 = agent._last_tool_attachment
+    assert meta3 and meta3["path"].endswith(".json"), meta3
+    assert meta3["size_bytes"] == len('[{"title": "x"}]'), meta3
+
+    # Inline-only result (small string, no offload) → side channel
+    # resets to None so the next tool_result entry doesn't inherit
+    # a stale attachment from the previous call.
+    rendered4 = agent._render_tool_result("execute", "ok")
+    assert rendered4 == "ok"
+    assert agent._last_tool_attachment is None, agent._last_tool_attachment
+
+    print(
+        "✓ attachment metadata side-channel: set on offload "
+        "(plain-text + Attachment, with/without inline_text), "
+        "cleared on inline-only result"
+    )
+
+
+def _check_attachment_field_reaches_tool_result_entry() -> None:
+    """End-to-end: a tool that produces an over-threshold result
+    causes the constructed tool_result entry to carry an
+    `attachment` field with the same path the offload stub points
+    at. Inline tool_result entries get no `attachment` field."""
+    from pyagent.llms.pyagent import EchoClient
+
+    tmp = Path(tempfile.mkdtemp(prefix="pyagent-smoke-attfield-"))
+    session = Session(session_id="field", root=tmp)
+    agent = Agent(client=EchoClient(), session=session)
+
+    big = "Q" * 20_000
+
+    def big_tool() -> str:
+        """Returns over-threshold so it offloads."""
+        return big
+
+    def small_tool() -> str:
+        """Returns under-threshold so it stays inline."""
+        return "fine"
+
+    agent.add_tool("big_tool", big_tool)
+    agent.add_tool("small_tool", small_tool)
+
+    # Drive _route_tool the same way the agent loop does, then
+    # mirror the loop's entry-construction logic.
+    def _build_entry(call: dict) -> dict:
+        content = agent._route_tool(call)
+        entry: dict = {
+            "id": call["id"],
+            "name": call["name"],
+            "content": content,
+        }
+        if agent._last_tool_attachment is not None:
+            entry["attachment"] = agent._last_tool_attachment
+            agent._last_tool_attachment = None
+        return entry
+
+    big_entry = _build_entry(
+        {"id": "c1", "name": "big_tool", "args": {}}
+    )
+    small_entry = _build_entry(
+        {"id": "c2", "name": "small_tool", "args": {}}
+    )
+
+    assert "attachment" in big_entry, big_entry
+    att = big_entry["attachment"]
+    assert att["path"] in big_entry["content"], (
+        f"attachment.path must match the offload stub in content: "
+        f"path={att['path']!r} content={big_entry['content'][:200]!r}"
+    )
+    assert att["size_bytes"] == 20_000, att
+    assert "attachment" not in small_entry, small_entry
+    print(
+        f"✓ tool_result entry: offloaded → has structured attachment "
+        f"({att['size_bytes']}c at {Path(att['path']).name}); "
+        f"inline → no attachment field"
+    )
+
+
 def main() -> None:
     _check_stub_not_content()
     _check_round_trip()
+    _check_timestamps_preserved_and_monotonic()
     _check_attachment_construction_sites()
     _check_render_path_returns_stub()
     _check_attachment_inline_text_unset_unchanged()
     _check_attachment_inline_text_set()
     _check_attachment_inline_text_no_session()
+    _check_attachment_metadata_side_channel()
+    _check_attachment_field_reaches_tool_result_entry()
     print("\nALL CHECKS PASSED")
 
 

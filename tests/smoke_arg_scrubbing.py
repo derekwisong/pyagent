@@ -56,7 +56,7 @@ def test_large_arg_scrubbed_after_call() -> None:
         # tool dispatch, so `call["args"]` is the same object that
         # would live in conversation history.
         agent.conversation.append(
-            {"role": "assistant", "text": "", "tool_calls": [call]}
+            {"role": "assistant", "content": "", "tool_calls": [call]}
         )
 
         result = agent._route_tool(call)
@@ -107,7 +107,7 @@ def test_small_args_preserved() -> None:
         "args": {"message": "short and sweet"},
     }
     agent.conversation.append(
-        {"role": "assistant", "text": "", "tool_calls": [call]}
+        {"role": "assistant", "content": "", "tool_calls": [call]}
     )
 
     agent._route_tool(call)
@@ -136,7 +136,7 @@ def test_threshold_boundary() -> None:
         "args": {"payload": at_threshold},
     }
     agent.conversation.append(
-        {"role": "assistant", "text": "", "tool_calls": [call_at]}
+        {"role": "assistant", "content": "", "tool_calls": [call_at]}
     )
     agent._route_tool(call_at)
     assert call_at["args"]["payload"] == at_threshold
@@ -149,7 +149,7 @@ def test_threshold_boundary() -> None:
         "args": {"payload": over},
     }
     agent.conversation.append(
-        {"role": "assistant", "text": "", "tool_calls": [call_over]}
+        {"role": "assistant", "content": "", "tool_calls": [call_over]}
     )
     agent._route_tool(call_over)
     assert "elided" in call_over["args"]["payload"]

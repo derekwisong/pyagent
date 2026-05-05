@@ -1661,7 +1661,7 @@ def _to_message(entry: Any) -> Message:
             return Message(role="user", text=content)
         return Message(role="user", text="")
     if role == "assistant":
-        return Message(role="assistant", text=entry.get("text") or "")
+        return Message(role="assistant", text=entry.get("content") or "")
     return Message(role=str(role), text="")
 
 

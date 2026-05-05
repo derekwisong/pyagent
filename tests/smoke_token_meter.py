@@ -77,7 +77,7 @@ class StubClientWithUsage:
         self.calls += 1
         return {
             "role": "assistant",
-            "text": f"reply-{self.calls}",
+            "content": f"reply-{self.calls}",
             "tool_calls": [],
             "usage": {
                 "input": u[0],
@@ -115,7 +115,7 @@ class StubClientWithCacheUsage:
     ) -> dict[str, Any]:
         return {
             "role": "assistant",
-            "text": "cache-reply",
+            "content": "cache-reply",
             "tool_calls": [],
             "usage": {
                 "input": self.input_t,

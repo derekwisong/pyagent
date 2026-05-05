@@ -5,6 +5,7 @@ import logging
 import multiprocessing
 import re
 import shutil
+import sys
 import time
 from multiprocessing.connection import Connection
 from pathlib import Path
@@ -20,7 +21,7 @@ from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.traceback import install as install_traceback
-from wcwidth import wcswidth
+from wcwidth import wcswidth, wcwidth
 
 from pyagent import agent_proc
 from pyagent import config
@@ -81,30 +82,66 @@ def _on_text(text: str, agent_id: str | None = None) -> None:
     console.print()
 
 
-# Per-agent streaming flags. Keys are agent_id strings (or "root" for
-# the main agent); presence means at least one delta was printed for
-# this turn's text segment. The closing `assistant_text` event uses it
-# to decide whether to skip the per-segment header (already emitted by
-# the first delta) when re-rendering as markdown below the streamed
-# dim text.
+# Per-agent streaming state.
+#   _streaming_active: keys (agent_id or "root") with an open stream
+#     — the closing `assistant_text` event branches on presence to
+#     decide between streaming-close (walk back, re-render as
+#     Markdown) and a fresh non-streaming render.
+#   _streaming_text: cumulative text-so-far per key. Re-emitted in
+#     full on every delta so the rendered region always matches the
+#     latest accumulated text.
+#   _streaming_rendered_rows: how many terminal rows the previous
+#     render of the cumulative text consumed. Each new delta walks
+#     back exactly this many rows before re-emitting, so the
+#     terminal region stays in sync without per-chunk drift.
+#
+# Why not just `console.print(chunk, end="", ...)` per delta? Doing
+# so emits partial lines (no trailing \n) into patch_stdout. On
+# patch_stdout's next render tick the cursor is repositioned at the
+# top of the prompt area, which clobbers the in-progress row — the
+# user saw "! How can I assist you today?" when the model actually
+# emitted "Hello! How can I assist you today?" (issue #111).
+# Re-rendering the full cumulative text inside one atomic
+# walk-back-then-write buffer keeps positioning deterministic.
 _streaming_active: set[str] = set()
+_streaming_text: dict[str, str] = {}
+_streaming_rendered_rows: dict[str, int] = {}
+
+
+def _cursor_advance_rows(text: str, term_width: int) -> int:
+    """Terminal rows the cursor advances after writing ``text`` from
+    column 0. Counts both explicit ``\\n`` and soft-wrap at the
+    right edge — what we need for sizing walk-back ANSI."""
+    if not text or term_width <= 0:
+        return 0
+    advance = 0
+    col = 0
+    for ch in text:
+        if ch == "\n":
+            advance += 1
+            col = 0
+            continue
+        cw = wcwidth(ch)
+        if cw < 0:
+            cw = 0
+        col += cw
+        if col >= term_width:
+            advance += 1
+            col -= term_width
+    return advance
 
 
 def _on_text_delta(chunk: str, agent_id: str | None = None) -> None:
-    """Print one streaming text chunk inline, no markdown formatting.
+    """Stream the agent's text by re-rendering the cumulative
+    text-so-far on every delta inside a single atomic
+    walk-back + clear + write buffer. patch_stdout places the whole
+    buffer at "above prompt" as one unit, so the walk-back ANSI is
+    interpreted relative to the just-written text and lands
+    deterministically.
 
-    The closing ``assistant_text`` event re-renders the same text as
-    markdown *below* the streamed dim block — separated by blank
-    lines, not via cursor walk-back. Walk-back doesn't compose with
-    prompt_toolkit's ``patch_stdout`` (the escape bytes get re-emitted
-    at a cursor position prompt_toolkit chooses on its next render
-    tick, not where Rich left off), and the resulting drift was
-    eating one row per turn out of the scrollback above the stream.
-    Trading a short visual duplication for buffer integrity.
-
-    Each text segment in a turn (one per LLM call before/between/
-    after tool batches) gets its own leading blank line + agent
-    label exactly once, on the first delta.
+    The first delta lays down a prefix (blank line + optional
+    agent label) which is never walked back over — successive
+    re-renders only replace the streamed-text region.
     """
     key = agent_id or "root"
     if key not in _streaming_active:
@@ -112,28 +149,94 @@ def _on_text_delta(chunk: str, agent_id: str | None = None) -> None:
         if agent_id:
             console.print(_agent_label(agent_id))
         _streaming_active.add(key)
-    # `style="dim"` matches the non-streaming render so the streamed
-    # text doesn't visually pop while the user's prompt is still the
-    # most-prominent thing on screen.
-    console.print(chunk, end="", style="dim", soft_wrap=True, highlight=False)
+        _streaming_text[key] = ""
+        _streaming_rendered_rows[key] = 0
+    _streaming_text[key] += chunk
+    text = _streaming_text[key]
+
+    prev_rows = _streaming_rendered_rows[key]
+    term_width = shutil.get_terminal_size((80, 24)).columns
+    # Trailing \n pushes the cursor to a fresh line below the text,
+    # which is where prompt_toolkit redraws the prompt — and the
+    # row we'll walk back FROM on the next delta.
+    new_rows = _cursor_advance_rows(text + "\n", term_width)
+
+    parts: list[str] = []
+    if prev_rows > 0:
+        # \x1b[{N}F = move cursor to start of N rows up
+        # \x1b[J   = clear from cursor to end of screen
+        parts.append(f"\x1b[{prev_rows}F\x1b[J")
+    # \x1b[2m / \x1b[22m: dim on / normal intensity off (the LLM
+    # stream is visually subordinate to the bold/shaded user line).
+    parts.append(f"\x1b[2m{text}\x1b[22m\n")
+    sys.stdout.write("".join(parts))
+    sys.stdout.flush()
+    _streaming_rendered_rows[key] = new_rows
+
+
+# Tool calls made during the current root-agent turn. Cleared on
+# each new user_prompt and at the end of each turn after the
+# summary line is printed. Each entry is a dict so `_on_tool_result`
+# can mutate the matching call's status in place.
+_turn_tool_calls: list[dict[str, Any]] = []
 
 
 def _on_tool_call(
     name: str, args: dict[str, Any], agent_id: str | None = None
 ) -> None:
+    """Render a single tool call as a visible cyan ⏵ line so the
+    user can scan a turn and immediately see which tools fired.
+
+    Subagent calls are still labelled by agent id; only root-agent
+    calls feed the end-of-turn summary (subagents already surface
+    their own activity via the bottom toolbar)."""
     summary = _summarize_args(args)
-    label = f"{name}  {summary}" if summary else name
-    console.print(f"{_agent_label(agent_id)}[dim grey42]· {label}[/dim grey42]")
+    line = f"{_agent_label(agent_id)}[cyan]⏵ {name}[/cyan]"
+    if summary:
+        line += f"  [dim]{summary}[/dim]"
+    console.print(line)
+    if agent_id is None:
+        _turn_tool_calls.append({"name": name, "ok": True})
 
 
 def _on_tool_result(
     name: str, content: str, agent_id: str | None = None
 ) -> None:
-    first = content.splitlines()[0] if content else ""
-    if first.startswith("Error:") or first.startswith("<"):
-        console.print(
-            f"{_agent_label(agent_id)}[dim red]  ↳ {first}[/dim red]"
-        )
+    """Show every tool result as a one-line `↳ preview`, dim-cyan on
+    success and dim-red on error. Errors also flip the matching
+    call's status in `_turn_tool_calls` so the end-of-turn summary
+    can mark it ✗."""
+    first = (content.splitlines()[0] if content else "").strip()
+    is_error = first.startswith("Error:") or first.startswith("<")
+    if not first:
+        return
+    preview = first if len(first) <= 80 else first[:79] + "…"
+    style = "dim red" if is_error else "dim cyan"
+    console.print(
+        f"{_agent_label(agent_id)}  [{style}]↳ {preview}[/{style}]"
+    )
+    if is_error and agent_id is None:
+        # Walk backwards to flip the most recent still-OK call of
+        # this name. Multiple calls of the same tool in one turn
+        # match in LIFO order.
+        for entry in reversed(_turn_tool_calls):
+            if entry["name"] == name and entry["ok"]:
+                entry["ok"] = False
+                break
+
+
+def _render_turn_tool_summary() -> None:
+    """One-line dim summary of root-agent tools used in the just-
+    completed turn: ``tools: name ✓ · name ✗ · name ✓``. No-op
+    when no tools fired. Clears the accumulator either way."""
+    if not _turn_tool_calls:
+        return
+    parts = [
+        f"{c['name']} {'✓' if c['ok'] else '✗'}"
+        for c in _turn_tool_calls
+    ]
+    console.print(f"[dim]tools: {' · '.join(parts)}[/dim]")
+    _turn_tool_calls.clear()
 
 
 # Status footer ----------------------------------------------------
@@ -953,30 +1056,70 @@ def _handle_model_command(
     return resolved
 
 
-def _prompt_message(busy: bool) -> ANSI:
-    """Build the prompt message — a thin horizontal divider above the
-    `> ` input arrow when idle, just `> ` while a turn is in flight.
+def _prompt_message() -> ANSI:
+    """Single horizontal divider above the ``>`` input arrow.
 
-    The divider marks a turn boundary: it should only appear once
-    the agent has finished responding and is genuinely waiting for
-    the next input. Drawing it the moment the user hits Enter (i.e.
-    *before* the agent has produced any output) is confusing — the
-    user sees a fresh boundary line, then text streams in *above*
-    it, making the divider feel out of order.
-
-    Suppressing the divider while busy delays the boundary until
-    `turn_complete` flips `turn_busy` back to False; the prompt then
-    invalidates and the divider drops in cleanly above the arrow.
+    The divider is the visual seam between scrollback and the live
+    input area, not a per-turn boundary marker. It stays anchored
+    at the bottom of the terminal regardless of turn state.
+    Committed prompts are walked back and replaced by
+    ``_commit_user_line`` so only ONE divider exists on screen
+    at any time — no accumulating ladder of boundary lines.
 
     Recomputed at every redraw so a terminal resize between turns
     picks up the new width without restart.
     """
-    if busy:
-        return ANSI("> ")
     width = shutil.get_terminal_size((80, 24)).columns
     divider = "─" * max(8, width - 1)
     # \x1b[2m = dim, \x1b[0m = reset
     return ANSI(f"\x1b[2m{divider}\x1b[0m\n> ")
+
+
+def _visual_width(s: str) -> int:
+    """Visual columns occupied by ``s`` on the terminal. Falls
+    back to ``len`` if wcswidth can't classify a character (e.g.
+    embedded control bytes), which over-counts but never
+    under-counts."""
+    w = wcswidth(s)
+    return w if w >= 0 else len(s)
+
+
+def _commit_user_line(line: str) -> None:
+    """After ``prompt_async`` returns, the divider + ``> <line>``
+    that prompt_toolkit just echoed is sitting at the bottom of
+    the scrollback. Walk back over both rows and either:
+
+    - ``line`` non-empty: write a shaded historical row in their
+      place — ``│ <line>`` with a dark-grey background extending
+      across the full terminal width, bold foreground for the
+      user's text. Distinguishes the user's turn from the dim
+      agent stream that follows, with no extra divider noise.
+    - ``line`` empty: leave the rows cleared. The next loop
+      iteration's prompt redraws on the same rows, so an empty
+      Enter leaves no scrollback artifact.
+
+    Called *outside* the ``patch_stdout`` context so the raw ANSI
+    hits the terminal directly without prompt_toolkit relaying it.
+
+    Long lines that wrap across multiple terminal rows only get
+    the last 2 rows handled; wider inputs are an edge case.
+    """
+    # \x1b[2F = move cursor to start of line 2 rows up (the divider)
+    # \x1b[J  = clear from cursor to end of screen
+    sys.stdout.write("\x1b[2F\x1b[J")
+    if line:
+        term_width = shutil.get_terminal_size((80, 24)).columns
+        text = f"│ {line}"
+        pad = " " * max(0, term_width - _visual_width(text) - 1)
+        # 48;5;236 = dark-grey bg, 97 = bright-white fg
+        # 1 / 22   = bold on/off (scoped to the user's text only)
+        # 39 / 49  = default fg / bg
+        sys.stdout.write(
+            "\x1b[48;5;236m\x1b[97m│ "
+            f"\x1b[1m{line}\x1b[22m{pad}"
+            "\x1b[39m\x1b[49m\n"
+        )
+    sys.stdout.flush()
 
 
 _PERMS_HEAD_PREVIEW_MAX = 30
@@ -1388,16 +1531,19 @@ def _print_event(event: dict) -> None:
         was_streaming = key in _streaming_active
         _streaming_active.discard(key)
         if not was_streaming:
-            # Non-streaming provider — full markdown render as before.
+            # Non-streaming provider — full markdown render.
             _on_text(event["text"], agent_id=agent_id)
         else:
-            # Provider streamed — close off the streamed text row so
-            # the markdown render below has a clean blank line above
-            # it, then re-render the same text with full markdown
-            # formatting (bold, headers, lists, code blocks). Skip
-            # the agent-label header that `_on_text` would emit since
-            # the first delta already printed it for this segment.
-            console.print()
+            # Walk back over the streamed-text region and re-emit
+            # the same content as Markdown so the final view has
+            # bold / headers / code-block formatting. The agent
+            # label (if any) sits in the prefix above the streamed
+            # region — don't re-emit it here.
+            _streaming_text.pop(key, None)
+            rendered_rows = _streaming_rendered_rows.pop(key, 0)
+            if rendered_rows > 0:
+                sys.stdout.write(f"\x1b[{rendered_rows}F\x1b[J")
+                sys.stdout.flush()
             console.print(Markdown(event["text"]), style="dim")
             console.print()
     elif kind == "tool_call_started":
@@ -1601,6 +1747,7 @@ async def _repl_async(
                 )
             elif kind == "turn_complete" and agent_id is None:
                 state["turn_busy"] = False
+                _render_turn_tool_summary()
                 # Issue #68: no local input queue to drain anymore.
                 # If the user typed during the turn, those lines
                 # already landed as `user_note` events; the agent
@@ -1687,12 +1834,9 @@ async def _repl_async(
             try:
                 with patch_stdout(raw=True):
                     # Pass the message as a callable so prompt_toolkit
-                    # re-evaluates it on every redraw — the divider
-                    # only renders once `turn_busy` flips back to
-                    # False, so it can't appear above incoming output.
-                    line = await pt_session.prompt_async(
-                        lambda: _prompt_message(state["turn_busy"])
-                    )
+                    # re-evaluates the divider width on each redraw
+                    # (terminal resize between turns).
+                    line = await pt_session.prompt_async(_prompt_message)
             except (EOFError, KeyboardInterrupt):
                 # Ctrl-D / Ctrl-C at the prompt — clean exit.
                 console.print()
@@ -1700,6 +1844,11 @@ async def _repl_async(
             if state["fatal"]:
                 return "fatal"
             stripped = (line or "").strip()
+            # Always erase the divider + arrow row(s) prompt_toolkit
+            # just committed. For non-empty input, replace with a
+            # shaded historical row; for empty input, the next loop
+            # iteration redraws the prompt in place — silent no-op.
+            _commit_user_line(stripped)
             if not stripped:
                 continue
             # Slash commands always process locally — they never go
@@ -1765,6 +1914,10 @@ async def _repl_async(
             else:
                 if not send_or_die("user_prompt", prompt=line):
                     return "fatal"
+                # Defensive: if the previous turn errored out
+                # before turn_complete fired, stale call entries
+                # would leak into the next summary.
+                _turn_tool_calls.clear()
                 agents_state.setdefault(
                     "root", {"status": "thinking"}
                 )["status"] = "thinking"
