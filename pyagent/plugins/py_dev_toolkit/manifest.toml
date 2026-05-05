@@ -4,7 +4,8 @@ description = "Python developer toolkit: structured lint / typecheck / pytest re
 api_version = "1"
 
 [provides]
-tools = ["lint", "typecheck", "run_pytest"]
+tools = ["lint", "typecheck", "run_pytest", "python_env"]
+prompt_sections = ["python-guidance"]
 
 # No [requires] binaries gate — each tool checks its own binary at
 # call time and returns a clean error if missing. A user with only

@@ -676,23 +676,6 @@ def _register_tools(
             subagent_mod.make_notify_parent(state, agent),
             auto_offload=False,
         )
-    # pip_install (issue #46): registered ONLY on the root agent.
-    # The root owns the workspace's `.venv/` and serializes installs
-    # via its single-threaded turn loop. Subagents don't get this
-    # tool — they `ask_parent("install <spec>")` and the root's LLM
-    # decides whether to act. That's the parent-as-broker pattern
-    # that #47 unlocked, replacing the flock approach the issue
-    # originally proposed.
-    if state is not None and state.self_agent_id is None:
-        # `base_config["cwd"]` is the workspace path; `_bootstrap`
-        # always sets it. Tools registered without `base_config` are
-        # the test-only path — skip pip_install there.
-        if base_config is not None:
-            _add(
-                "pip_install",
-                agent_tools.make_pip_install(Path(base_config["cwd"])),
-                auto_offload=False,
-            )
     if allow_meta:
         assert state is not None and parent_session is not None and base_config is not None
         _add(

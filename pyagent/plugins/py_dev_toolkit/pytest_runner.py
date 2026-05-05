@@ -4,7 +4,8 @@ Uses `pytest-json-report` for a reliable structured envelope rather
 than parsing pytest's text output (which shifts shape between
 versions, plugins, and tracebacks). When the json-report plugin
 isn't installed, surfaces a clean error pointing the caller at
-`pip_install pytest-json-report` rather than degrading silently.
+`pip install pytest-json-report` (via the workspace venv obtained
+through `python_env`) rather than degrading silently.
 """
 
 from __future__ import annotations
@@ -59,8 +60,9 @@ def run(
     pytest_bin = shutil.which("pytest")
     if not pytest_bin:
         return (
-            "<error: pytest is not on PATH; install via "
-            "`pip_install pytest pytest-json-report` and retry>"
+            "<error: pytest is not on PATH; call `python_env` to get "
+            "the workspace venv's pip path, then `execute` "
+            "`<pip> install pytest pytest-json-report` and retry>"
         )
 
     # Always gate the target with `require_access`, even if it
@@ -123,8 +125,9 @@ def run(
         combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
         if "unrecognized arguments: --json-report" in combined:
             return (
-                "<error: pytest-json-report plugin missing; install "
-                "via `pip_install pytest-json-report` and retry>"
+                "<error: pytest-json-report plugin missing; call "
+                "`python_env` for the venv's pip, then `execute` "
+                "`<pip> install pytest-json-report` and retry>"
             )
 
         try:

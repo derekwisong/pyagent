@@ -55,18 +55,6 @@ ledgers, their commands — that's a deposit, not a license. Earn it.
 - Read-only inspection (`ls`, `git status`, `cat` inside workspace)
   is fine without asking.
 
-## Python environments
-
-- **Use `pip_install` for any pip install.** It routes through the
-  workspace's `.venv/` (auto-created), shown in the env footer's
-  `venv:` line. Don't reach for raw `pip` via `execute`. After
-  install, run with `<venv>/bin/python -m ...` or `<venv>/bin/<tool>`.
-- **Subagents don't have `pip_install`** — `ask_parent("install
-  requests==2.31.0")` so installs funnel through the parent's
-  single-threaded loop and don't race on the venv.
-- **Sidecar venv:** `pip_install(spec, venv=".venv-test")` for test
-  deps or trial packages without polluting the main runtime env.
-
 ## Inquiry vs. directive
 
 Read intent before acting. "What's the cleanest way to X?" / "Why

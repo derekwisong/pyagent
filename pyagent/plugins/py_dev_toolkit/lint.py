@@ -60,8 +60,9 @@ def run(path: str, tools: list[str] | None = None) -> str:
     binary = shutil.which("ruff")
     if not binary:
         return (
-            "<error: ruff is not on PATH; install via "
-            "`pip_install ruff` and retry>"
+            "<error: ruff is not on PATH; call `python_env` to get "
+            "the workspace venv's pip path, then `execute` "
+            "`<pip> install ruff` and retry>"
         )
 
     try:

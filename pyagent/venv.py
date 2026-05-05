@@ -8,15 +8,22 @@ positive answer: discover the workspace's `.venv/` (or create one
 on first install) and route every install through it.
 
 Discovery order:
-  1. `$VIRTUAL_ENV` — if set, the user already activated something;
-     respect it.
-  2. `<workspace>/.venv` — the conventional name; what most projects
+  1. `<workspace>/.venv` — the conventional name; what most projects
      and editors expect.
-  3. `<workspace>/venv` — the older convention; supported for
+  2. `<workspace>/venv` — the older convention; supported for
      compatibility with existing workspaces.
-  4. None — defer creation until something actually needs to
+  3. None — defer creation until something actually needs to
      install. A workspace that never installs anything stays
      venv-free.
+
+Note: `$VIRTUAL_ENV` is intentionally NOT consulted. Pyagent has
+two venvs in its worldview — the *workspace* venv (this module's
+job) and the *agent* venv pyagent itself runs under (found via
+`sys.prefix` in `python_env`). Honoring an inherited `$VIRTUAL_ENV`
+created a third, ambiguous concept that misrouted installs into
+whatever shell the user happened to launch from. Children spawned
+by `execute` still see `$VIRTUAL_ENV` in their environment if they
+need it; pyagent's own logic does not.
 
 Auto-creation uses the running CLI's interpreter (`sys.executable`),
 so the agent's Python matches the user's. Installation routes via
@@ -60,29 +67,18 @@ def is_venv(path: Path) -> bool:
 
 
 def discover(workspace: Path) -> Path | None:
-    """Return the venv this agent should use, or None if there isn't one yet.
+    """Return the workspace venv, or None if there isn't one yet.
 
     Priority:
-      1. `$VIRTUAL_ENV` (when it points at a real venv)
-      2. `<workspace>/.venv`
-      3. `<workspace>/venv`
+      1. `<workspace>/.venv`
+      2. `<workspace>/venv`
+
+    `$VIRTUAL_ENV` is intentionally not consulted — see this module's
+    docstring for the rationale.
 
     Symlinks are resolved so two CLI processes pointing at the same
     workspace from different paths agree on which venv to share.
     """
-    env_venv = os.environ.get("VIRTUAL_ENV", "").strip()
-    if env_venv:
-        p = Path(env_venv)
-        if is_venv(p):
-            return p.resolve()
-        # Stale env var (venv was deleted) — fall through to workspace
-        # discovery rather than refusing.
-        logger.warning(
-            "VIRTUAL_ENV=%s is set but does not look like a real venv; "
-            "ignoring and falling back to workspace discovery",
-            env_venv,
-        )
-
     for name in (".venv", "venv"):
         candidate = workspace / name
         if is_venv(candidate):
@@ -149,10 +145,10 @@ def ensure_at(target: Path) -> tuple[Path, bool]:
     """Return an existing venv at `target`, or create one there.
 
     Used when the caller wants to address a specific venv (not the
-    default workspace `.venv/`) — e.g. an explicit `pip_install`
-    invocation that names a separate `.venv-test/` to keep test
-    deps out of the main runtime env. Mirrors `ensure` but skips
-    the workspace-wide discovery — the caller has named the venv.
+    default workspace `.venv/`) — e.g. a sidecar `.venv-test/` to
+    keep test deps out of the main runtime env. Mirrors `ensure`
+    but skips the workspace-wide discovery — the caller has named
+    the venv.
 
     Returns `(venv_path, created)`. Raises `RuntimeError` on
     creation failure.
@@ -171,23 +167,17 @@ def describe(workspace: Path) -> str:
     """One-line description for the environment footer.
 
     Returns one of:
-      - `<workspace>/.venv  (active)`           — VIRTUAL_ENV matches
-      - `<workspace>/.venv  (workspace)`        — found but not activated
-      - `none — created on first install`       — nothing yet
+      - `<workspace>/.venv  (workspace)`        — workspace venv found
+      - `none — created on first python_env call` — nothing yet
     Path is shown relative to workspace when possible (less noise in
     the prompt).
     """
     found = discover(workspace)
     if found is None:
-        return "none — created on first pip_install"
+        return "none — created on first `python_env` call"
     try:
         rel = found.relative_to(workspace.resolve())
         display = str(rel) if str(rel) != "." else str(found)
     except ValueError:
         display = str(found)
-    env_venv = os.environ.get("VIRTUAL_ENV", "").strip()
-    if env_venv and Path(env_venv).resolve() == found:
-        suffix = "(active)"
-    else:
-        suffix = "(workspace)"
-    return f"{display}  {suffix}"
+    return f"{display}  (workspace)"

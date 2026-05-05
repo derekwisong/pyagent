@@ -80,8 +80,9 @@ def run(path: str, tool: str = "mypy") -> str:
     binary = shutil.which(tool)
     if not binary:
         return (
-            f"<error: {tool} is not on PATH; install via "
-            f"`pip_install {tool}` and retry>"
+            f"<error: {tool} is not on PATH; call `python_env` to "
+            f"get the workspace venv's pip path, then `execute` "
+            f"`<pip> install {tool}` and retry>"
         )
 
     if tool == "mypy":
