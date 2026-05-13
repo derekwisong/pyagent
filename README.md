@@ -40,32 +40,26 @@ print(agent.run("What is 17 + 25?"))
 ```
 
 Type hints and docstrings become the tool schema — no hand-written
-schemas. The bare-Agent path loads no plugins, skills, or built-in
-file/shell tools; you opt in. See
-[docs/library-usage.md](docs/library-usage.md) for sessions, streaming
-callbacks, the permissions gate, and a la carte feature attach.
+schemas.
 
 ## What's inside
 
-| | |
+At first, this was a simple `Agent` class, written by hand as an exercise to learn
+how to build a flexible tool-calling agent.
+
+I used Claude Code to expand and build more of the features needed for
+a flexible agent.
+
 |---|---|
+| **System Promt Builder** | Build the system prompt throuogh SOUL.md PRIMER.md and more; leverages provider caching |
 | **Tool calling** | Plain Python functions become tools — type hints + docstrings drive the schema. |
-| **Sessions** | Conversations persist across runs; large tool outputs auto-offload to disk. |
-| **Plugins** | Bundled `web_search`, `reddit_search`, `hn_search`, `doc_tools`, `code_mapper`, memory ledger, and more. Extensible at runtime. |
+| **Sessions** | Resumable conversations. |
+| **Plugins** | Python extensions can provide tools and hooks to extend Pyagent |
 | **Skills** | Lazy-loaded "how do I" docs the agent reads on demand (`pdf-from-markdown`, `aviation-weather`, ...). |
 | **Subagents** | Spawn focused child agents; bidirectional comms (`ask_parent`, `tell_subagent`, async fan-out). |
-| **Memory** | USER ledger + MEMORY index, with semantic recall via fastembed. Auto-loaded into the prompt. |
+| **Memory** | USER ledger + MEMORY index, with semantic vector search recall via fastembed. Auto-loaded into the prompt. |
 | **Multi-model** | Switch mid-session with `/model`, define named roles per subagent in `config.toml`. |
-
-## Documentation
-
-- [**docs/cli.md**](docs/cli.md) — running pyagent, model selection, sessions, resets, slash commands.
-- [**docs/library-usage.md**](docs/library-usage.md) — using pyagent from Python.
-- [**docs/configuration.md**](docs/configuration.md) — `config.toml`, defaults, named subagent roles.
-- [**docs/skills.md**](docs/skills.md) — bundled skills, layout, authoring.
-- [**docs/plugins.md**](docs/plugins.md) — bundled plugins, discovery order, brief authoring quickstart.
-- [**docs/design.md**](docs/design.md) — how the loop, tools, system prompt, memory, and subagents fit together.
-- [**docs/plugin-design.md**](docs/plugin-design.md) — full plugin authoring API.
+| **CLI** | Basic CLI REPL to converse with the agent |
 
 ## Environment variables
 
