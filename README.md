@@ -2,7 +2,7 @@
 
 A multi-provider agent framework with plugin, skill, and subagent systems.
 Designed to explore how agent loops, tool calling, memory, and orchestration
-can be structured outside of large frameworks like LangChain.
+can be structured outside of large frameworks.
 
 ## Features
 
