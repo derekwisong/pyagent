@@ -8,10 +8,12 @@ can be structured outside of large frameworks like LangChain.
 
 - **Chat**: `pyagent` for a chat that can read files, run shell
   commands, search the web, and call any tools you've added.
+- **Plugins, skills, memory**: opt into what you need.
+- **Subagents**: Subagents work independently and can communicate with their parent.
+- **Configurable**: Pyagent can be configured at the workspace and user level.
 - **Library**: `from pyagent import Agent, auto_client` to embed the
   agent loop in your own app, notebook, or service.
 - **Bring your own model**: Anthropic, OpenAI, Gemini, or local Ollama.
-- **Plugins, skills, subagents, memory**: opt into what you need.
 
 [![asciicast](https://asciinema.org/a/cR1MyQZow39Ho0Lv.svg)](https://asciinema.org/a/cR1MyQZow39Ho0Lv)
 
@@ -54,15 +56,15 @@ At first, this was a simple `Agent` class, written by hand as an exercise to lea
 how to build a flexible tool-calling agent.
 
 I used Claude Code to expand and build more of the features needed for
-a flexible agent.
+a complete agent.
 
 | | |
 |---|---|
-| **System Promt Builder** | Build the system prompt throuogh SOUL.md PRIMER.md and more; leverages provider caching |
+| **System Prompt Builder** | Build the system prompt through [SOUL.md](pyagent/defaults/SOUL.md) [PRIMER.md](pyagent/defaults/PRIMER.md) and more; leverages provider caching |
 | **Tool calling** | Plain Python functions become tools — type hints + docstrings drive the schema. |
 | **Sessions** | Resumable conversations. |
-| **Plugins** | Python extensions can provide tools and hooks to extend Pyagent |
-| **Skills** | Lazy-loaded "how do I" docs the agent reads on demand (`pdf-from-markdown`, `aviation-weather`, ...). |
+| **Plugins** | Write [plugins](docs/plugins.md) in Python to provide tools and hooks to extend Pyagent |
+| **Skills** | [Skills](docs/skills.md) are lazy-loaded "how do I" docs the agent reads on demand. |
 | **Subagents** | Spawn focused child agents; bidirectional comms (`ask_parent`, `tell_subagent`, async fan-out). |
 | **Memory** | USER ledger + MEMORY index, with semantic vector search recall via fastembed. Auto-loaded into the prompt. |
 | **Multi-model** | Switch mid-session with `/model`, define named roles per subagent in `config.toml`. |
