@@ -50,6 +50,7 @@ how to build a flexible tool-calling agent.
 I used Claude Code to expand and build more of the features needed for
 a flexible agent.
 
+| | |
 |---|---|
 | **System Promt Builder** | Build the system prompt throuogh SOUL.md PRIMER.md and more; leverages provider caching |
 | **Tool calling** | Plain Python functions become tools — type hints + docstrings drive the schema. |
