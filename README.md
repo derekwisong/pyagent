@@ -15,7 +15,7 @@ can be structured outside of large frameworks like LangChain.
   agent loop in your own app, notebook, or service.
 - **Bring your own model**: Anthropic, OpenAI, Gemini, or local Ollama.
 
-[![asciicast](https://asciinema.org/a/cR1MyQZow39Ho0Lv.svg)](https://asciinema.org/a/cR1MyQZow39Ho0Lv)
+[![asciicast](https://asciinema.org/a/5FvXNO6wzrSkKVwd.svg)](https://asciinema.org/a/5FvXNO6wzrSkKVwd)
 
 ## Quick start
 
