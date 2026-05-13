@@ -1,8 +1,12 @@
 # Pyagent
 
-A small, hackable, tool-using LLM agent in Python.
+A multi-provider agent framework with plugin, skill, and subagent systems.
+Designed to explore how agent loops, tool calling, memory, and orchestration
+can be structured outside of large frameworks like LangChain.
 
-- **Terminal**: `pyagent` for a chat that can read files, run shell
+## Features
+
+- **Chat**: `pyagent` for a chat that can read files, run shell
   commands, search the web, and call any tools you've added.
 - **Library**: `from pyagent import Agent, auto_client` to embed the
   agent loop in your own app, notebook, or service.
