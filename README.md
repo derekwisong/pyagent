@@ -13,6 +13,8 @@ can be structured outside of large frameworks like LangChain.
 - **Bring your own model**: Anthropic, OpenAI, Gemini, or local Ollama.
 - **Plugins, skills, subagents, memory**: opt into what you need.
 
+[![asciicast](https://asciinema.org/a/cR1MyQZow39Ho0Lv.svg)](https://asciinema.org/a/cR1MyQZow39Ho0Lv)
+
 ## Quick start
 
 ```bash
