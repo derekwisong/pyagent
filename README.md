@@ -12,7 +12,7 @@ A small, hackable, tool-using LLM agent in Python.
 ## Quick start
 
 ```bash
-pip install -e .                    # editable install from a clone
+pip install git+https://github.com/derekwisong/pyagent.git
 export ANTHROPIC_API_KEY=...        # or OPENAI_API_KEY / GEMINI_API_KEY
 pyagent                             # start chatting
 ```
