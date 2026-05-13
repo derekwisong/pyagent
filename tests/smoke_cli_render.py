@@ -61,7 +61,11 @@ def _check_streaming_assistant_text_walks_back_and_renders_markdown() -> None:
     # Simulate: deltas flowed → `_streaming_active` has "root" with
     # 3 rendered rows recorded → closing assistant_text arrives.
     # Expected: stdout receives a walk-back ANSI sized to the
-    # rendered region, then a Markdown render lands in its place.
+    # rendered region + 1 (the extra row absorbs prompt_toolkit's
+    # redraw between the last delta and this close write — without
+    # it, the streamed dim text stays visible and the markdown lands
+    # one row below as a visible duplicate), then a Markdown render
+    # lands in its place.
     cli._streaming_active.clear()
     cli._streaming_active.add("root")
     cli._streaming_text["root"] = "Hello! How can I assist you today?"
@@ -74,8 +78,8 @@ def _check_streaming_assistant_text_walks_back_and_renders_markdown() -> None:
 
     out = buf.getvalue()
     _check(
-        "stream close walks back exactly the rendered row count",
-        "\x1b[3F\x1b[J" in out,
+        "stream close walks back rendered row count + 1",
+        "\x1b[4F\x1b[J" in out,
         repr(out),
     )
     _check(

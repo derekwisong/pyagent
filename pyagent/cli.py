@@ -1539,13 +1539,32 @@ def _print_event(event: dict) -> None:
             # bold / headers / code-block formatting. The agent
             # label (if any) sits in the prefix above the streamed
             # region — don't re-emit it here.
+            #
+            # Two invariants the working delta loop already proves:
+            #   1. ANSI + replacement bytes must reach patch_stdout as
+            #      ONE atomic write that ends in `\n`. A split write
+            #      (escape via sys.stdout, then markdown via
+            #      console.print) lets patch_stdout commit the markdown
+            #      before the walk-back is part of any committed unit.
+            #      So we capture the Markdown render into a string and
+            #      write everything in one shot.
+            #   2. The walk-back here needs ONE extra row beyond what
+            #      the deltas use. Each delta + this close write are
+            #      separate patch_stdout flushes (separate
+            #      `run_in_terminal` calls). Between the last delta and
+            #      this one, prompt_toolkit redraws the prompt; the
+            #      renderer's `erase()` then lands cursor one row
+            #      further down than where the deltas left it, so we
+            #      walk back rendered_rows + 1 to reach the streamed
+            #      text line.
             _streaming_text.pop(key, None)
             rendered_rows = _streaming_rendered_rows.pop(key, 0)
-            if rendered_rows > 0:
-                sys.stdout.write(f"\x1b[{rendered_rows}F\x1b[J")
-                sys.stdout.flush()
-            console.print(Markdown(event["text"]), style="dim")
-            console.print()
+            with console.capture() as cap:
+                console.print(Markdown(event["text"]), style="dim")
+            md = cap.get().rstrip("\n") + "\n"
+            walk = rendered_rows + 1
+            sys.stdout.write(f"\x1b[{walk}F\x1b[J{md}")
+            sys.stdout.flush()
     elif kind == "tool_call_started":
         _on_tool_call(event["name"], event["args"], agent_id=agent_id)
     elif kind == "tool_result":
