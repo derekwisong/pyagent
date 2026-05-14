@@ -85,10 +85,23 @@ def _get(path: str, params: dict[str, Any]) -> tuple[int, Any]:
 
 
 _STATE_FIELDS = [
-    "icao24", "callsign", "origin_country", "time_position", "last_contact",
-    "longitude", "latitude", "baro_altitude", "on_ground", "velocity",
-    "true_track", "vertical_rate", "sensors", "geo_altitude", "squawk",
-    "spi", "position_source",
+    "icao24",
+    "callsign",
+    "origin_country",
+    "time_position",
+    "last_contact",
+    "longitude",
+    "latitude",
+    "baro_altitude",
+    "on_ground",
+    "velocity",
+    "true_track",
+    "vertical_rate",
+    "sensors",
+    "geo_altitude",
+    "squawk",
+    "spi",
+    "position_source",
 ]
 
 
@@ -97,7 +110,7 @@ def _decode_states(states: list[list[Any]] | None) -> list[dict[str, Any]]:
         return []
     out: list[dict[str, Any]] = []
     for s in states:
-        rec = {k: v for k, v in zip(_STATE_FIELDS, s)}
+        rec = dict(zip(_STATE_FIELDS, s, strict=False))
         if isinstance(rec.get("callsign"), str):
             rec["callsign"] = rec["callsign"].strip() or None
         out.append(rec)
@@ -138,9 +151,7 @@ def _resolve_to_latlon(arg: str) -> tuple[float, float] | str:
     return float(data[0]["lat"]), float(data[0]["lon"])
 
 
-def _states_in_bbox(
-    lamin: float, lomin: float, lamax: float, lomax: float
-) -> str:
+def _states_in_bbox(lamin: float, lomin: float, lamax: float, lomax: float) -> str:
     status, data = _get(
         "/states/all",
         {"lamin": lamin, "lomin": lomin, "lamax": lamax, "lomax": lomax},
@@ -152,9 +163,7 @@ def _states_in_bbox(
                 "Suggest the user set up credentials with `setup-credentials`.>\n"
             )
         return f"<states fetch failed: status={status}: {data}>\n"
-    decoded = _decode_states(
-        data.get("states") if isinstance(data, dict) else None
-    )
+    decoded = _decode_states(data.get("states") if isinstance(data, dict) else None)
     return json.dumps({"count": len(decoded), "states": decoded}, indent=2) + "\n"
 
 

@@ -1,17 +1,11 @@
 """Anthropic implementation of the LLM client interface."""
 
 import os
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 from anthropic import Anthropic
 
-
-# Hardcoded context windows per model family. Built-in providers ship
-# these inline because they don't change often and avoid an API round
-# trip just to know "how big is this model's context." Bumping a model
-# is a one-line edit. Default of 200_000 (the modern Claude family
-# baseline) covers any unknown model name conservatively — better to
-# under-warn than over-warn for a model we haven't catalogued yet.
 _CONTEXT_WINDOWS = {
     "claude-opus-4-7": 200_000,
     "claude-sonnet-4-6": 200_000,
@@ -36,9 +30,6 @@ class AnthropicClient:
         cache: bool = True,
     ) -> None:
         self.model = model
-        # Full provider/model identifier persisted in each turn's usage
-        # dict so the audit can price per-turn correctly without the
-        # caller having to remember which model the session used.
         self.provider_model = f"anthropic/{model}"
         self.max_tokens = max_tokens
         self.cache = cache
@@ -71,12 +62,6 @@ class AnthropicClient:
         if on_text_delta is None:
             response = self._client.messages.create(**kwargs)
             return self._build_response(response)
-        # Streaming path: `messages.stream()` is a context manager that
-        # yields incremental text via `text_stream` and assembles the
-        # full message (content blocks + usage) at exit. We forward
-        # text chunks through the callback while the stream is in
-        # flight, then read `get_final_message()` outside the context
-        # so the SDK has finalised the assembly.
         with self._client.messages.stream(**kwargs) as stream:
             for chunk in stream.text_stream:
                 if chunk:
@@ -104,17 +89,9 @@ class AnthropicClient:
             "messages": [self._to_anthropic(m) for m in conversation],
         }
         if system or system_volatile:
-            # Two-block layout when the caller supplied BOTH a stable
-            # prefix AND a volatile tail: stable block carries
-            # cache_control, volatile block does not. Volatile content
-            # can change turn-to-turn without invalidating the cached
-            # prefix.
-            #
-            # Edge case: if `system` is empty/None but volatile is set,
-            # we cannot emit an empty stable block — Anthropic 400s on
-            # empty text content. Fall back to single-block layout
-            # carrying the volatile content (no cache benefit, but
-            # correct).
+            # Anthropic 400s on empty text content, so a volatile-only
+            # case must collapse to a single block rather than emit an
+            # empty stable block.
             stable = (system or "").strip()
             volatile = (system_volatile or "").strip()
             if self.cache and stable and volatile:
@@ -138,10 +115,7 @@ class AnthropicClient:
                     }
                 ]
             elif self.cache and volatile:
-                # Volatile-only: no cache marker, single block.
-                kwargs["system"] = [
-                    {"type": "text", "text": system_volatile}
-                ]
+                kwargs["system"] = [{"type": "text", "text": system_volatile}]
             else:
                 kwargs["system"] = (
                     f"{system or ''}\n\n{system_volatile}"
@@ -198,9 +172,7 @@ class AnthropicClient:
                         {
                             "type": "tool_result",
                             "tool_use_id": r["id"],
-                            # Anthropic 400s on empty content blocks; the
-                            # other providers accept empty strings, so the
-                            # placeholder lives here, not in the agent.
+                            # Anthropic 400s on empty content blocks.
                             "content": r["content"] or "<empty>",
                         }
                         for r in message["tool_results"]
@@ -208,7 +180,6 @@ class AnthropicClient:
                 }
             return {"role": "user", "content": message["content"]}
 
-        # assistant
         content: list[dict[str, Any]] = []
         if message.get("content"):
             content.append({"type": "text", "text": message["content"]})

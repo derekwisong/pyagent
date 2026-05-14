@@ -75,9 +75,6 @@ def run(path: str, tools: list[str] | None = None) -> str:
     except subprocess.TimeoutExpired:
         return f"<error: ruff timed out after {_TIMEOUT_S}s>"
 
-    # ruff exits non-zero when findings exist; treat that as success
-    # for our purposes. JSON parse failure is the actual error
-    # condition (binary crashed, output corrupted).
     out = proc.stdout or ""
     try:
         findings = json.loads(out) if out.strip() else []
@@ -108,13 +105,10 @@ def _format_findings(findings: list[dict], target: str) -> str:
             fixable += 1
             fix_marker = " — fixable"
         file_rel = _shorten(f.get("filename", "?"))
-        lines.append(
-            f"- {file_rel}:{line}:{col} [{code}] {message}{fix_marker}"
-        )
+        lines.append(f"- {file_rel}:{line}:{col} [{code}] {message}{fix_marker}")
 
     sev_part = ", ".join(
-        f"{n} {sev}{'s' if n != 1 else ''}"
-        for sev, n in sorted(by_sev.items())
+        f"{n} {sev}{'s' if n != 1 else ''}" for sev, n in sorted(by_sev.items())
     )
     fix_part = f", {fixable} fixable" if fixable else ""
     summary = (

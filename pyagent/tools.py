@@ -35,7 +35,6 @@ import requests
 from pyagent import permissions
 from pyagent.session import Attachment
 
-#: Prefix character that marks an errors-as-data tool result.
 ERROR_MARKER_PREFIX = "<"
 
 
@@ -56,17 +55,10 @@ def is_error_result(content: str) -> bool:
     s = content.lstrip()
     return s.startswith(ERROR_MARKER_PREFIX)
 
-# Track in-flight execute() shell subprocesses so the cancel pathway
-# can kill them on Esc. Within a single agent process the tool loop
-# runs serially (so this list is usually 0 or 1), but a list keeps it
-# safe if anything ever runs an `execute` from a worker thread.
+
 _ACTIVE_EXEC_PROCS: list[subprocess.Popen] = []
 _ACTIVE_EXEC_LOCK = threading.Lock()
 
-# Per-stream rolling cap for background-process output. When either
-# stdout or stderr crosses this size, the oldest 256KB are dropped and
-# a `...truncated NN bytes...` notice rides the next read so the agent
-# knows the tail is incomplete.
 _BG_BUF_CAP = 1024 * 1024
 _BG_BUF_DROP = 256 * 1024
 
@@ -97,7 +89,7 @@ class _BackgroundProc:
     lock: threading.Lock = field(default_factory=threading.Lock)
     output_buf: bytearray = field(default_factory=bytearray)
     dropped: int = 0
-    last_source: str = ""  # "stdout" | "stderr" | "" (initial)
+    last_source: str = ""
     last_write: float = 0.0
     threads: list[threading.Thread] = field(default_factory=list)
 
@@ -128,7 +120,6 @@ def kill_active() -> int:
                 os.killpg(proc.pid, signal.SIGKILL)
                 killed += 1
             except ProcessLookupError:
-                # Already exited between the lock and the kill.
                 pass
     with _ACTIVE_BG_LOCK:
         bg_entries = list(_ACTIVE_BG_PROCS.values())
@@ -181,16 +172,7 @@ def _denied(path: str) -> str:
     return f"<permission denied (outside workspace): {path}>"
 
 
-# Memory tools (create_memory / read_memory / update_memory /
-# delete_memory / write_user / recall_memory) live in the bundled
-# memory plugin (pyagent/plugins/memory/). Disabling the plugin
-# removes them entirely — clean replacement surface for alternative
-# memory backends.
-
-
-def read_file(
-    path: str, start: int = 1, end: int | None = None
-) -> "str | Attachment":
+def read_file(path: str, start: int = 1, end: int | None = None) -> "str | Attachment":
     """Read a file and return its contents.
 
     For text files, returns the requested lines as a string. For binary
@@ -212,10 +194,6 @@ def read_file(
         failures (missing path, permission denied, etc.) come back as a
         leading `<...>` marker string.
     """
-    # Models occasionally emit numeric tool args as strings ("50" instead
-    # of 50) even when the JSON schema declares int. Coerce defensively
-    # so the tool returns an actionable error instead of crashing the
-    # turn — surfaced live during the pyagent_self_audit bench run.
     try:
         start = int(start)
     except (TypeError, ValueError):
@@ -386,7 +364,7 @@ def edit_file(
     else:
         idx = text.find(old_string)
         line_no = text[:idx].count("\n") + 1
-        new_text = text[:idx] + new_string + text[idx + len(old_string):]
+        new_text = text[:idx] + new_string + text[idx + len(old_string) :]
         success = f"Edited {path}: replaced 1 occurrence at line {line_no}"
 
     try:
@@ -474,7 +452,6 @@ def grep(
             f"<error: before/after/context must be non-negative, got "
             f"before={before_i}, after={after_i}, context={context_i}>"
         ]
-    # Explicit before/after override the matching side of context.
     eff_before = before_i if before_i > 0 else context_i
     eff_after = after_i if after_i > 0 else context_i
 
@@ -495,27 +472,21 @@ def grep(
         except (UnicodeDecodeError, PermissionError):
             continue
         lines = text.splitlines()
-        match_idxs = [
-            i for i, line in enumerate(lines) if regex.search(line)
-        ]
+        match_idxs = [i for i, line in enumerate(lines) if regex.search(line)]
         if not match_idxs:
             continue
         if not use_context:
             for i in match_idxs:
                 results.append(f"{f}:{i + 1}:{lines[i]}")
             continue
-        # Build collapsed groups: a new group starts when the next
-        # match's leading context window doesn't touch the previous
-        # group's trailing context window.
         match_set = set(match_idxs)
-        groups: list[tuple[int, int]] = []  # inclusive (start, end) line idx
+        groups: list[tuple[int, int]] = []
         cur_start = max(0, match_idxs[0] - eff_before)
         cur_end = min(len(lines) - 1, match_idxs[0] + eff_after)
         for m in match_idxs[1:]:
             m_start = max(0, m - eff_before)
             m_end = min(len(lines) - 1, m + eff_after)
             if m_start <= cur_end + 1:
-                # Windows touch or overlap — extend.
                 if m_end > cur_end:
                     cur_end = m_end
             else:
@@ -532,11 +503,6 @@ def grep(
     return results
 
 
-# Default exclusion globs for `glob`. Mirrors the
-# shutil.ignore_patterns set bench_cli uses when seeding workspaces
-# (see pyagent/bench_cli.py) so users see the same rules across pyagent.
-# We deliberately don't parse `.gitignore` — that's scope creep; ad-hoc
-# overrides should pass an explicit `root` and a tighter pattern.
 _GLOB_DEFAULT_EXCLUDES: tuple[str, ...] = (
     ".git",
     ".venv",
@@ -608,7 +574,9 @@ def glob(
     elif isinstance(pattern, list):
         patterns = [str(p) for p in pattern]
     else:
-        return [f"<error: pattern must be str or list[str], got {type(pattern).__name__}>"]
+        return [
+            f"<error: pattern must be str or list[str], got {type(pattern).__name__}>"
+        ]
     if not patterns:
         return ["<error: pattern list is empty>"]
 
@@ -630,7 +598,6 @@ def glob(
                 try:
                     rel = hit.relative_to(root_path)
                 except ValueError:
-                    # Pattern escaped the root via "..", skip.
                     continue
                 if _is_excluded(rel.parts):
                     continue
@@ -642,17 +609,11 @@ def glob(
     total = len(sorted_rel)
     if total > limit:
         capped = sorted_rel[:limit]
-        capped.append(
-            f"<truncated: {total} total matches; tighten the pattern>"
-        )
+        capped.append(f"<truncated: {total} total matches; tighten the pattern>")
         return capped
     return sorted_rel
 
 
-# Patterns that should never run unattended. This is a speed bump
-# against accidents, not a sandbox — a determined model can dodge any
-# regex with variable expansion, escapes, or base64. Real safety lives
-# in the human-in-the-loop and OS-level isolation.
 _DANGEROUS_PATTERNS: list[tuple[str, str]] = [
     (r"--no-preserve-root", "rm bypassing root protection"),
     (
@@ -732,10 +693,6 @@ def execute(command: str) -> str:
             f"<refused: matches dangerous pattern ({blocked}); "
             f"ask the human to run it manually if intended>"
         )
-    # Run the shell in its own process group so a timeout takes the whole
-    # tree (including grandchildren) rather than orphaning them. stdin is
-    # closed so subprocesses can't accidentally consume the parent's
-    # raw-mode stdin or hang waiting for input.
     proc = subprocess.Popen(
         command,
         shell=True,
@@ -766,23 +723,7 @@ def execute(command: str) -> str:
                 pass
     if stdout and not stdout.endswith("\n"):
         stdout += "\n"
-    return (
-        f"exit_code: {returncode}\n"
-        f"stdout:\n{stdout}"
-        f"stderr:\n{stderr}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Background shell processes — run_background / read_output / wait_for /
-# kill_process. Lifecycle:
-#   run_background   spawns + registers a handle, returns the handle id.
-#   read_output      decodes the captured bytes since an offset.
-#   wait_for         blocks (with timeout) until exit / output match /
-#                    silence settles.
-#   kill_process     SIGKILLs the group and removes the handle.
-# kill_active() (above) flushes BOTH foreground and background sets so
-# the cancel pathway leaves a clean slate.
+    return f"exit_code: {returncode}\n" f"stdout:\n{stdout}" f"stderr:\n{stderr}"
 
 
 def _bg_handle() -> str:
@@ -806,38 +747,24 @@ def _bg_reader(bg: _BackgroundProc, stream, which: str) -> None:
     """
     try:
         while True:
-            # `read1` returns whatever is currently buffered up to the
-            # cap — `read(4096)` would block until 4096 bytes (or EOF),
-            # which interacts badly with line-buffered tools that emit
-            # short bursts and then sleep. Tail-follow needs the
-            # bytes-out-now semantics.
             chunk = stream.read1(4096)
             if not chunk:
                 break
             with bg.lock:
-                # Insert a transition marker only when the source
-                # actually changes; the initial state (last_source="")
-                # treats stdout as the implicit default — no leading
-                # `[stdout]` marker on processes that never use stderr.
                 if which != bg.last_source and (
                     bg.last_source != "" or which != "stdout"
                 ):
                     if bg.output_buf and not bg.output_buf.endswith(b"\n"):
-                        bg.output_buf.append(0x0A)  # newline
+                        bg.output_buf.append(0x0A)
                     bg.output_buf.extend(f"[{which}]\n".encode())
                 bg.last_source = which
                 bg.output_buf.extend(chunk)
                 if len(bg.output_buf) > _BG_BUF_CAP:
-                    overflow = len(bg.output_buf) - (
-                        _BG_BUF_CAP - _BG_BUF_DROP
-                    )
+                    overflow = len(bg.output_buf) - (_BG_BUF_CAP - _BG_BUF_DROP)
                     del bg.output_buf[:overflow]
                     bg.dropped += overflow
                 bg.last_write = time.monotonic()
     except (ValueError, OSError):
-        # Stream closed underneath us (proc died, fd reaped). The
-        # main reader exits — wait_for / read_output handle the
-        # post-mortem state via proc.poll().
         pass
     finally:
         try:
@@ -1004,9 +931,7 @@ def read_output(handle: str, *, since: int = 0, max_chars: int = 4000) -> str:
         return bg
 
     with bg.lock:
-        text, next_since = _decode_with_drop(
-            bg.output_buf, since, bg.dropped
-        )
+        text, next_since = _decode_with_drop(bg.output_buf, since, bg.dropped)
     rc = bg.proc.poll()
     status = "running" if rc is None else f"exited (rc={rc})"
 
@@ -1094,12 +1019,10 @@ def wait_for(
                 f"{timeout_s}s; tail:\n{tail}>"
             )
         tail = _tail(_combined_text(bg))
-        return (
-            f"exited {bg.handle} ({bg.name}) rc={rc}\ntail:\n{tail}"
-        )
+        return f"exited {bg.handle} ({bg.name}) rc={rc}\ntail:\n{tail}"
 
     if until.startswith("output_contains:"):
-        needle = until[len("output_contains:"):]
+        needle = until[len("output_contains:") :]
         if not needle:
             return "<error: output_contains needs a non-empty substring>"
         while time.monotonic() < deadline:
@@ -1110,8 +1033,6 @@ def wait_for(
                     f"{needle!r}\ntail:\n{tail}"
                 )
             if bg.proc.poll() is not None:
-                # Process exited before we matched. Check one more time
-                # in case the final bytes landed under the lock.
                 if needle in _combined_text(bg):
                     tail = _tail(_combined_text(bg))
                     return (
@@ -1132,7 +1053,7 @@ def wait_for(
         )
 
     if until.startswith("output_matches:"):
-        pattern = until[len("output_matches:"):]
+        pattern = until[len("output_matches:") :]
         if not pattern:
             return "<error: output_matches needs a non-empty regex>"
         try:
@@ -1172,7 +1093,7 @@ def wait_for(
         )
 
     if until.startswith("silence:"):
-        spec = until[len("silence:"):]
+        spec = until[len("silence:") :]
         if spec.endswith("s"):
             spec = spec[:-1]
         try:
@@ -1192,8 +1113,6 @@ def wait_for(
                     f"{quiet_s}s without new output\ntail:\n{tail}"
                 )
             if bg.proc.poll() is not None:
-                # Exited; treat the remaining quiet window as instantly
-                # satisfied — no more output is coming.
                 tail = _tail(_combined_text(bg))
                 return (
                     f"settled {bg.handle} ({bg.name}) — process exited "
@@ -1235,7 +1154,6 @@ def kill_process(handle: str) -> str:
     try:
         os.killpg(bg.proc.pid, signal.SIGKILL)
     except ProcessLookupError:
-        # Already exited; fall through and clean up.
         pass
     try:
         rc = bg.proc.wait(timeout=2.0)
@@ -1244,9 +1162,7 @@ def kill_process(handle: str) -> str:
         rc_str = "unknown (wait timed out)"
     with _ACTIVE_BG_LOCK:
         _ACTIVE_BG_PROCS.pop(bg.handle, None)
-    return (
-        f"killed {bg.handle} ({bg.name}) rc={rc_str}"
-    )
+    return f"killed {bg.handle} ({bg.name}) rc={rc_str}"
 
 
 _FETCH_UA = (
@@ -1254,15 +1170,8 @@ _FETCH_UA = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
-# Cap the inline markdown so a giant page can't blow the conversation.
-# Past this size we truncate the inline body and tell the agent to
-# `read_file` the saved raw HTML attachment for the full content (or
-# `html_select` if a researcher role wants a specific CSS slice).
 _FETCH_INLINE_MD_CEILING = 8000
 
-# Soft import: when the html-tools plugin is enabled (the default),
-# fetch_url uses its conversion as a convenience. When the plugin is
-# disabled or its deps are missing, we fall back to raw-attachment-only.
 try:
     from pyagent.plugins.html_tools import extraction as _html_extraction
 except ImportError:
@@ -1273,12 +1182,11 @@ def _detect_content_type(headers: dict, body: str) -> tuple[str, bool]:
     """Return (content_type, is_html). content_type is the mime portion
     of the Content-Type header, lowercased; is_html is True for HTML
     responses (used to decide whether markdown conversion applies)."""
-    raw = (headers.get("Content-Type") or headers.get("content-type") or "")
+    raw = headers.get("Content-Type") or headers.get("content-type") or ""
     ctype = raw.split(";", 1)[0].strip().lower()
     if not ctype:
-        # Cheap content sniff for hosts that don't set Content-Type.
         head = body[:512].lstrip().lower()
-        if head.startswith("<!doctype html") or head.startswith("<html"):
+        if head.startswith(("<!doctype html", "<html")):
             ctype = "text/html"
         elif head.startswith(("{", "[")):
             ctype = "application/json"
@@ -1329,9 +1237,7 @@ def fetch_url(
         → `<request failed: ...>`.
     """
     try:
-        response = requests.get(
-            url, headers={"User-Agent": _FETCH_UA}, timeout=30
-        )
+        response = requests.get(url, headers={"User-Agent": _FETCH_UA}, timeout=30)
     except requests.RequestException as e:
         return f"<request failed: {e}>"
 
@@ -1341,13 +1247,12 @@ def fetch_url(
     size = len(body)
 
     header_lines = [
-        f"Fetched {url} (status {response.status_code}, "
-        f"{size} chars, {ctype}).",
+        f"Fetched {url} (status {response.status_code}, " f"{size} chars, {ctype}).",
     ]
 
     if format == "void":
         header_lines.append(
-            "No content returned (format=\"void\"). Use `grep`, "
+            'No content returned (format="void"). Use `grep`, '
             "`read_file`, or `html_select` (researcher role) on the "
             "saved path to interrogate."
         )
@@ -1357,8 +1262,8 @@ def fetch_url(
     if not is_html or _html_extraction is None:
         if not is_html:
             header_lines.append(
-                f"Non-HTML response. Use `read_file` / `grep` on the "
-                f"saved path to extract."
+                "Non-HTML response. Use `read_file` / `grep` on the "
+                "saved path to extract."
             )
         else:
             header_lines.append(
@@ -1369,9 +1274,7 @@ def fetch_url(
         return Attachment(content=body, preview=preview, suffix=suffix)
 
     try:
-        md = _html_extraction.html_to_markdown(
-            body, main_content=main_content
-        )
+        md = _html_extraction.html_to_markdown(body, main_content=main_content)
     except Exception as e:
         header_lines.append(
             f"Markdown conversion failed ({type(e).__name__}: {e}). "
@@ -1399,5 +1302,3 @@ def fetch_url(
     )
     preview = "\n".join(header_lines) + "\n\n" + md_inline
     return Attachment(content=body, preview=preview, suffix=suffix)
-
-

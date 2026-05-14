@@ -49,7 +49,7 @@ class Skill:
     name: str
     description: str
     body: str
-    source: Path  # absolute path to SKILL.md
+    source: Path
 
 
 def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:

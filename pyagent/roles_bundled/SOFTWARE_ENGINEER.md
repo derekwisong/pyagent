@@ -31,7 +31,7 @@ existing patterns, then make the smallest change that satisfies the
 task. Match the surrounding style; don't rewrite a module's
 conventions to suit your taste.
 
-Run the tests. If a smoke or unit suite exists for the area you're
+Run the tests. If a test suite exists for the area you're
 touching, run it before and after your change. If your change breaks
 something unrelated, stop and ask — don't paper over it.
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 _WORKSPACE: Path = Path.cwd().resolve()
 _APPROVED: set[Path] = set()
@@ -117,9 +117,7 @@ def _prompt(target: Path) -> bool:
             f"  target:    {target}\n"
         )
         while True:
-            sys.stderr.write(
-                "Allow? [y]es / [n]o / [a]lways (this path and below): "
-            )
+            sys.stderr.write("Allow? [y]es / [n]o / [a]lways (this path and below): ")
             sys.stderr.flush()
             line = sys.stdin.readline()
             if not line:  # EOF — treat as denial rather than looping forever
@@ -132,9 +130,7 @@ def _prompt(target: Path) -> bool:
             if answer in ("a", "always"):
                 _APPROVED.add(target)
                 return True
-            sys.stderr.write(
-                f"  unrecognized: {answer!r} — please answer y, n, or a\n"
-            )
+            sys.stderr.write(f"  unrecognized: {answer!r} — please answer y, n, or a\n")
     finally:
         if _RESUME_IO:
             _RESUME_IO()

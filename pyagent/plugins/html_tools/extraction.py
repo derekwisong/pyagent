@@ -10,24 +10,15 @@ the plugin tools and `fetch_url` share one implementation.
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 from bs4 import BeautifulSoup
 from markdownify import markdownify
 
-
-# Tags whose presence almost always means boilerplate, not content. We
-# strip these unconditionally — even when main_content=False — because
-# they break markdown rendering (script/style content embedded in the
-# converter output is noise, not signal).
 _ALWAYS_STRIP = ("script", "style", "noscript", "template")
 
-# Tags that frame the page chrome rather than the content. Stripped
-# only when `main_content=True`.
 _BOILERPLATE = ("nav", "aside", "footer", "header", "form")
 
-# Selectors we try in order to find the article body when the page
-# doesn't use a single <main> or <article> wrapper.
 _MAIN_CANDIDATES = (
     "main",
     "article",
@@ -80,9 +71,6 @@ def html_to_markdown(html: str, *, main_content: bool = True) -> str:
             target = main
 
     md = markdownify(str(target), heading_style="ATX")
-    # Markdownify can leave long runs of blank lines from divs/spans;
-    # collapse runs of >2 blank lines down to 2 so the markdown reads
-    # cleanly without changing the structural meaning.
     lines = md.splitlines()
     out: list[str] = []
     blanks = 0

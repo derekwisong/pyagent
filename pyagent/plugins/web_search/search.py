@@ -11,13 +11,11 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Sequence
+from collections.abc import Sequence
 
 logger = logging.getLogger(__name__)
 
 
-# Retry policy defaults. These are overridable via [plugins.web-search]
-# in config.toml — see web_search/__init__.py for the resolver.
 _DEFAULT_ATTEMPTS = 3
 _DEFAULT_BACKOFF_S: tuple[float, ...] = (1.0, 3.0)
 _DEFAULT_BACKEND = "auto"
@@ -88,8 +86,6 @@ def ddg_text_search(
         engines all returned no results (a successful empty result;
         not a retried failure).
     """
-    # Local import so an environment missing `ddgs` still loads the
-    # plugin module (the tool will return a clean error when called).
     from ddgs import DDGS
     from ddgs.exceptions import (
         DDGSException,
@@ -105,18 +101,11 @@ def ddg_text_search(
         try:
             results = DDGS().text(query, max_results=n, backend=backend)
         except RatelimitException as e:
-            # Don't retry — the upstream is explicitly throttling.
-            # The caller surfaces a distinct marker so the agent can
-            # back off rather than re-fire the same query.
             raise SearchRateLimited(str(e)) from e
         except (TimeoutException, DDGSException) as e:
             last_err = e
-            logger.info(
-                "web_search attempt %d/%d failed: %s", i + 1, attempts, e
-            )
+            logger.info("web_search attempt %d/%d failed: %s", i + 1, attempts, e)
             if i < attempts - 1:
-                # Sleep before the next attempt. backoff_s shorter
-                # than attempts-1 reuses the last value.
                 if backoff_s:
                     delay = backoff_s[min(i, len(backoff_s) - 1)]
                 else:
@@ -135,12 +124,6 @@ def ddg_text_search(
                     )
                 )
             if not out:
-                # Empty result with no exception is the silent-break
-                # signature — could be a genuine niche query or scraper
-                # drift after a DDG HTML change. The agent gets the
-                # `<no results>` marker either way; the warning lets
-                # an operator notice the pattern in logs (and tells
-                # them to check whether ddgs needs an update).
                 logger.warning(
                     "web_search: backend %r returned 0 results for "
                     "%r — may be a niche query or scraper drift",
@@ -149,16 +132,10 @@ def ddg_text_search(
                 )
             return out
 
-    # All attempts exhausted. last_err is set because we only land
-    # here if the loop body raised on every iteration.
-    raise SearchBackoffExhausted(
-        f"after {attempts} attempt(s): {last_err}"
-    )
+    raise SearchBackoffExhausted(f"after {attempts} attempt(s): {last_err}")
 
 
-def format_search_results(
-    results: list[SearchResult], query: str
-) -> str:
+def format_search_results(results: list[SearchResult], query: str) -> str:
     """Render a list of `SearchResult` as a markdown numbered list.
 
     Empty input yields a `<no results ...>` marker so the agent can
@@ -173,9 +150,6 @@ def format_search_results(
         if r.snippet:
             lines.append(f"   {r.snippet}")
         lines.append("")
-    # Drop a trailing blank line for cleanliness.
     while lines and lines[-1] == "":
         lines.pop()
     return "\n".join(lines)
-
-

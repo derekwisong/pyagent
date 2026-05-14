@@ -24,12 +24,6 @@ from pyagent.sessions_audit_render import (
     render_text,
 )
 
-
-# Used when --model is unset and no `default_model` is in config. Sonnet
-# is the broadly-available middle tier; the audit only uses this for
-# cost estimation, so a wrong default produces a wrong $ figure but
-# still-correct token totals. Centralized so future model bumps touch
-# one site.
 _DEFAULT_AUDIT_MODEL = "anthropic/claude-sonnet-4-6"
 
 
@@ -70,9 +64,7 @@ def _info(d: Path) -> dict[str, object]:
     if conv.exists():
         with conv.open() as f:
             turns = sum(1 for line in f if line.strip())
-    total_size = sum(
-        f.stat().st_size for f in d.rglob("*") if f.is_file()
-    )
+    total_size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
     return {
         "id": d.name,
         "mtime": d.stat().st_mtime,
@@ -145,9 +137,7 @@ def delete_cmd(session_id: str | None, all_: bool, dry_run: bool) -> None:
 
     if all_:
         if session_id:
-            raise click.UsageError(
-                "pass either <session_id> or --all, not both."
-            )
+            raise click.UsageError("pass either <session_id> or --all, not both.")
         dirs = _session_dirs(root)
         if not dirs:
             click.echo(f"no sessions in {root}.")
@@ -198,9 +188,7 @@ def prune_cmd(
     """Bulk-delete sessions matching one selector. Dry-run by default."""
     selectors = [older_than is not None, keep is not None, all_]
     if sum(selectors) != 1:
-        raise click.UsageError(
-            "provide exactly one of --older-than, --keep, --all."
-        )
+        raise click.UsageError("provide exactly one of --older-than, --keep, --all.")
 
     root = _root()
     dirs = _session_dirs(root)
@@ -250,9 +238,7 @@ def prune_cmd(
     ),
 )
 @click.option("--cost-only", "-c", is_flag=True, help="Show header only.")
-@click.option(
-    "--turns-only", "-t", is_flag=True, help="Show per-turn table only."
-)
+@click.option("--turns-only", "-t", is_flag=True, help="Show per-turn table only.")
 @click.option(
     "--attachments-only",
     "-a",
@@ -293,9 +279,6 @@ def audit_cmd(
     if not target.exists():
         raise click.ClickException(f"no session {session_id!r} in {root}.")
 
-    # Resolve which sections the user wants. Default = all four. Any
-    # `--*-only` flag narrows to that one section. Multiple `-only`
-    # flags compose (so `-c -a` shows cost + attachments).
     sections: set[str]
     only_flags = {
         "cost": cost_only,
@@ -308,7 +291,6 @@ def audit_cmd(
     else:
         sections = set(ALL_SECTIONS)
 
-    # Resolve model: --model > config.default_model > sonnet fallback.
     if model:
         resolved_model = model
     else:

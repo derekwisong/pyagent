@@ -46,9 +46,7 @@ class Dialect:
 
     name: str = "default"
 
-    def render_tool_calls_in_content(
-        self, tool_calls: list[dict[str, Any]]
-    ) -> str:
+    def render_tool_calls_in_content(self, tool_calls: list[dict[str, Any]]) -> str:
         """Return the in-content envelope for the given tool calls.
 
         Caller is responsible for composing this with any preceding
@@ -68,9 +66,7 @@ class QwenDialect(Dialect):
 
     name = "qwen"
 
-    def render_tool_calls_in_content(
-        self, tool_calls: list[dict[str, Any]]
-    ) -> str:
+    def render_tool_calls_in_content(self, tool_calls: list[dict[str, Any]]) -> str:
         body = "\n".join(
             json.dumps({"name": tc["name"], "arguments": tc["args"]})
             for tc in tool_calls
@@ -90,9 +86,7 @@ class LlamaDialect(Dialect):
 
     name = "llama"
 
-    def render_tool_calls_in_content(
-        self, tool_calls: list[dict[str, Any]]
-    ) -> str:
+    def render_tool_calls_in_content(self, tool_calls: list[dict[str, Any]]) -> str:
         return "\n".join(
             json.dumps({"name": tc["name"], "parameters": tc["args"]})
             for tc in tool_calls

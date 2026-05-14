@@ -27,7 +27,6 @@ from pathlib import Path
 
 from pyagent import venv as venv_mod
 
-
 _WORKSPACE_PY_VERSION_TIMEOUT_S = 10
 
 
@@ -101,9 +100,7 @@ def make_python_env(workspace: Path):
         """
         scope = (scope or "workspace").strip().lower()
         if scope not in ("workspace", "agent"):
-            return (
-                f"<error: scope must be 'workspace' or 'agent', got {scope!r}>"
-            )
+            return f"<error: scope must be 'workspace' or 'agent', got {scope!r}>"
 
         if scope == "workspace":
             try:
@@ -124,9 +121,6 @@ def make_python_env(workspace: Path):
                 }
             )
 
-        # scope == "agent": the venv pyagent is running under, if any.
-        # `sys.prefix != sys.base_prefix` is the canonical "am I in a
-        # venv" check; if not, we report honestly without creating.
         in_venv = sys.prefix != sys.base_prefix
         if not in_venv:
             return json.dumps(
@@ -135,9 +129,7 @@ def make_python_env(workspace: Path):
                     "venv_path": "",
                     "python": sys.executable,
                     "pip": "",
-                    "python_version": ".".join(
-                        map(str, sys.version_info[:3])
-                    ),
+                    "python_version": ".".join(map(str, sys.version_info[:3])),
                     "exists_before_call": False,
                     "note": (
                         "pyagent is not running in a venv; "
@@ -149,13 +141,8 @@ def make_python_env(workspace: Path):
             )
 
         agent_venv = Path(sys.prefix)
-        # Use the canonical helpers so Linux/macOS/Windows all agree
-        # on bin/Scripts naming, even though we already know
-        # `sys.executable`.
         python = venv_mod.python_path(agent_venv)
         pip = venv_mod.pip_path(agent_venv)
-        # `pip` may not be present in some minimal venvs — surface
-        # that as a note rather than a hard error.
         note = ""
         if not pip.exists():
             note = (

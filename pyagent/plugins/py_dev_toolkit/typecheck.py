@@ -22,22 +22,8 @@ from pathlib import Path
 from pyagent import permissions
 from pyagent.plugins.py_dev_toolkit._pathutil import shorten as _shorten
 
-_TIMEOUT_S = 120  # typecheckers are slower than linters; bump from 60.
+_TIMEOUT_S = 120
 
-# Text-format mypy line: `path:line:col: severity: message [code]`.
-# `(?P<file>.+?)` is non-greedy so it accepts paths containing
-# colons — Windows drive letters (`C:\foo\bar.py:3:1: error: …`)
-# being the case that bit us. Earlier `[^:]+` silently dropped
-# every error on Windows, returning a false-clean result.
-#
-# Edge case the non-greedy match doesn't fully cover: a POSIX path
-# with a single colon followed by a digit (e.g. `dir:9file.py`)
-# could in principle confuse the engine. In practice it matches
-# correctly because the trailing `:\s+(error|note|warning):\s+`
-# anchor requires a real severity token after the second colon —
-# the engine backtracks until the file portion is the right shape.
-# Documented because the algorithmic guarantee isn't obvious from
-# the regex alone.
 _MYPY_TEXT_LINE = re.compile(
     r"^(?P<file>.+?):(?P<line>\d+):(?P<col>\d+):\s+"
     r"(?P<sev>error|note|warning):\s+(?P<msg>.*?)"
@@ -67,9 +53,7 @@ def run(path: str, tool: str = "mypy") -> str:
     if not path or not str(path).strip():
         return "<error: path is required>"
     if tool not in ("mypy", "pyright"):
-        return (
-            f"<error: tool must be 'mypy' or 'pyright', got {tool!r}>"
-        )
+        return f"<error: tool must be 'mypy' or 'pyright', got {tool!r}>"
 
     target = Path(path)
     if not target.exists():
@@ -109,14 +93,12 @@ def _run_mypy(binary: str, target: Path) -> str:
     return _format("mypy", findings, str(target))
 
 
-def _try_mypy_json(
-    binary: str, target: Path
-) -> tuple[list[dict], str | None] | None:
+def _try_mypy_json(binary: str, target: Path) -> tuple[list[dict], str | None] | None:
     """Try `mypy -O json`. Returns:
-      - `(findings, None)` on success.
-      - `(_, error_string)` when mypy ran but failed.
-      - `None` when the JSON flag isn't recognized (older mypy);
-        caller should fall back to text parsing.
+    - `(findings, None)` on success.
+    - `(_, error_string)` when mypy ran but failed.
+    - `None` when the JSON flag isn't recognized (older mypy);
+      caller should fall back to text parsing.
     """
     try:
         proc = subprocess.run(
@@ -128,25 +110,13 @@ def _try_mypy_json(
     except subprocess.TimeoutExpired:
         return [], f"<error: mypy timed out after {_TIMEOUT_S}s>"
 
-    # Robustly detect "JSON flag not recognized" by inspecting the
-    # *first non-empty stdout line* rather than substring-matching
-    # mypy's error wording. If JSON is producing output, the first
-    # non-empty line is a JSON object (`{...}`); anything else means
-    # mypy printed a usage error or a localized message and we
-    # should fall through to text parsing instead of trusting what
-    # we got. This survives mypy reword / locale changes.
     first = next(
         (ln for ln in (proc.stdout or "").splitlines() if ln.strip()),
         "",
     ).lstrip()
     if first and not first.startswith("{"):
-        return None  # older mypy — fall back to text parsing
+        return None
 
-    # mypy exits 1 when it finds errors — that's normal. Treat
-    # exit > 1 as failure only if no JSON output came through; some
-    # configurations print partial results plus a non-zero status
-    # (plugin failures, etc.), and we'd rather surface what we got
-    # than swallow it.
     if proc.returncode > 1 and not first:
         err = (proc.stderr or "").strip() or "(no stderr)"
         return [], f"<error: mypy failed (exit {proc.returncode}): {err}>"
@@ -268,15 +238,13 @@ def _run_pyright(binary: str, target: Path) -> str:
     diagnostics = data.get("generalDiagnostics") or []
     findings: list[dict] = []
     for d in diagnostics:
-        # "information" / "hint" are pyright's equivalent of mypy
-        # notes — context, not findings. Skip for the same reason.
         if d.get("severity") in ("information", "hint"):
             continue
         rng = (d.get("range") or {}).get("start") or {}
         findings.append(
             {
                 "filename": d.get("file", "?"),
-                "line": int(rng.get("line", 0)) + 1,  # pyright is 0-based
+                "line": int(rng.get("line", 0)) + 1,
                 "col": int(rng.get("character", 0)) + 1,
                 "severity": d.get("severity", "error"),
                 "code": d.get("rule") or "",
@@ -300,8 +268,7 @@ def _format(tool: str, findings: list[dict], target: str) -> str:
             f"{code_part}{f['message']}"
         )
     sev_part = ", ".join(
-        f"{n} {sev}{'s' if n != 1 else ''}"
-        for sev, n in sorted(by_sev.items())
+        f"{n} {sev}{'s' if n != 1 else ''}" for sev, n in sorted(by_sev.items())
     )
     summary = (
         f"{tool}: {len(findings)} finding"

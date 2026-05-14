@@ -56,13 +56,9 @@ def list_cmd() -> None:
             if not record.enabled:
                 tags.append("disabled")
             if record.shadowed_by:
-                tags.append(
-                    f"overrides {len(record.shadowed_by)} earlier tier(s)"
-                )
+                tags.append(f"overrides {len(record.shadowed_by)} earlier tier(s)")
             tools = ", ".join(m.provides_tools) or "(no tools)"
-            click.echo(
-                f"  {m.name} [{', '.join(tags)}]: {m.description}"
-            )
+            click.echo(f"  {m.name} [{', '.join(tags)}]: {m.description}")
             click.echo(f"    tools: {tools}")
             if record.shadowed_by:
                 for path in record.shadowed_by:

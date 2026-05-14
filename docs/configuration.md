@@ -29,6 +29,7 @@ built_in_plugins_enabled = [
   "memory", "html-tools",
   "web-search", "reddit-search", "hn-search",
   "code-mapper", "claude-code-cli", "ollama", "py-dev-toolkit",
+  "echo-plugin",
 ]
 
 [subagents]

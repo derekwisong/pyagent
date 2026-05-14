@@ -37,16 +37,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
 
 from pyagent.session import Attachment
 
 logger = logging.getLogger(__name__)
 
 
-# Reddit subreddit names: alphanumeric + underscore, 1-21 chars.
-# Validating up front catches typos like "Python/comments/abc" that
-# would otherwise produce a 404 URL after path concatenation.
 _SUBREDDIT_RE = re.compile(r"^[A-Za-z0-9_]{1,21}$")
 
 
@@ -55,7 +51,7 @@ _DEFAULT_USER_AGENT = (
     "pyagent-reddit-search/0.1 (+https://github.com/derekwisong/pyagent)"
 )
 _DEFAULT_SAVE_STRUCTURED = True
-_MAX_RESULTS = 25  # Reddit caps at 100 per page; we cap lower to keep results focused
+_MAX_RESULTS = 25
 _VALID_TIME_WINDOWS = {"hour", "day", "week", "month", "year", "all"}
 _VALID_SORTS = {"relevance", "hot", "top", "new", "comments"}
 
@@ -65,14 +61,14 @@ class RedditPost:
     """One Reddit search result, normalized."""
 
     title: str
-    url: str          # external URL the post links to (or self-permalink for text posts)
-    permalink: str    # reddit.com permalink — always present
+    url: str
+    permalink: str
     subreddit: str
     author: str
     score: int
     num_comments: int
     created_utc: float
-    selftext_excerpt: str   # first ~300 chars of self-post body, "" for link posts
+    selftext_excerpt: str
 
 
 def _resolve_timeout(plugin_cfg: dict) -> int:
@@ -109,9 +105,7 @@ def _config_warnings(plugin_cfg: dict) -> list[str]:
     if "user_agent" in plugin_cfg:
         raw = plugin_cfg["user_agent"]
         if not isinstance(raw, str) or not raw.strip():
-            out.append(
-                f"user_agent must be a non-empty string — using default"
-            )
+            out.append("user_agent must be a non-empty string — using default")
     if "save_structured" in plugin_cfg:
         raw = plugin_cfg["save_structured"]
         if not isinstance(raw, bool):
@@ -143,9 +137,7 @@ def _build_url(
         "raw_json": "1",
     }
     if subreddit:
-        # Restrict to that sub specifically; without this, Reddit's
-        # /r/<sub>/search.json silently spans all of Reddit on some
-        # paths.
+        # Without restrict_sr=1, /r/<sub>/search.json silently spans all of Reddit on some paths.
         params["restrict_sr"] = "1"
     return f"{base}?{urllib.parse.urlencode(params)}"
 
@@ -167,9 +159,7 @@ def _parse_listing(payload: dict) -> list[RedditPost]:
         )
         external_url = str(d.get("url") or permalink).strip()
         selftext = str(d.get("selftext") or "").strip()
-        excerpt = (
-            (selftext[:297] + "...") if len(selftext) > 300 else selftext
-        )
+        excerpt = (selftext[:297] + "...") if len(selftext) > 300 else selftext
         try:
             score = int(d.get("score") or 0)
         except (TypeError, ValueError):
@@ -225,9 +215,7 @@ def reddit_text_search(
     return _parse_listing(payload)
 
 
-def format_results(
-    posts: list[RedditPost], query: str, subreddit: str | None
-) -> str:
+def format_results(posts: list[RedditPost], query: str, subreddit: str | None) -> str:
     """Render a list of RedditPost as a markdown numbered list."""
     if not posts:
         scope = f" in r/{subreddit}" if subreddit else ""
@@ -330,8 +318,7 @@ def register(api):
             )
         if sort not in _VALID_SORTS:
             return (
-                f"<error: sort must be one of {sorted(_VALID_SORTS)}, "
-                f"got {sort!r}>"
+                f"<error: sort must be one of {sorted(_VALID_SORTS)}, " f"got {sort!r}>"
             )
 
         cfg = api.plugin_config or {}
@@ -351,13 +338,10 @@ def register(api):
             )
         except urllib.error.HTTPError as e:
             if e.code == 429:
-                # 429 from Reddit usually means pacing or OAuth, not
-                # User-Agent shape — earlier wording overstated the
-                # UA fix per #94 review.
                 return (
-                    f"<reddit-search error: rate limited (HTTP 429); "
-                    f"back off — persistent 429s usually need pacing "
-                    f"or OAuth, not user_agent changes>"
+                    "<reddit-search error: rate limited (HTTP 429); "
+                    "back off — persistent 429s usually need pacing "
+                    "or OAuth, not user_agent changes>"
                 )
             return f"<reddit-search error: HTTP {e.code}: {e.reason}>"
         except urllib.error.URLError as e:
@@ -393,7 +377,4 @@ def register(api):
             suffix=".json",
         )
 
-    # Role-only: keeps reddit_search out of the root agent's schema.
-    # Allowlisted in the bundled researcher role; reach for it via
-    # `pyagent --role researcher` or spawn_subagent.
     api.register_tool("reddit_search", reddit_search, role_only=True)

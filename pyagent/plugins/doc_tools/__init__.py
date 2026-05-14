@@ -69,17 +69,8 @@ _DEFAULT_TIMEOUT_S = 300
 _DEFAULT_CACHE_SIZE = 64
 _MODEL_ENV_VAR = "PYAGENT_DOC_TOOLS_MODEL"
 
-# Cap how much of the document we send to the sub-LLM in one call.
-# Most modern small models handle ~200K context, but the cost scales
-# with input length and the user is paying per call. 200K chars is
-# generous for almost any single document; if a user really needs to
-# extract from a megabyte of text, that's a different shape (chunk +
-# map-reduce) we can build later.
 _MAX_DOC_CHARS = 200_000
 
-# Schema strings get embedded in the user prompt verbatim. Cap so a
-# pathological caller can't blow up the context window from this
-# argument alone. Real JSON Schemas are rarely larger than a few KB.
 _MAX_SCHEMA_CHARS = 16_000
 
 
@@ -99,10 +90,7 @@ _SUMMARIZE_SYSTEM = (
 )
 
 
-# Process-local LRU cache. Keys are tuples that include path
-# + mtime_ns + size, so a touched/edited file naturally invalidates.
-# Errors are *not* cached — a flaky network shouldn't poison repeats.
-_cache: "OrderedDict[tuple, str]" = OrderedDict()
+_cache: OrderedDict[tuple, str] = OrderedDict()
 _cache_lock = threading.Lock()
 
 
@@ -125,8 +113,6 @@ def _read_doc(path: str) -> tuple[str, str | None]:
     except PermissionError:
         return "", f"<permission denied: {path}>"
     except UnicodeDecodeError:
-        # Could be Latin-1, UTF-16, or genuinely binary. We can't
-        # tell from one decode failure, so don't claim "binary."
         return "", f"<could not decode as text (not utf-8): {path}>"
     except OSError as e:
         return "", f"<could not read {path}: {e}>"
@@ -190,11 +176,6 @@ def _config_warnings(plugin_cfg: dict) -> list[str]:
     """
     out: list[str] = []
 
-    # Model: must be a non-empty string. If it has a `/`, both halves
-    # must be non-empty. If it's a bare name (the "shorthand" form,
-    # e.g. ``--model anthropic`` → defaults applied), it must match a
-    # built-in provider — bare strings that look like model names
-    # without a provider prefix are the most common config typo.
     raw_model = plugin_cfg.get("model")
     if raw_model is not None:
         if not isinstance(raw_model, str):
@@ -214,12 +195,6 @@ def _config_warnings(plugin_cfg: dict) -> list[str]:
                         f"model name (expected 'provider/model')"
                     )
             else:
-                # Bare provider name. We can only verify against
-                # built-ins here because plugin-registered providers
-                # (e.g. ``ollama``) populate after every plugin's
-                # register() runs. Accept silently for shorthand the
-                # user may be using on purpose (rare in config), warn
-                # only when it's clearly off.
                 from pyagent import llms
 
                 builtins = {p.name for p in llms.PROVIDERS}
@@ -230,7 +205,6 @@ def _config_warnings(plugin_cfg: dict) -> list[str]:
                         f"'provider/model' form"
                     )
 
-    # timeout_s: positive integer.
     if "timeout_s" in plugin_cfg:
         raw = plugin_cfg["timeout_s"]
         if not isinstance(raw, int) or isinstance(raw, bool):
@@ -245,7 +219,6 @@ def _config_warnings(plugin_cfg: dict) -> list[str]:
                 f"{_DEFAULT_TIMEOUT_S}"
             )
 
-    # cache_size: non-negative integer (0 disables).
     if "cache_size" in plugin_cfg:
         raw = plugin_cfg["cache_size"]
         if not isinstance(raw, int) or isinstance(raw, bool):
@@ -260,7 +233,6 @@ def _config_warnings(plugin_cfg: dict) -> list[str]:
                 f"{_DEFAULT_CACHE_SIZE}"
             )
 
-    # min_size_chars: non-negative integer.
     if "min_size_chars" in plugin_cfg:
         raw = plugin_cfg["min_size_chars"]
         if not isinstance(raw, int) or isinstance(raw, bool):
@@ -343,9 +315,7 @@ def _cache_clear() -> None:
         _cache.clear()
 
 
-def _call_subllm(
-    model: str, system: str, user: str, timeout_s: int
-) -> tuple[str, str]:
+def _call_subllm(model: str, system: str, user: str, timeout_s: int) -> tuple[str, str]:
     """Run one sub-LLM turn. Returns (text, error).
 
     Error is empty on success. On any failure, text is empty and
@@ -356,8 +326,6 @@ def _call_subllm(
     blocking I/O call. Daemon=True so a stalled call doesn't block
     Python's exit handlers when the user Ctrl-C's the agent.
     """
-    # Deferred import: keeps pyagent.llms out of plugin-load critical
-    # path for users who never invoke doc-tools.
     from pyagent import llms
 
     try:
@@ -381,27 +349,18 @@ def _call_subllm(
     t.join(timeout=timeout_s)
 
     if t.is_alive():
-        # The daemon thread is still running. We can't cancel it —
-        # Python doesn't have safe thread-kill — but daemon=True means
-        # the orphaned worker won't block process exit. The user's
-        # call gets a clean timeout marker; the LLM client's own HTTP
-        # connection will time out on its own schedule.
         return "", f"sub-LLM call timed out after {timeout_s}s ({model!r})"
     if "error" in box:
         return "", f"sub-LLM call failed ({model!r}): {box['error']}"
 
     result = box.get("result")
-    text = result.get("text") if isinstance(result, dict) else None
+    text = result.get("content") if isinstance(result, dict) else None
     if not isinstance(text, str) or not text.strip():
         return "", f"sub-LLM returned no text ({model!r})"
     return text, ""
 
 
 def register(api):
-    # Lightweight register-time validation of the [plugins.doc-tools]
-    # table. Bogus values still fall through to defaults at call time
-    # (via the _resolve_* helpers) — this is purely about surfacing
-    # config typos at startup instead of letting them sit silent.
     for warning in _config_warnings(api.plugin_config or {}):
         api.log("warning", warning)
 
@@ -481,16 +440,12 @@ def register(api):
 
         user_parts = [f"Document path: {path}", "Document content:", text, ""]
         if clean_schema:
-            user_parts.append(
-                f"Return JSON matching this schema:\n{clean_schema}"
-            )
+            user_parts.append(f"Return JSON matching this schema:\n{clean_schema}")
         user_parts.append(f"Extraction request: {query}")
         user = "\n".join(user_parts)
 
         timeout_s = _resolve_timeout(plugin_cfg)
-        out, err_str = _call_subllm(
-            resolved_model, _EXTRACT_SYSTEM, user, timeout_s
-        )
+        out, err_str = _call_subllm(resolved_model, _EXTRACT_SYSTEM, user, timeout_s)
         if err_str:
             return f"<extract error: {err_str}>"
         result_str = f"[extracted via {resolved_model}]\n{out}"
@@ -539,10 +494,7 @@ def register(api):
         except (TypeError, ValueError):
             return f"<error: max_chars must be an integer, got {max_chars!r}>"
         if max_chars_int < 100:
-            return (
-                f"<error: max_chars={max_chars_int} too small; "
-                f"minimum 100>"
-            )
+            return f"<error: max_chars={max_chars_int} too small; " f"minimum 100>"
 
         plugin_cfg = api.plugin_config or {}
         min_size = _resolve_min_size(plugin_cfg)
@@ -568,7 +520,11 @@ def register(api):
         focus_norm = (focus or "").strip()
         if sig is not None and cache_size > 0:
             cache_key = (
-                "summarize_doc", sig, focus_norm, max_chars_int, resolved_model,
+                "summarize_doc",
+                sig,
+                focus_norm,
+                max_chars_int,
+                resolved_model,
             )
             cached = _cache_get(cache_key)
             if cached is not None:
@@ -587,9 +543,7 @@ def register(api):
         user = "\n".join(user_parts)
 
         timeout_s = _resolve_timeout(plugin_cfg)
-        out, err_str = _call_subllm(
-            resolved_model, _SUMMARIZE_SYSTEM, user, timeout_s
-        )
+        out, err_str = _call_subllm(resolved_model, _SUMMARIZE_SYSTEM, user, timeout_s)
         if err_str:
             return f"<summarize error: {err_str}>"
         result_str = f"[summarized via {resolved_model}]\n{out}"

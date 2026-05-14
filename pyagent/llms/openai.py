@@ -2,16 +2,11 @@
 
 import json
 import os
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 from openai import OpenAI
 
-
-# Hardcoded context windows per model. OpenAI's lineup splits between
-# 128K-context flagship chat models and 200K-context o-series reasoning
-# models, so the table is real-data, not a uniform default. Default
-# of 128_000 catches gpt-4-turbo / gpt-4o variants that ship with that
-# size; o-series get an explicit override.
 _CONTEXT_WINDOWS = {
     "gpt-4o": 128_000,
     "gpt-4o-mini": 128_000,
@@ -67,11 +62,8 @@ class OpenAIClient:
             return self._build_response_from_message(
                 response.choices[0].message, getattr(response, "usage", None)
             )
-        # Streaming: include_usage so the trailing chunk carries the
-        # token counters; OpenAI omits them otherwise. Tool calls
-        # arrive incrementally and are keyed by `index` — the model
-        # interleaves arg-string fragments across many chunks for the
-        # same call, so we accumulate per-index and join at the end.
+        # include_usage so the trailing chunk carries token counters;
+        # tool call args interleave across chunks keyed by `index`.
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
         text_parts: list[str] = []
@@ -108,12 +100,8 @@ class OpenAIClient:
                 args = json.loads(slot["args_str"] or "{}")
             except json.JSONDecodeError:
                 args = {"_raw": slot["args_str"]}
-            tool_calls.append(
-                {"id": slot["id"], "name": slot["name"], "args": args}
-            )
-        return self._build_response_from_parts(
-            "".join(text_parts), tool_calls, usage
-        )
+            tool_calls.append({"id": slot["id"], "name": slot["name"], "args": args})
+        return self._build_response_from_parts("".join(text_parts), tool_calls, usage)
 
     def _build_kwargs(
         self,
@@ -126,10 +114,6 @@ class OpenAIClient:
         dict accepted by both the streaming and non-streaming branches
         of ``chat.completions.create``."""
         messages: list[dict[str, Any]] = []
-        # OpenAI prompt caching is automatic on the prefix; concatenate
-        # stable + volatile into one system message. Volatile content
-        # mutating each turn defeats the cache for the volatile bytes
-        # but the stable prefix still benefits.
         full_system = system or ""
         if system_volatile:
             full_system = (
@@ -144,9 +128,7 @@ class OpenAIClient:
 
         kwargs: dict[str, Any] = {
             "model": self.model,
-            # `max_completion_tokens` is the chat-completions name that
-            # works for every model — including o-series reasoning models
-            # that reject the legacy `max_tokens`.
+            # o-series reasoning models reject the legacy `max_tokens`.
             "max_completion_tokens": self.max_tokens,
             "messages": messages,
         }
@@ -164,9 +146,7 @@ class OpenAIClient:
             ]
         return kwargs
 
-    def _build_response_from_message(
-        self, message: Any, usage: Any
-    ) -> dict[str, Any]:
+    def _build_response_from_message(self, message: Any, usage: Any) -> dict[str, Any]:
         """Translate one non-streaming ``ChatCompletionMessage`` into
         the agent-facing assistant turn dict."""
         tool_calls: list[dict[str, Any]] = []
@@ -178,9 +158,7 @@ class OpenAIClient:
                     "args": json.loads(tc.function.arguments or "{}"),
                 }
             )
-        return self._build_response_from_parts(
-            message.content or "", tool_calls, usage
-        )
+        return self._build_response_from_parts(message.content or "", tool_calls, usage)
 
     def _build_response_from_parts(
         self,

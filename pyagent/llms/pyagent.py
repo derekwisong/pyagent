@@ -7,7 +7,8 @@ spending real tokens. Selected with `--model pyagent/<stub-name>`.
 """
 
 import random
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 
 class EchoClient:
@@ -29,10 +30,6 @@ class EchoClient:
         self.model = model
         self.provider_model = f"pyagent/{model}"
 
-    # Stub clients have no real context budget; reporting 0 makes the
-    # CLI's context-warning machinery treat them as "window unknown"
-    # and skip the footer segment entirely. They're for harness/UX
-    # testing where the budget question doesn't apply.
     context_window: int = 0
 
     def respond(
@@ -51,9 +48,6 @@ class EchoClient:
             if isinstance(content, str):
                 text = content
                 break
-        # Word-by-word streaming so the protocol exercise covers the
-        # multi-delta path even on the simplest stub. Fires
-        # synchronously — no sleep — so tests stay fast.
         if on_text_delta and text:
             for i, word in enumerate(text.split(" ")):
                 chunk = word if i == 0 else f" {word}"
@@ -120,22 +114,16 @@ class LoremClient:
     ) -> dict[str, Any]:
         paragraphs = []
         for _ in range(random.randint(1, 5)):
-            sentences = random.choices(
-                _LOREM_SENTENCES, k=random.randint(2, 6)
-            )
+            sentences = random.choices(_LOREM_SENTENCES, k=random.randint(2, 6))
             paragraphs.append(" ".join(sentences))
         text = "\n\n".join(paragraphs)
-        # Sentence-by-sentence streaming gives a realistic pacing
-        # cadence when used with a CLI renderer (paragraphs flow in
-        # noticeable chunks, mid-sentence lag is rare). No sleeps —
-        # the consumer drives any pacing it wants.
         if on_text_delta:
             buf: list[str] = []
             remaining = text
             for sent in _split_for_stream(text):
                 buf.append(sent)
                 on_text_delta(sent)
-                remaining = remaining[len(sent):]
+                remaining = remaining[len(sent) :]
         return {
             "content": text,
             "tool_calls": [],
@@ -162,8 +150,6 @@ def _split_for_stream(text: str) -> list[str]:
     start = 0
     for i, ch in enumerate(text):
         if ch in ".!?\n":
-            # consume trailing whitespace into this chunk so the next
-            # one starts cleanly with a non-space character
             end = i + 1
             while end < len(text) and text[end] in " \t":
                 end += 1

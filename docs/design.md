@@ -1,7 +1,8 @@
 # Pyagent design
 
 How the agent loop is wired, where tools come from, how the system
-prompt is assembled, how memory works.
+prompt is assembled, how memory works. For diagrams, see
+[architecture.md](architecture.md).
 
 ## The agent loop
 
@@ -15,6 +16,19 @@ The loop lives in `Agent.run()` and does the same thing every turn:
   message, and loop back to the model.
 
 The model decides when it's done by simply not asking for any more tools.
+In code, that's:
+
+```python
+from pyagent import Agent, auto_client
+
+agent = Agent(client=auto_client(), system="You are helpful.")
+agent.add_tool("add", lambda a, b: a + b)
+print(agent.run("What is 17 + 25?"))
+```
+
+`run()` blocks until the model stops asking for tools; the
+concatenated assistant text is returned. Call it again to continue
+the conversation — history lives on `agent.conversation`.
 
 ## Tools
 
@@ -38,12 +52,12 @@ Built-in tools shipped with pyagent:
 | `fetch_url` | HTTP GET. Always saves the raw body to a session attachment; by default also returns markdown of the article body inline. |
 
 HTML tooling (`html_select`) comes from the bundled
-`html-tools` plugin and operate on saved attachments (or any local
-HTML file). Memory tools (`add_memory`, `read_memory`, `write_memory`,
-`write_user`, `set_memory_description`, `recall_memory`) come from the
-bundled `memory` plugin. Other bundled plugins (`code-mapper`,
-`web-search`, `reddit-search`, `hn-search`, `claude-code-cli`,
-`doc-tools`) register additional tools — see
+`html-tools` plugin and operates on saved attachments (or any local
+HTML file). Memory tools (`create_memory`, `read_memory`,
+`update_memory`, `delete_memory`, `write_user`, `recall_memory`)
+come from the bundled `memory` plugin. Other bundled plugins
+(`code-mapper`, `web-search`, `reddit-search`, `hn-search`,
+`claude-code-cli`, `doc-tools`) register additional tools — see
 [docs/plugins.md](plugins.md) for the full list.
 
 File tools resolve paths and refuse anything outside the workspace unless the
@@ -92,10 +106,10 @@ Long-term memory is provided by the bundled **`memory`** plugin.
   `MEMORY.md` index (also auto-loaded), and a `memories/` directory
   of individual entries (loaded on demand). Each body carries a
   `created_at` YAML frontmatter the read tools strip on the way out.
-- **Tools:** `add_memory` writes the body and updates the index in
-  one atomic call. `read_memory(file)` fetches a body. `write_memory`
-  and `write_user` overwrite an existing body or USER. `set_memory_description`
-  retunes one bullet line in MEMORY.md without rewriting the index.
+- **Tools:** `create_memory` writes a body and updates the index in
+  one atomic call. `read_memory(file)` fetches a body. `update_memory`
+  edits an existing body and refreshes the bullet line in MEMORY.md;
+  `write_user` overwrites USER.md. `delete_memory` is role-only.
 - **Recall:** `recall_memory(query, ...)` runs cosine search over an
   L2-normalized vector index built with fastembed (BGE-small-en-v1.5).
   Index files (`vectors.npy`, `index.json`) live alongside MEMORY.md,

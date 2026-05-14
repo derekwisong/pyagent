@@ -82,6 +82,31 @@ never gated by config.
 Bundled skills can't be uninstalled (they ship with the package); to keep
 one out of the catalog, just leave it out of `built_in_skills_enabled`.
 
+## Using skills in your `Agent`
+
+The CLI wires skills up automatically. From library code, expose the
+catalog in the system prompt and register the `read_skill` tool:
+
+```python
+from pyagent import Agent, auto_client, paths
+from pyagent import skills as skills_mod
+from pyagent.prompts import SystemPromptBuilder
+
+builder = SystemPromptBuilder(
+    soul=paths.resolve("SOUL.md", seed="SOUL.md"),
+    tools=paths.resolve("TOOLS.md", seed="TOOLS.md"),
+    primer=paths.resolve("PRIMER.md", seed="PRIMER.md"),
+    skills_catalog=skills_mod.live_catalog,
+)
+agent = Agent(client=auto_client(), system=builder)
+agent.add_tool("read_skill", skills_mod.read_skill)
+```
+
+`paths.resolve(name, seed=name)` returns the user's persona file if
+present and seeds it from the bundled default on first use.
+`live_catalog` re-scans the filesystem on every render, so a skill
+authored mid-session shows up on the next turn.
+
 ## Authoring a skill
 
 Tell the agent to load `write-skill` and ask it to author a new skill for

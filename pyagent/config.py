@@ -90,13 +90,6 @@ DEFAULTS: dict[str, Any] = {
     "session": {
         "attachment_dir_cap_mb": 25,
     },
-    # Ollama-backed model defaults. `temperature` applies to every
-    # ollama model unless `[ollama.temperature_per_model]` overrides
-    # it for a specific model (key = the same string passed via
-    # `--model ollama/<key>`). Lower than Ollama's own 0.8 because
-    # multilingual models (qwen 2.5 14b etc.) drift out of English
-    # at higher temperatures and weaker tool-callers (llama 3.1 8b)
-    # hallucinate fake JSON tool calls into the message body.
     "ollama": {
         "temperature": 0.3,
         "temperature_per_model": {},
@@ -179,7 +172,8 @@ def resolve_attachment_dir_cap_mb(value: Any) -> int:
         logger.warning(
             "[session] attachment_dir_cap_mb must be an integer, "
             "got bool: %r — using default %d MB",
-            value, _DEFAULT_ATTACHMENT_CAP_MB,
+            value,
+            _DEFAULT_ATTACHMENT_CAP_MB,
         )
         return _DEFAULT_ATTACHMENT_CAP_MB
     if isinstance(value, float):
@@ -187,7 +181,8 @@ def resolve_attachment_dir_cap_mb(value: Any) -> int:
         logger.warning(
             "[session] attachment_dir_cap_mb must be an integer "
             "(got float %r); rounding to %d MB",
-            value, coerced,
+            value,
+            coerced,
         )
         return max(0, coerced)
     if isinstance(value, int):
@@ -202,7 +197,9 @@ def resolve_attachment_dir_cap_mb(value: Any) -> int:
     logger.warning(
         "[session] attachment_dir_cap_mb must be an integer, got "
         "%s: %r — using default %d MB",
-        type(value).__name__, value, _DEFAULT_ATTACHMENT_CAP_MB,
+        type(value).__name__,
+        value,
+        _DEFAULT_ATTACHMENT_CAP_MB,
     )
     return _DEFAULT_ATTACHMENT_CAP_MB
 

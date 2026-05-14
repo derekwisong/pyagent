@@ -77,8 +77,17 @@ def cmd_station_info(args: argparse.Namespace) -> str:
         return s + "\n"
     keep = {
         k: s.get(k)
-        for k in ("icaoId", "iataId", "site", "lat", "lon", "elev", "state",
-                 "country", "siteType")
+        for k in (
+            "icaoId",
+            "iataId",
+            "site",
+            "lat",
+            "lon",
+            "elev",
+            "state",
+            "country",
+            "siteType",
+        )
     }
     return json.dumps(keep, indent=2) + "\n"
 
@@ -170,16 +179,13 @@ def cmd_brief(args: argparse.Namespace) -> str:
     pirep_radius = max(args.radius_nm * 4, 200)
     sections: dict[str, Any] = {
         "station": {
-            k: s.get(k)
-            for k in ("icaoId", "site", "lat", "lon", "elev", "siteType")
+            k: s.get(k) for k in ("icaoId", "site", "lat", "lon", "elev", "siteType")
         },
         "bbox": bbox,
         "radius_nm": args.radius_nm,
     }
 
-    _, _, metars = _get(
-        f"{_BASE}/metar?bbox={bbox}&format=json&hours={args.hours}"
-    )
+    _, _, metars = _get(f"{_BASE}/metar?bbox={bbox}&format=json&hours={args.hours}")
     sections["metars"] = metars if isinstance(metars, list) else []
 
     _, _, tafs = _get(f"{_BASE}/taf?bbox={bbox}&format=json")

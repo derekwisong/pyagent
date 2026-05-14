@@ -36,7 +36,6 @@ from pyagent.plugins.py_dev_toolkit import python_env as _python_env
 from pyagent.plugins.py_dev_toolkit import pytest_runner as _pytest_runner
 from pyagent.plugins.py_dev_toolkit import typecheck as _typecheck
 
-
 _PYTHON_GUIDANCE = """\
 ## Python environments
 
@@ -62,23 +61,10 @@ def _render_python_guidance(_ctx) -> str:
 
 
 def register(api):
-    # Role-only: Python dev tools belong in PYTHON_ENGINEER's
-    # allowlist, not on the root agent (which rarely needs to lint
-    # or run pytest in routine work). Working agents that need
-    # Python verification spawn the python-engineer role.
     api.register_tool("lint", _lint.run, role_only=True)
     api.register_tool("typecheck", _typecheck.run, role_only=True)
     api.register_tool("run_pytest", _pytest_runner.run, role_only=True)
-    # python_env is the exception in this plugin: every agent role
-    # benefits from being able to discover (and lazily bootstrap) the
-    # workspace venv, so it's registered globally rather than gated.
-    api.register_tool(
-        "python_env", _python_env.make_python_env(api.workspace)
-    )
-    # Plugin-scoped guidance: only loaded when this plugin is, so
-    # PRIMER stays language-agnostic. Static text — no per-turn
-    # state, so volatile=False keeps it inside the cached system
-    # block.
+    api.register_tool("python_env", _python_env.make_python_env(api.workspace))
     api.register_prompt_section(
         "python-guidance", _render_python_guidance, volatile=False
     )

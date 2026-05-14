@@ -12,7 +12,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -53,10 +53,7 @@ class Session:
     DEFAULT_ROOT = Path(".pyagent/sessions")
     attachment_threshold = 8000
     preview_chars = 1000
-    # Soft cap on total attachments-dir size, in megabytes. After each
-    # write, if the dir exceeds this we evict least-recently-accessed
-    # files (atime, mtime fallback) until under the cap. The just-
-    # written file is always preserved. 0 disables eviction entirely.
+    # Soft cap on attachments-dir size in MB; 0 disables LRU eviction.
     attachment_dir_cap_mb: int = 25
 
     def __init__(
@@ -71,10 +68,6 @@ class Session:
         self.attachments_dir = self.dir / "attachments"
         self.conversation_path = self.dir / "conversation.jsonl"
         if attachment_dir_cap_mb is not None:
-            # Per-instance override of the class-level default. Keeps
-            # the class attribute as the single source of truth for the
-            # default while letting config wiring inject a different
-            # cap without subclassing.
             self.attachment_dir_cap_mb = attachment_dir_cap_mb
 
     @classmethod
@@ -89,7 +82,9 @@ class Session:
     @classmethod
     def _unique_id(cls, root: Path) -> str:
         for _ in range(10):
-            sid = f"{date.today().isoformat()}-{petname.generate(words=2, separator='-')}"
+            sid = (
+                f"{date.today().isoformat()}-{petname.generate(words=2, separator='-')}"
+            )
             if not (root / sid).exists():
                 return sid
         raise RuntimeError("could not generate a unique session id after 10 tries")
@@ -123,7 +118,7 @@ class Session:
         if not entries:
             return
         self._ensure_dirs()
-        ts = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        ts = datetime.now(UTC).isoformat(timespec="microseconds")
         with self.conversation_path.open("a") as f:
             for entry in entries:
                 if isinstance(entry, dict) and "ts" not in entry:
@@ -141,20 +136,11 @@ class Session:
         self._ensure_dirs()
         if not suffix:
             suffix = ".txt" if isinstance(content, str) else ".bin"
-        # 8-char uuid suffix is collision-proof across concurrent processes
-        # resuming the same session, and the dir listing still groups by tool.
-        path = (
-            self.attachments_dir
-            / f"{tool_name}-{uuid.uuid4().hex[:8]}{suffix}"
-        )
+        path = self.attachments_dir / f"{tool_name}-{uuid.uuid4().hex[:8]}{suffix}"
         if isinstance(content, bytes):
             path.write_bytes(content)
         else:
             path.write_text(content)
-        # After every write, run LRU eviction if the dir is over cap.
-        # The just-written `path` is always exempt — even a single
-        # write that exceeds the cap by itself stays put (we evict
-        # everything older first, then stop). cap=0 disables eviction.
         if self.attachment_dir_cap_mb > 0:
             self._evict_lru_until_under_cap(exclude=path)
         return path
@@ -191,9 +177,6 @@ class Session:
         if not self.attachments_dir.exists():
             return 0
 
-        # Collect (atime, size, path) for everything in the dir. We
-        # gather sizes up front so the running total is stable as we
-        # unlink — no re-stat per iteration.
         entries: list[tuple[float, int, Path]] = []
         total = 0
         try:
@@ -213,9 +196,8 @@ class Session:
         if total <= cap_bytes:
             return 0
 
-        # Sort oldest-atime first. Tie-break by size descending so a
-        # cluster of same-atime files (common on noatime fs) prefers
-        # to drop bigger ones first — fewer evictions to get under.
+        # Oldest-atime first; tie-break by size descending so noatime
+        # filesystems still evict the biggest stale file first.
         entries.sort(key=lambda e: (e[0], -e[1]))
 
         evicted = 0
@@ -247,17 +229,14 @@ class Session:
         if not self.attachments_dir.exists() or not self.conversation_path.exists():
             return []
         log_text = self.conversation_path.read_text()
-        # Anchor with the "attachments/" segment so a bare filename can't
-        # accidentally match unrelated content elsewhere in the log.
+        # Anchor on "attachments/" so a bare filename can't match elsewhere.
         return [
             f
             for f in self.attachments_dir.iterdir()
             if f.is_file() and f"attachments/{f.name}" not in log_text
         ]
 
-    def purge_orphan_attachments(
-        self, orphans: list[Path] | None = None
-    ) -> int:
+    def purge_orphan_attachments(self, orphans: list[Path] | None = None) -> int:
         """Delete orphan attachments and return the count removed.
 
         Pass `orphans` to skip the rescan if the caller already has the

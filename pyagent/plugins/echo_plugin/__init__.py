@@ -6,7 +6,7 @@ router and produces a one-shot reply that echoes the most recent user
 message — same shape as the built-in `pyagent/echo` stub, but routed
 through the plugin path. Useful as:
 
-  - A smoke test for the loader → llm-router wiring (the existence of
+  - A test for the loader → llm-router wiring (the existence of
     `echo-plugin/echo` proves `set_plugin_providers` ran).
   - A scaffolding example for real plugin providers (cli/claude in #57,
     local-model adapters, etc.) — implementations can copy this layout
