@@ -27,7 +27,6 @@ from __future__ import annotations
 import json
 import multiprocessing
 import shutil
-import sys
 import tempfile
 import time
 import tomllib
@@ -49,13 +48,6 @@ class Scenario:
     description: str
     prompts: list[str]
     tools_hint: list[str] = field(default_factory=list)
-    # If set, snapshot this directory into the bench's tmpdir workspace
-    # before spawning the agent. `"cwd"` means the directory the user
-    # invoked `pyagent-bench` from; an absolute path snapshots that
-    # directory specifically. The agent operates on the snapshot, so
-    # any edits it makes don't touch the live source. Empty (default)
-    # means the workspace stays bare — appropriate for scenarios that
-    # source their inputs from the network (e.g. well_mako).
     seed_workspace_from: str = ""
 
 
@@ -64,8 +56,8 @@ class BenchReport:
     scenario: str
     model: str
     session_id: str
-    workspace: str  # absolute path to the run's tmpdir workspace
-    reason: str  # "complete" | "budget" | "cancelled" | "error"
+    workspace: str
+    reason: str
     prompts_run: int
     prompts_total: int
     wall_time_s: float
@@ -87,7 +79,6 @@ def _scenario_traversable() -> Any:
 def _list_scenario_names() -> list[str]:
     out: list[str] = []
     for entry in _scenario_traversable().iterdir():
-        # Traversable.name works for both filesystem and zipimport.
         name = entry.name
         if name.endswith(".toml"):
             out.append(name[: -len(".toml")])
@@ -98,15 +89,11 @@ def _load_scenario(name: str) -> Scenario:
     target = _scenario_traversable() / f"{name}.toml"
     if not target.is_file():
         avail = ", ".join(_list_scenario_names()) or "(none)"
-        raise click.ClickException(
-            f"scenario {name!r} not found. Available: {avail}"
-        )
+        raise click.ClickException(f"scenario {name!r} not found. Available: {avail}")
     data = tomllib.loads(target.read_text())
     prompts = [p["text"] for p in data.get("prompts", []) if p.get("text")]
     if not prompts:
-        raise click.ClickException(
-            f"scenario {name!r} has no [[prompts]] entries."
-        )
+        raise click.ClickException(f"scenario {name!r} has no [[prompts]] entries.")
     return Scenario(
         name=data.get("name", name),
         description=data.get("description", ""),
@@ -151,13 +138,9 @@ class _BenchState:
     )
     tool_counts: dict[str, int] = field(default_factory=dict)
     cumulative_cost_usd: float | None = None
-    halt: bool = False  # set when budget exceeded; finish current turn then stop
+    halt: bool = False
 
 
-# Default per-run budget by model. Sized so a typical scenario can
-# complete without halting at the budget cap, sized DOWN for cheap
-# models so a runaway Haiku run doesn't quietly cost more than the
-# user expected. Override at the CLI with --budget X (or --no-budget).
 _DEFAULT_BUDGET_BY_BARE_MODEL: dict[str, float] = {
     "claude-haiku-4-5-20251001": 0.20,
     "claude-sonnet-4-6": 0.50,
@@ -175,9 +158,7 @@ def _default_budget_for(model: str) -> float:
     return _DEFAULT_BUDGET_BY_BARE_MODEL.get(bare, _BUDGET_FALLBACK_USD)
 
 
-def _build_agent_config(
-    model: str, session_id: str, workspace: Path
-) -> dict[str, Any]:
+def _build_agent_config(model: str, session_id: str, workspace: Path) -> dict[str, Any]:
     """Mirror the CLI's startup setup but for a non-interactive run.
 
     `workspace` becomes the agent's cwd. The bench mints a fresh
@@ -196,11 +177,6 @@ def _build_agent_config(
         "soul_path": str(soul),
         "tools_path": str(tools_md),
         "primer_path": str(primer),
-        # The bench is non-interactive — out-of-workspace permission
-        # prompts would deadlock waiting for stdin. Pre-approve the
-        # config dir (matches the main CLI). Users hitting an out-of-
-        # workspace path during a bench run will see a permission
-        # request event and the bench will refuse it (decision=False).
         "approved_paths": [str(paths.config_dir())],
     }
 
@@ -231,12 +207,8 @@ def _drive(
             state.tool_counts[name] = state.tool_counts.get(name, 0) + 1
             click.echo(f"  · tool: {name}")
         elif kind == "tool_result":
-            # Bench doesn't render tool results — too noisy.
             pass
         elif kind == "permission_request":
-            # Non-interactive: deny anything outside the workspace so
-            # the bench doesn't deadlock on stdin. The agent will
-            # surface the denial as a tool result and continue.
             try:
                 protocol.send(
                     parent_conn,
@@ -255,9 +227,7 @@ def _drive(
             click.echo(f"  [info] {event.get('message', '')}", err=True)
         elif kind == "usage":
             for k in ("input", "output", "cache_creation", "cache_read"):
-                state.tokens[k] = state.tokens.get(k, 0) + int(
-                    event.get(k, 0) or 0
-                )
+                state.tokens[k] = state.tokens.get(k, 0) + int(event.get(k, 0) or 0)
             state.cumulative_cost_usd = pricing.estimate_cost_usd(
                 model,
                 state.tokens["input"],
@@ -272,7 +242,6 @@ def _drive(
             ):
                 state.halt = True
         elif kind == "ready":
-            # Subagent ready event — informational here.
             pass
         elif kind == "turn_complete":
             return "budget" if state.halt else "complete"
@@ -282,9 +251,6 @@ def _drive(
             click.echo(f"  [error] {kind_name}: {msg}", err=True)
             if event.get("fatal"):
                 return "error"
-            # Non-fatal agent_error (e.g. KeyboardInterrupt, transient
-            # turn failure): treat as turn_complete equivalent. The
-            # bench may still continue with the next prompt.
             return "complete"
 
 
@@ -297,14 +263,10 @@ def _render_report(report: BenchReport) -> str:
     lines.append(f"workspace:   {report.workspace}")
     lines.append(f"session:     {report.session_id}")
     lines.append(f"reason:      {report.reason}")
-    lines.append(
-        f"prompts:     {report.prompts_run}/{report.prompts_total}"
-    )
+    lines.append(f"prompts:     {report.prompts_run}/{report.prompts_total}")
     lines.append(f"turns:       {report.turn_count}")
     lines.append(f"wall_time:   {report.wall_time_s:.1f}s")
     t = report.tokens
-    # Anthropic-vs-other gate: on OpenAI/Gemini, prompt_tokens already
-    # includes the cached count; bundling cache_read would double-count.
     total = _total_tokens_summary(report.model, t)
     lines.append(
         f"tokens:      {total:,} total "
@@ -319,9 +281,7 @@ def _render_report(report: BenchReport) -> str:
         lines.append(f"budget:      ${report.budget_usd:.2f}")
     if report.tool_counts:
         lines.append("tool_calls:")
-        for name, count in sorted(
-            report.tool_counts.items(), key=lambda kv: -kv[1]
-        ):
+        for name, count in sorted(report.tool_counts.items(), key=lambda kv: -kv[1]):
             lines.append(f"  {name:20s}  {count}")
     else:
         lines.append("tool_calls:  (none)")
@@ -402,20 +362,8 @@ def run_cmd(
         budget = _default_budget_for(resolved_model)
     cap = None if no_budget else budget
 
-    # Each bench run gets a fresh tmpdir as its workspace. write_file
-    # calls in the scenario (e.g. "save the analysis to bench-output.md")
-    # land inside this dir and pass the workspace gate; the user's
-    # project dir stays clean across runs. The session and its
-    # attachments live under <tmpdir>/.pyagent/sessions/<id>/, so the
-    # parent and child agree on absolute paths even though they have
-    # different cwds at construction time.
-    workspace = Path(
-        tempfile.mkdtemp(prefix=f"pyagent-bench-{sc.name}-")
-    )
+    workspace = Path(tempfile.mkdtemp(prefix=f"pyagent-bench-{sc.name}-"))
 
-    # Optionally snapshot a source directory into the workspace. Used
-    # by self-audit-style scenarios that need real code or data on
-    # disk; the snapshot keeps the agent's edits off the live source.
     if sc.seed_workspace_from:
         if sc.seed_workspace_from == "cwd":
             seed_src = Path.cwd().resolve()
@@ -423,29 +371,27 @@ def run_cmd(
             seed_src = Path(sc.seed_workspace_from).expanduser().resolve()
         if not seed_src.is_dir():
             raise click.ClickException(
-                f"scenario {sc.name!r} seed source {seed_src} "
-                f"is not a directory."
+                f"scenario {sc.name!r} seed source {seed_src} " f"is not a directory."
             )
         click.echo(f"[bench] seed:      {seed_src} → {workspace}")
-        # Don't copy git/venv/cache cruft. .pyagent IS copied so the
-        # agent inherits the user's project-tier plugins, skills, and
-        # roles; the bench's own session is keyed by id under
-        # .pyagent/sessions/ and won't collide with anything carried
-        # over.
         shutil.copytree(
             seed_src,
             workspace,
             dirs_exist_ok=True,
             ignore=shutil.ignore_patterns(
-                ".git", ".venv", "venv", "node_modules",
-                "__pycache__", "*.pyc", "*.egg-info", ".pytest_cache",
+                ".git",
+                ".venv",
+                "venv",
+                "node_modules",
+                "__pycache__",
+                "*.pyc",
+                "*.egg-info",
+                ".pytest_cache",
             ),
         )
 
     session_root = workspace / ".pyagent" / "sessions"
 
-    # Mint the session up front so we can print + report the id even
-    # if the child never reaches `ready`.
     session = Session(root=session_root)
     click.echo(f"[bench] scenario:  {sc.name} ({sc.description})")
     click.echo(f"[bench] model:     {resolved_model}")
@@ -456,14 +402,10 @@ def run_cmd(
     else:
         click.echo("[bench] budget:    (disabled)")
 
-    agent_config = _build_agent_config(
-        resolved_model, session.id, workspace
-    )
+    agent_config = _build_agent_config(resolved_model, session.id, workspace)
     state = _BenchState()
     started = time.monotonic()
 
-    # Spawn (not fork) — same context the main CLI uses. daemon=False
-    # so any subagents the agent spawns aren't immediately reaped.
     ctx = multiprocessing.get_context("spawn")
     parent_conn, child_conn = ctx.Pipe(duplex=True)
     proc = ctx.Process(
@@ -478,14 +420,11 @@ def run_cmd(
     reason = "error"
     prompts_run = 0
     try:
-        # Wait for ready (or fatal) before sending the first prompt.
         while True:
             try:
                 ev = parent_conn.recv()
             except (EOFError, OSError):
-                click.echo(
-                    "[bench] agent exited before ready", err=True
-                )
+                click.echo("[bench] agent exited before ready", err=True)
                 return
             if ev.get("type") == "ready":
                 break
@@ -517,7 +456,6 @@ def run_cmd(
                 reason = "budget"
                 break
         else:
-            # Loop ran to completion without break — every prompt sent.
             reason = "complete"
     except KeyboardInterrupt:
         reason = "cancelled"
@@ -540,12 +478,12 @@ def run_cmd(
         except Exception:
             pass
 
-        # Count assistant turns from the saved transcript so the report
-        # number matches `pyagent-sessions audit`'s view of the same run.
         try:
             history = session.load_history()
             turn_count = sum(
-                1 for e in history if isinstance(e, dict) and e.get("role") == "assistant"
+                1
+                for e in history
+                if isinstance(e, dict) and e.get("role") == "assistant"
             )
         except Exception:
             turn_count = 0

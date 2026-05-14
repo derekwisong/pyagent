@@ -1,13 +1,24 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyagent"
 version = "0.1.0"
+description = "A Python LLM-agent framework with a plugin system."
+readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
+authors = [{name = "Derek Wisong", email = "derekwisong@gmail.com"}]
+keywords = ["llm", "agent", "anthropic", "claude", "openai", "gemini", "ollama"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
 dependencies = [
     "anthropic>=0.40",
     "beautifulsoup4>=4.12",
@@ -32,11 +43,71 @@ dependencies = [
     "requests>=2.31",
     "rich>=13",
     "tree-sitter>=0.25",
-    "tree-sitter-language-pack>=0.10",
+    # 1.x switched to a download-on-demand model (only ~8 languages
+    # bundled; rest fetch from the internet at first get_language()).
+    # That hangs offline / in restricted CI. Stay on 0.x until upstream
+    # offers an opt-out.
+    "tree-sitter-language-pack>=0.10,<1.0",
     # Visible-width measurement for the status footer's three-zone
     # layout — Braille spinner and middle-dot separators need accurate
     # widths for the right-zone padding math.
     "wcwidth>=0.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/derekwisong/pyagent"
+Repository = "https://github.com/derekwisong/pyagent"
+Issues = "https://github.com/derekwisong/pyagent/issues"
+
+[project.optional-dependencies]
+dev = [
+    "black>=24",
+    "ruff>=0.6",
+    "pre-commit>=3",
+    # Required by the py-dev-toolkit plugin's run_pytest tool, which
+    # one of the tests exercises. Not a runtime dep.
+    "pytest>=7",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py311", "py312", "py313"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "B",    # flake8-bugbear (real bugs / smells)
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "UP",   # pyupgrade
+    "RET",  # flake8-return
+    "PIE",  # flake8-pie
+]
+ignore = [
+    "E501",   # line length — black handles this
+    "B008",   # function call in default arg — common Click/Typer pattern
+    "SIM105", # try/except/pass is often clearer than contextlib.suppress
+    "SIM108", # ternary not always clearer than if/else
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests can be looser: unused imports/vars and lambda binds are common
+# in stub-heavy tests.
+"tests/*" = [
+    "F401",   # unused-import
+    "F811",   # redefined-while-unused
+    "F841",   # unused-variable
+    "B007",   # unused loop control var
+    "B904",   # raise without `from` inside except
+    "E731",   # lambda assignment
+    "E741",   # ambiguous variable name
+    "SIM117", # nested with statements
 ]
 
 [project.scripts]

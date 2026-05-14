@@ -70,9 +70,6 @@ def init_cmd(force: bool) -> None:
         click.echo(f"wrote default config to {target}")
         click.echo("Edit the file and uncomment lines to override defaults.")
 
-    # Also seed the roles directory with the bundled starter set so
-    # first-run users get the orchestrator-pattern starter library
-    # without having to discover `pyagent-roles init` separately.
     roles_dir = paths.config_dir() / "roles"
     roles_dir.mkdir(parents=True, exist_ok=True)
     bundled_pkg = resources.files(roles_mod.PACKAGE_ROLES_PKG)

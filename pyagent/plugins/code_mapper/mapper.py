@@ -27,39 +27,30 @@ from __future__ import annotations
 import json
 import logging
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
-
-# Lazy imports of tree_sitter / tree_sitter_language_pack happen inside
-# the public functions so that `import mapper` doesn't hard-fail in
-# environments where the deps aren't installed yet (e.g. during
-# manifest discovery).
 
 logger = logging.getLogger(__name__)
 
 _QUERIES_DIR = Path(__file__).parent / "queries"
 
 
-# -- Per-language registry (loaded from queries/*.toml) ---------------
-
-
 @dataclass
 class _PromoteRule:
-    src: str  # source kind to promote from
-    dst: str  # promoted kind
-    when_inside: tuple[str, ...]  # enclosing tree-sitter node types
+    src: str
+    dst: str
+    when_inside: tuple[str, ...]
 
 
 @dataclass
 class _LangConfig:
-    language: str  # tree-sitter-language-pack id (e.g. "python")
+    language: str
     description: str
     extensions: tuple[str, ...]
     capture_to_kind: dict[str, str]
     definition_node_types: frozenset[str]
     promote_rules: tuple[_PromoteRule, ...]
-    docstrings: str | None  # extractor name, or None
+    docstrings: str | None
     scm_path: Path
 
     def kinds_emitted(self) -> set[str]:
@@ -94,9 +85,7 @@ def _load_registry() -> None:
         try:
             cfg = _parse_lang_toml(toml_path)
         except Exception as e:
-            logger.warning(
-                "code-mapper: bad language config %s: %s", toml_path, e
-            )
+            logger.warning("code-mapper: bad language config %s: %s", toml_path, e)
             continue
         if not cfg.scm_path.exists():
             logger.warning(
@@ -128,18 +117,14 @@ def _parse_lang_toml(toml_path: Path) -> _LangConfig:
     extensions = tuple(str(e).lower() for e in data["extensions"])
     captures_raw = data.get("captures", {})
     capture_to_kind = {str(k): str(v) for k, v in captures_raw.items()}
-    def_types = frozenset(
-        str(t) for t in data.get("definition_node_types", [])
-    )
+    def_types = frozenset(str(t) for t in data.get("definition_node_types", []))
     promote_rules: list[_PromoteRule] = []
     for entry in data.get("promote", []) or []:
         promote_rules.append(
             _PromoteRule(
                 src=str(entry["from"]),
                 dst=str(entry["to"]),
-                when_inside=tuple(
-                    str(t) for t in entry.get("when_inside", [])
-                ),
+                when_inside=tuple(str(t) for t in entry.get("when_inside", [])),
             )
         )
     docstrings = data.get("docstrings")
@@ -164,9 +149,6 @@ def _all_emitted_kinds() -> set[str]:
     return out
 
 
-# Static `kind=` filters that index by category rather than by literal
-# kind name. Anything not in this table is treated as a single-kind
-# literal filter (e.g. kind="struct" matches symbols with kind="struct").
 _NAMED_FILTERS: dict[str, set[str]] = {
     "imports": {"import"},
     "functions": {"function", "method"},
@@ -195,11 +177,9 @@ def _resolve_kind_filter(kind: str) -> set[str] | None:
     return None
 
 
-# -- Caches -------------------------------------------------------------
-
-_lang_cache: dict[str, object] = {}  # language_id -> Language
-_query_cache: dict[str, object] = {}  # language_id -> Query
-_parser_cache: dict[str, object] = {}  # language_id -> Parser
+_lang_cache: dict[str, object] = {}
+_query_cache: dict[str, object] = {}
+_parser_cache: dict[str, object] = {}
 
 
 def _get_language(lang_id: str):
@@ -223,13 +203,8 @@ def _get_query(lang_id: str):
         from tree_sitter import Query
 
         cfg = _REGISTRY[lang_id]
-        _query_cache[lang_id] = Query(
-            _get_language(lang_id), cfg.scm_path.read_text()
-        )
+        _query_cache[lang_id] = Query(_get_language(lang_id), cfg.scm_path.read_text())
     return _query_cache[lang_id]
-
-
-# -- Symbol extraction --------------------------------------------------
 
 
 @dataclass
@@ -252,9 +227,7 @@ class _Symbol:
         return out
 
 
-def _enclosing_definition(
-    node, def_node_types: frozenset[str]
-) -> object | None:
+def _enclosing_definition(node, def_node_types: frozenset[str]) -> object | None:
     """Walk node.parent until we hit a node whose type is in
     `def_node_types`, or None at root. Per-language because each
     grammar names its definition nodes differently."""
@@ -293,9 +266,7 @@ def _docstring_for(def_node, source_bytes: bytes) -> str | None:
         if child.type == "comment":
             continue
         if child.type == "string":
-            return _strip_string_quotes(
-                child.text.decode("utf-8", errors="replace")
-            )
+            return _strip_string_quotes(child.text.decode("utf-8", errors="replace"))
         if child.type == "expression_statement":
             for sub in child.children:
                 if sub.type == "string":
@@ -303,7 +274,6 @@ def _docstring_for(def_node, source_bytes: bytes) -> str | None:
                         sub.text.decode("utf-8", errors="replace")
                     )
             return None
-        # First non-trivia, non-string statement → no docstring.
         return None
     return None
 
@@ -313,7 +283,7 @@ def _strip_string_quotes(literal: str) -> str:
     delimiters from the literal source text. Robust enough for
     docstrings; not a full Python string-literal parser."""
     s = literal.strip()
-    for prefix_len in (4, 3, 2, 1):  # b"...", r"...", """...""", "..."
+    for prefix_len in (4, 3, 2, 1):
         if (
             len(s) > 2 * prefix_len
             and s[prefix_len:].startswith(('"""', "'''"))
@@ -384,9 +354,7 @@ def _process_matches(
 
         parent_override: str | None = None
         if parent_nodes:
-            parent_override = parent_nodes[0].text.decode(
-                "utf-8", errors="replace"
-            )
+            parent_override = parent_nodes[0].text.decode("utf-8", errors="replace")
 
         for nm in name_nodes:
             out.append(
@@ -430,7 +398,6 @@ def _collect_errors(root_node) -> list[dict]:
                     "message": "syntax error",
                 }
             )
-        # Don't recurse into ERROR subtrees — they'd flood the report.
         if node.type != "ERROR":
             stack.extend(node.children)
     return out
@@ -460,8 +427,6 @@ def _build_symbols(
         if encl is not None:
             if parent is None:
                 parent = def_name_index.get(encl.id) or _definition_name(encl)
-            # Apply promotion rules (e.g. function → method when
-            # enclosed by class_definition). First matching rule wins.
             for rule in cfg.promote_rules:
                 if kind == rule.src and encl.type in rule.when_inside:
                     kind = rule.dst
@@ -470,8 +435,7 @@ def _build_symbols(
         if (
             include_docstrings
             and cfg.docstrings == "python"
-            and m.def_node.type
-            in {"class_definition", "function_definition"}
+            and m.def_node.type in {"class_definition", "function_definition"}
         ):
             docstring = _docstring_for(m.def_node, source_bytes)
         symbols.append(
@@ -484,17 +448,10 @@ def _build_symbols(
             )
         )
 
-    # Stable order: by line, then by name. Makes diffs (and human
-    # reads) predictable.
     symbols.sort(key=lambda s: (s.line, s.name))
     return symbols
 
 
-# -- Public API --------------------------------------------------------
-
-
-# Hard ceiling on emitted symbols per call. Keeps responses bounded for
-# pathological files; agent can re-call with a tighter `kind` filter.
 SYMBOL_LIMIT = 1000
 
 
@@ -619,9 +576,7 @@ def probe_grammar(
 
     from tree_sitter import Parser
 
-    src_bytes = (
-        source.encode("utf-8") if isinstance(source, str) else source
-    )
+    src_bytes = source.encode("utf-8") if isinstance(source, str) else source
     tree = Parser(lang).parse(src_bytes)
 
     lines: list[str] = []
@@ -632,7 +587,6 @@ def probe_grammar(
         state["count"] += 1
 
     def is_token_leaf(node) -> bool:
-        # No children, or all children are anonymous tokens.
         return not any(c.is_named for c in node.children)
 
     def walk(node, depth: int, parent, child_idx: int) -> None:
@@ -658,14 +612,9 @@ def probe_grammar(
             text = text[:60].replace("\n", "\\n")
             text_suffix = f"  '{text}'"
         if depth > max_depth:
-            emit(
-                "  " * depth + f"{field_prefix}{node.type}  ..."
-            )
+            emit("  " * depth + f"{field_prefix}{node.type}  ...")
             return
-        emit(
-            "  " * depth
-            + f"{field_prefix}{node.type}{text_suffix}"
-        )
+        emit("  " * depth + f"{field_prefix}{node.type}{text_suffix}")
         for i, child in enumerate(node.children):
             walk(child, depth + 1, parent=node, child_idx=i)
 

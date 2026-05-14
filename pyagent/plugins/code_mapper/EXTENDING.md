@@ -116,11 +116,11 @@ sets of tag names (e.g. `^[hH][1-6]$` for HTML headings).
    kind. Decide on `definition_node_types` (the AST node types you
    want parent-walk to stop at) and any `[[promote]]` rules.
 
-5. **Add a fixture + assertions** to `tests/smoke_code_mapper.py`.
+5. **Add a fixture + assertions** to `tests/test_code_mapper.py`.
    Use the `has(kind, name, parent)` helper pattern from existing
    languages — assertion shape is uniform.
 
-6. **Run `python -m tests.smoke_code_mapper`** and iterate.
+6. **Run `python -m tests.test_code_mapper`** and iterate.
 
 ## Common gotchas
 
@@ -171,4 +171,4 @@ you do refresh:
 1. Read the diff between the old commit and HEAD before pasting.
 2. Re-run any `; DEVIATION:` patches against the new file.
 3. Update the commit hash in the file's header.
-4. Run the smoke test.
+4. Run the test.

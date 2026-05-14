@@ -1,16 +1,12 @@
 """Gemini implementation of the LLM client interface."""
 
 import os
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 from google import genai
 from google.genai import types
 
-
-# Hardcoded context windows per model. Gemini 2.5 family ships with
-# 2M tokens; Gemini 2.0 has the older 1M ceiling. Default to the
-# more conservative 1M for any unknown model so we don't over-promise
-# on a name we haven't catalogued.
 _CONTEXT_WINDOWS = {
     "gemini-2.5-flash": 2_000_000,
     "gemini-2.5-pro": 2_000_000,
@@ -52,8 +48,10 @@ class GeminiClient:
     ) -> None:
         self.model = model
         self.provider_model = f"gemini/{model}"
-        key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get(
-            "GOOGLE_API_KEY"
+        key = (
+            api_key
+            or os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("GOOGLE_API_KEY")
         )
         if not key:
             raise ValueError("GEMINI_API_KEY (or GOOGLE_API_KEY) is not set")
@@ -86,11 +84,6 @@ class GeminiClient:
                 getattr(response, "usage_metadata", None),
             )
 
-        # Streaming: each chunk has `candidates[0].content.parts` with
-        # text and/or function_call parts. Gemini emits text in chunks
-        # but tool calls usually arrive complete in one chunk (not
-        # incrementally), so accumulation is straightforward — text
-        # parts append, function_call parts append once.
         text_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
         usage_meta = None
@@ -106,12 +99,9 @@ class GeminiClient:
                     if part.function_call:
                         tool_calls.append(
                             {
-                                "id": part.function_call.id
-                                or f"call_{next_call_idx}",
+                                "id": part.function_call.id or f"call_{next_call_idx}",
                                 "name": part.function_call.name,
-                                "args": _to_plain(
-                                    part.function_call.args or {}
-                                ),
+                                "args": _to_plain(part.function_call.args or {}),
                             }
                         )
                         next_call_idx += 1
@@ -130,10 +120,6 @@ class GeminiClient:
     ) -> "types.GenerateContentConfig | None":
         """Build the shared `GenerateContentConfig` accepted by both
         `generate_content` and `generate_content_stream`."""
-        # Gemini implicit caching keys on the prefix; concatenate
-        # stable + volatile into one system_instruction. Volatile
-        # mutating defeats the cache for its bytes; stable prefix
-        # still benefits.
         full_system = system or ""
         if system_volatile:
             full_system = (
@@ -157,11 +143,7 @@ class GeminiClient:
                     ]
                 )
             ]
-        return (
-            types.GenerateContentConfig(**config_kwargs)
-            if config_kwargs
-            else None
-        )
+        return types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
 
     def _build_response_from_candidate(
         self, parts: list[Any], usage_meta: Any
@@ -220,14 +202,12 @@ class GeminiClient:
                         for r in message["tool_results"]
                     ],
                 )
-            # Gemini rejects empty Part(text=""); coerce to a single
-            # space so the conversation shape stays valid.
+            # Gemini rejects empty Part(text=""); coerce to a space.
             return types.Content(
                 role="user",
                 parts=[types.Part(text=message["content"] or " ")],
             )
 
-        # assistant -> "model"
         parts: list[types.Part] = []
         if message.get("content"):
             parts.append(types.Part(text=message["content"]))

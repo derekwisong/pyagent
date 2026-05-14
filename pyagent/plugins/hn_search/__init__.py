@@ -33,7 +33,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
 
 from pyagent.session import Attachment
 
@@ -42,21 +41,16 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT_S = 10
 _DEFAULT_SAVE_STRUCTURED = True
-_MAX_RESULTS = 50  # Algolia's per-page max; HN search results are short, no need to cap lower
+_MAX_RESULTS = 50
 _VALID_KINDS = {"story", "comment", "poll", "any"}
-# Time-window seconds. Algolia's numericFilters take literal numeric
-# epochs, NOT relative-time strings — earlier `now-1d`-style values
-# returned HTTP 400 and silently broke every non-`all` filter
-# (caught in #94 review). The filter is computed at call time as
-# ``int(time.time()) - <seconds>`` so the agent always asks about
-# "the last N from this moment." 0 means "no filter."
+# Algolia numericFilters need literal epochs, not relative-time strings.
 _TIME_WINDOW_SECONDS: dict[str, int] = {
     "all": 0,
     "hour": 3600,
     "day": 86400,
     "week": 604800,
-    "month": 2592000,    # 30 days, by convention
-    "year": 31536000,    # 365 days
+    "month": 2592000,
+    "year": 31536000,
 }
 _VALID_TIME_WINDOWS = set(_TIME_WINDOW_SECONDS.keys())
 
@@ -76,14 +70,14 @@ class HNStory:
     """One HN search result, normalized."""
 
     title: str
-    url: str           # external URL the story links to (or hn-permalink for Ask/Show)
-    permalink: str     # https://news.ycombinator.com/item?id=<id> — always present
+    url: str
+    permalink: str
     author: str
     points: int
     num_comments: int
-    created_at: str    # ISO 8601, as Algolia returns it
+    created_at: str
     object_id: str
-    type: str          # story / comment / poll / job
+    type: str
 
 
 def _resolve_timeout(plugin_cfg: dict) -> int:
@@ -133,8 +127,6 @@ def _build_url(
         "query": query,
         "hitsPerPage": str(n),
     }
-    # Algolia tag values: story, comment, poll, pollopt, show_hn,
-    # ask_hn, front_page, job, user. ``any`` removes the filter.
     if kind != "any":
         params["tags"] = kind
     numeric: list[str] = []
@@ -156,13 +148,8 @@ def _parse_hits(payload: dict) -> list[HNStory]:
             continue
         object_id = str(hit.get("objectID") or "").strip()
         permalink = (
-            f"https://news.ycombinator.com/item?id={object_id}"
-            if object_id
-            else ""
+            f"https://news.ycombinator.com/item?id={object_id}" if object_id else ""
         )
-        # `url` is None for Ask HN / Show HN where the discussion
-        # IS the content. Fall back to permalink so consumers always
-        # have a clickable link.
         external_url = hit.get("url") or permalink
         try:
             points = int(hit.get("points") or 0)
@@ -172,8 +159,6 @@ def _parse_hits(payload: dict) -> list[HNStory]:
             num_comments = int(hit.get("num_comments") or 0)
         except (TypeError, ValueError):
             num_comments = 0
-        # Algolia returns _tags like ["story", "author_xyz", "story_123"].
-        # The first non-author/non-id tag is the kind.
         item_type = "story"
         for tag in hit.get("_tags") or []:
             if isinstance(tag, str) and not tag.startswith(
@@ -183,11 +168,7 @@ def _parse_hits(payload: dict) -> list[HNStory]:
                 break
         out.append(
             HNStory(
-                title=str(
-                    hit.get("title")
-                    or hit.get("story_title")
-                    or ""
-                ).strip(),
+                title=str(hit.get("title") or hit.get("story_title") or "").strip(),
                 url=str(external_url).strip(),
                 permalink=permalink,
                 author=str(hit.get("author") or "").strip(),
@@ -227,9 +208,7 @@ def hn_text_search(
     return _parse_hits(payload)
 
 
-def format_results(
-    stories: list[HNStory], query: str
-) -> str:
+def format_results(stories: list[HNStory], query: str) -> str:
     """Render a list of HNStory as a markdown numbered list."""
     if not stories:
         return f"<no hn results for {query!r}>"
@@ -242,7 +221,6 @@ def format_results(
         meta_bits.append(f"{s.points} pts")
         meta_bits.append(f"{s.num_comments} comments")
         if s.created_at:
-            # YYYY-MM-DDTHH:MM:SS.000Z — keep just the date for terseness
             meta_bits.append(s.created_at[:10])
         meta = " · ".join(meta_bits)
         lines.append(f"{i}. **{title}** — {s.permalink}")
@@ -312,8 +290,7 @@ def register(api):
             n_int = _MAX_RESULTS
         if kind not in _VALID_KINDS:
             return (
-                f"<error: kind must be one of {sorted(_VALID_KINDS)}, "
-                f"got {kind!r}>"
+                f"<error: kind must be one of {sorted(_VALID_KINDS)}, " f"got {kind!r}>"
             )
         if time_window not in _VALID_TIME_WINDOWS:
             return (
@@ -324,15 +301,9 @@ def register(api):
             try:
                 min_points_int: int | None = int(min_points)
             except (TypeError, ValueError):
-                return (
-                    f"<error: min_points must be an integer, got "
-                    f"{min_points!r}>"
-                )
+                return f"<error: min_points must be an integer, got " f"{min_points!r}>"
             if min_points_int < 0:
-                return (
-                    f"<error: min_points must be >= 0, got "
-                    f"{min_points_int}>"
-                )
+                return f"<error: min_points must be >= 0, got " f"{min_points_int}>"
         else:
             min_points_int = None
 
@@ -384,7 +355,4 @@ def register(api):
             suffix=".json",
         )
 
-    # Role-only: keeps hn_search out of the root agent's schema.
-    # Allowlisted in the bundled researcher role; reach for it via
-    # `pyagent --role researcher` or spawn_subagent.
     api.register_tool("hn_search", hn_search, role_only=True)

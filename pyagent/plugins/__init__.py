@@ -44,7 +44,8 @@ from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Literal, Mapping
+from typing import Any, Literal
+from collections.abc import Callable, Mapping
 
 from pyagent import config, paths
 
@@ -53,27 +54,15 @@ logger = logging.getLogger(__name__)
 LOCAL_PLUGINS_DIR = Path(".pyagent") / "plugins"
 PACKAGE_PLUGINS_PKG = "pyagent.plugins"
 ENTRY_POINT_GROUP = "pyagent.plugins"
-# Set of plugin API versions this build of pyagent understands. v1
-# plugins are observers (return values ignored); v2 plugins can return
-# `ToolHookResult` / `AfterToolHookResult` from before_tool / after_tool
-# to direct flow (block, mutate args, replace results, inject
-# user-role messages).
 SUPPORTED_API_VERSIONS: set[str] = {"1", "2"}
 RECENT_MESSAGES_WINDOW = 8
 
-# Maximum nesting depth for `PluginAPI.call_tool` chains. A → B → C → D
-# is fine; A → B → C → D → E is rejected with the depth-exceeded marker.
-# Cap is per-thread (we use threading.local) so concurrent agent threads
-# don't see each other's nesting state.
 CALL_TOOL_DEPTH_CAP = 4
 _call_tool_state = threading.local()
 
 
 def _call_tool_depth() -> int:
     return int(getattr(_call_tool_state, "depth", 0))
-
-
-# ---- Public types ----------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -91,7 +80,7 @@ class Manifest:
     requires_env: tuple[str, ...]
     requires_binaries: tuple[str, ...]
     in_subagents: bool
-    source: Path  # absolute path to manifest.toml
+    source: Path
 
 
 @dataclass(frozen=True)
@@ -221,7 +210,7 @@ class Message:
     contained only tool calls.
     """
 
-    role: str  # "user" | "assistant"
+    role: str
     text: str
 
 
@@ -265,11 +254,6 @@ class _PluginState:
 
     manifest: Manifest
     tools: dict[str, Callable[..., Any]] = field(default_factory=dict)
-    # Tools registered with role_only=True. Tracked separately so the
-    # agent bootstrap can skip them for root agents (no allowlist) and
-    # only add them to subagents/role-invocations whose allowlist
-    # explicitly names them. The names also appear in `tools` so the
-    # rich missing-tool error can cite the providing plugin.
     role_only_tools: dict[str, Callable[..., Any]] = field(default_factory=dict)
     sections: list[_RegisteredSection] = field(default_factory=list)
     providers: dict[str, _RegisteredProvider] = field(default_factory=dict)
@@ -292,17 +276,11 @@ class PluginAPI:
     def __init__(
         self,
         plugin_state: _PluginState,
-        loader: "LoadedPlugins | None" = None,
+        loader: LoadedPlugins | None = None,
     ) -> None:
         self._state = plugin_state
-        # Back-reference to the LoadedPlugins instance so
-        # `write_session_attachment` can find the active session that
-        # the agent binds via `LoadedPlugins.bind_session()` after
-        # session construction.
         self._loader = loader
         self._frozen = False
-
-    # ---- read-only attributes -----------------------------------
 
     @property
     def config_dir(self) -> Path:
@@ -330,8 +308,6 @@ class PluginAPI:
     @property
     def plugin_name(self) -> str:
         return self._state.manifest.name
-
-    # ---- session-scoped writes ----------------------------------
 
     def write_session_attachment(
         self,
@@ -361,8 +337,6 @@ class PluginAPI:
         if session is None:
             return None
         return session.write_attachment(tool_name, content, suffix)
-
-    # ---- cross-plugin tool composition --------------------------
 
     def call_tool(self, name: str, **kwargs: Any) -> str:
         """Invoke another registered tool from inside a tool body.
@@ -420,10 +394,6 @@ class PluginAPI:
                 f"{type(name).__name__}: {name!r}>"
             )
         loader = self._loader
-        # Resolve fn from the most-restrictive registry available.
-        # Production: agent bound → agent.tools (post-allowlist).
-        # Tests: no agent bound → plugin loader registry. Bench
-        # harness with neither: the not-available marker.
         fn: Callable | None = None
         if loader is not None and loader.agent is not None:
             fn = loader.agent.tools.get(name)
@@ -432,24 +402,17 @@ class PluginAPI:
             if entry is not None:
                 _, fn = entry
         if fn is None:
-            return (
-                f"<error: tool {name!r} not available in this context>"
-            )
+            return f"<error: tool {name!r} not available in this context>"
         depth = _call_tool_depth()
         if depth >= CALL_TOOL_DEPTH_CAP:
             return "<error: tool composition depth exceeded>"
         _call_tool_state.depth = depth + 1
         try:
             return fn(**kwargs)
-        except Exception as e:  # noqa: BLE001 — surface as marker
-            return (
-                f"<error: tool {name!r} raised: "
-                f"{type(e).__name__}: {e}>"
-            )
+        except Exception as e:  # noqa: BLE001
+            return f"<error: tool {name!r} raised: " f"{type(e).__name__}: {e}>"
         finally:
             _call_tool_state.depth = depth
-
-    # ---- registration -------------------------------------------
 
     def _check_open(self, what: str) -> None:
         if self._frozen:
@@ -525,9 +488,6 @@ class PluginAPI:
                 f"plugin {self._state.manifest.name!r} already registered "
                 f"provider {name!r} during this register() call"
             )
-        # Deferred import: pyagent.llms imports nothing from plugins,
-        # but plugins shouldn't pull in llms at module-import time —
-        # this keeps the dependency one-way and load-order tolerant.
         from pyagent import llms as _llms
 
         for core in _llms.PROVIDERS:
@@ -575,8 +535,6 @@ class PluginAPI:
             )
         )
 
-    # ---- lifecycle hooks ----------------------------------------
-
     def on_session_start(self, fn: Callable[[Any], None]) -> None:
         self._check_open("on_session_start")
         self._state.on_start_hooks.append(fn)
@@ -593,13 +551,9 @@ class PluginAPI:
         self._check_open("before_tool_call")
         self._state.before_tool_hooks.append(fn)
 
-    def after_tool_call(
-        self, fn: Callable[[str, dict, str], None]
-    ) -> None:
+    def after_tool_call(self, fn: Callable[[str, dict, str], None]) -> None:
         self._check_open("after_tool_call")
         self._state.after_tool_hooks.append(fn)
-
-    # ---- utility -----------------------------------------------
 
     def log(self, level: str, message: str) -> None:
         """Emit a structured log line tagged with the plugin name."""
@@ -609,18 +563,13 @@ class PluginAPI:
         method("[%s] %s", self._state.manifest.name, message)
 
 
-# ---- Manifest parsing ------------------------------------------
-
-
 def _parse_manifest(manifest_path: Path) -> Manifest | None:
     """Parse and validate manifest.toml. Returns None on failure."""
     try:
         with manifest_path.open("rb") as f:
             data = tomllib.load(f)
     except (OSError, tomllib.TOMLDecodeError) as e:
-        logger.warning(
-            "plugin manifest %s unreadable: %s", manifest_path, e
-        )
+        logger.warning("plugin manifest %s unreadable: %s", manifest_path, e)
         return None
 
     required = ("name", "version", "description", "api_version")
@@ -644,9 +593,7 @@ def _parse_manifest(manifest_path: Path) -> Manifest | None:
 
     provides = data.get("provides", {})
     if not isinstance(provides, dict):
-        logger.warning(
-            "plugin %s: [provides] is not a table", data.get("name")
-        )
+        logger.warning("plugin %s: [provides] is not a table", data.get("name"))
         return None
 
     requires = data.get("requires", {}) or {}
@@ -662,22 +609,14 @@ def _parse_manifest(manifest_path: Path) -> Manifest | None:
         version=str(data["version"]),
         description=str(data["description"]),
         api_version=str(data["api_version"]),
-        provides_tools=tuple(
-            str(t) for t in (provides.get("tools") or [])
-        ),
+        provides_tools=tuple(str(t) for t in (provides.get("tools") or [])),
         provides_prompt_sections=tuple(
             str(s) for s in (provides.get("prompt_sections") or [])
         ),
-        provides_providers=tuple(
-            str(p) for p in (provides.get("providers") or [])
-        ),
+        provides_providers=tuple(str(p) for p in (provides.get("providers") or [])),
         requires_python=str(requires.get("python") or ""),
-        requires_env=tuple(
-            str(v) for v in (requires.get("env") or [])
-        ),
-        requires_binaries=tuple(
-            str(b) for b in (requires.get("binaries") or [])
-        ),
+        requires_env=tuple(str(v) for v in (requires.get("env") or [])),
+        requires_binaries=tuple(str(b) for b in (requires.get("binaries") or [])),
         in_subagents=bool(load_table.get("in_subagents", True)),
         source=manifest_path.resolve(),
     )
@@ -694,23 +633,15 @@ def _eligibility_check(manifest: Manifest) -> str | None:
     return None
 
 
-# ---- Discovery -------------------------------------------------
-
-
 @dataclass
 class PluginRecord:
     """One discovered plugin, before it has been loaded."""
 
     manifest: Manifest
-    tier: str  # "bundled" | "entry_point" | "user" | "project"
+    tier: str
     plugin_dir: Path | None
-    entry_point: Any = None  # importlib.metadata.EntryPoint, or None
+    entry_point: Any = None
     shadowed_by: list[Path] = field(default_factory=list)
-    # True unless the plugin is explicitly disabled (via
-    # `[plugins.<name>] enabled = false` for entry-point/drop-in
-    # plugins, or omitted from `built_in_plugins_enabled` for
-    # bundled). Disabled plugins still appear in discover() so the
-    # rich missing-tool error can cite them; load() skips them.
     enabled: bool = True
 
 
@@ -784,9 +715,7 @@ def _scan_entry_points() -> list[PluginRecord]:
                 )
             )
         except Exception as e:
-            logger.warning(
-                "entry point %s discovery failed: %s", entry.name, e
-            )
+            logger.warning("entry point %s discovery failed: %s", entry.name, e)
     return records
 
 
@@ -798,9 +727,7 @@ def _enabled_bundled_names() -> set[str]:
     cfg = config.load()
     raw = cfg.get("built_in_plugins_enabled", [])
     if not isinstance(raw, list):
-        logger.warning(
-            "config.built_in_plugins_enabled is not a list; ignoring"
-        )
+        logger.warning("config.built_in_plugins_enabled is not a list; ignoring")
         return set()
     return {n for n in raw if isinstance(n, str)}
 
@@ -830,14 +757,9 @@ def discover() -> list[PluginRecord]:
     try:
         bundled_root = _bundled_root()
     except (ModuleNotFoundError, FileNotFoundError):
-        # No bundled plugins package yet (Stage 1 ships before any
-        # bundled plugins exist).
         bundled_root = None
     bundled = _scan_dir(bundled_root, tier="bundled") if bundled_root else []
     enabled_bundled = _enabled_bundled_names()
-    # Mark bundled plugins NOT in built_in_plugins_enabled as disabled
-    # rather than dropping them — the rich missing-tool error needs
-    # to know they exist.
     for r in bundled:
         if r.manifest.name not in enabled_bundled:
             r.enabled = False
@@ -849,13 +771,10 @@ def discover() -> list[PluginRecord]:
     by_name: dict[str, PluginRecord] = {}
     shadowed: dict[str, list[Path]] = {}
 
-    # Iterate lowest precedence first; later tiers replace.
     for record in bundled + entry_points + user + project:
         existing = by_name.get(record.manifest.name)
         if existing and existing.plugin_dir is not None:
-            shadowed.setdefault(record.manifest.name, []).append(
-                existing.plugin_dir
-            )
+            shadowed.setdefault(record.manifest.name, []).append(existing.plugin_dir)
         by_name[record.manifest.name] = record
 
     final: list[PluginRecord] = []
@@ -874,9 +793,6 @@ def discover() -> list[PluginRecord]:
 
     final.sort(key=_sort_key)
     return final
-
-
-# ---- Loading ---------------------------------------------------
 
 
 def _load_module(record: PluginRecord) -> Any | None:
@@ -898,13 +814,7 @@ def _load_module(record: PluginRecord) -> Any | None:
 
     plugin_py = record.plugin_dir / "plugin.py"
     if plugin_py.exists():
-        synth_name = (
-            f"pyagent_plugin_{record.manifest.name.replace('-', '_')}"
-        )
-        # Detect synth-name collision (e.g. "my-plugin" and
-        # "my_plugin" both map to pyagent_plugin_my_plugin). Skip
-        # the second to avoid silently overwriting sys.modules and
-        # corrupting the first plugin's relative imports.
+        synth_name = f"pyagent_plugin_{record.manifest.name.replace('-', '_')}"
         if synth_name in sys.modules:
             logger.warning(
                 "plugin %s: synthetic module name %r already taken "
@@ -940,18 +850,11 @@ def _load_module(record: PluginRecord) -> Any | None:
             return None
         return module
 
-    # Bundled plugin laid out as a real Python package under
-    # pyagent.plugins.<name>; import normally.
-    pkg_name = (
-        f"{PACKAGE_PLUGINS_PKG}."
-        f"{record.manifest.name.replace('-', '_')}"
-    )
+    pkg_name = f"{PACKAGE_PLUGINS_PKG}." f"{record.manifest.name.replace('-', '_')}"
     try:
         return importlib.import_module(pkg_name)
     except Exception as e:
-        logger.warning(
-            "plugin %s: import failed: %s", record.manifest.name, e
-        )
+        logger.warning("plugin %s: import failed: %s", record.manifest.name, e)
         return None
 
 
@@ -973,13 +876,9 @@ def _validate_provides(state: _PluginState) -> str | None:
     missing_providers = declared_providers - actual_providers
     extra_providers = actual_providers - declared_providers
     if missing_tools:
-        problems.append(
-            f"tools declared but not registered: {sorted(missing_tools)}"
-        )
+        problems.append(f"tools declared but not registered: {sorted(missing_tools)}")
     if extra_tools:
-        problems.append(
-            f"tools registered but not declared: {sorted(extra_tools)}"
-        )
+        problems.append(f"tools registered but not declared: {sorted(extra_tools)}")
     if missing_sections:
         problems.append(
             f"prompt_sections declared but not registered: "
@@ -987,18 +886,15 @@ def _validate_provides(state: _PluginState) -> str | None:
         )
     if extra_sections:
         problems.append(
-            f"prompt_sections registered but not declared: "
-            f"{sorted(extra_sections)}"
+            f"prompt_sections registered but not declared: " f"{sorted(extra_sections)}"
         )
     if missing_providers:
         problems.append(
-            f"providers declared but not registered: "
-            f"{sorted(missing_providers)}"
+            f"providers declared but not registered: " f"{sorted(missing_providers)}"
         )
     if extra_providers:
         problems.append(
-            f"providers registered but not declared: "
-            f"{sorted(extra_providers)}"
+            f"providers registered but not declared: " f"{sorted(extra_providers)}"
         )
     return "; ".join(problems) if problems else None
 
@@ -1014,43 +910,13 @@ class LoadedPlugins:
 
     states: list[_PluginState] = field(default_factory=list)
     shadowed: dict[str, list[Path]] = field(default_factory=dict)
-    # Maps tool_name -> plugin_name across ALL discovered plugins
-    # (including disabled ones), so the rich missing-tool error can
-    # cite an installed-but-disabled plugin.
     declared_tool_provenance: dict[str, str] = field(default_factory=dict)
-    # Whether this loader was built for a subagent process. Recorded
-    # at load() time so `rescan_for_new` can apply the same
-    # `in_subagents = false` filter that `load()` did, without
-    # reaching back to the call site.
     is_subagent: bool = False
-    # Effective (after-conflict-resolution) tool registry; populated
-    # by `_resolve_conflicts` at end of load(). Plugin-private — not
-    # exposed mutably; consumers use tools() / sections().
     _resolved_tools: dict[str, tuple[str, Callable]] = field(default_factory=dict)
-    # Names of resolved tools registered with role_only=True. Tracked
-    # separately so agent_proc can skip them for root agents and add
-    # them only when an allowlist explicitly names them. The names
-    # are still in `_resolved_tools` so the rich missing-tool error
-    # works uniformly.
     _resolved_role_only: set[str] = field(default_factory=set)
     _resolved_sections: list[_RegisteredSection] = field(default_factory=list)
-    _resolved_providers: dict[str, _RegisteredProvider] = field(
-        default_factory=dict
-    )
-    # Active session for plugin-side writes via
-    # `PluginAPI.write_session_attachment`. The agent's bootstrap
-    # constructs the session after `load()` returns, then calls
-    # `bind_session(session)` to populate this. Stays `None` in
-    # bench / no-session contexts; plugins fall back to inline-only.
+    _resolved_providers: dict[str, _RegisteredProvider] = field(default_factory=dict)
     session: Any | None = None
-    # Active agent for `PluginAPI.call_tool` resolution. When set,
-    # `call_tool` looks up tool names in `agent.tools` (the effective
-    # registry post-role-allowlist filtering and post-conflict
-    # resolution) rather than the plugin-only registry. This makes
-    # role_tools constraints apply through composition the same way
-    # they apply to direct LLM-issued calls. Stays `None` in test
-    # fixtures driving PluginAPI directly without a real Agent;
-    # `call_tool` then falls back to the plugin registry.
     agent: Any | None = None
 
     def bind_session(self, session: Any | None) -> None:
@@ -1183,15 +1049,9 @@ class LoadedPlugins:
         records = discover()
         existing_names = {s.manifest.name for s in self.states}
 
-        # Refresh declared_tool_provenance so a newly-installed-but-
-        # disabled plugin's tools still surface in the rich
-        # missing-tool error. setdefault preserves the original
-        # discoverer when names overlap.
         for r in records:
             for tool in r.manifest.provides_tools:
-                self.declared_tool_provenance.setdefault(
-                    tool, r.manifest.name
-                )
+                self.declared_tool_provenance.setdefault(tool, r.manifest.name)
 
         new_states: list[_PluginState] = []
         for record in records:
@@ -1224,19 +1084,11 @@ class LoadedPlugins:
         if not new_states:
             return 0
 
-        # Splice each new state's contributions into the resolved
-        # tables and the agent's effective registry. Track per-state
-        # what actually went live vs got skipped so the loader note
-        # can be honest about partial registration.
         live_tools_by_plugin: dict[str, list[str]] = {}
         skipped_tools_by_plugin: dict[str, list[str]] = {}
         live_sections_by_plugin: dict[str, list[str]] = {}
         new_provider_count = 0
 
-        # Gate on agent.tools (built-ins + already-loaded plugin tools)
-        # rather than _resolved_tools alone — agent.tools is the
-        # source of truth for callability and includes built-ins the
-        # loader registry doesn't know about.
         for state in new_states:
             plugin_name = state.manifest.name
             live_tools: list[str] = []
@@ -1259,10 +1111,7 @@ class LoadedPlugins:
 
             live_sections: list[str] = []
             for section in state.sections:
-                if any(
-                    s.name == section.name
-                    for s in self._resolved_sections
-                ):
+                if any(s.name == section.name for s in self._resolved_sections):
                     logger.warning(
                         "prompt section %r already registered by an "
                         "earlier plugin; %s's registration skipped",
@@ -1289,8 +1138,6 @@ class LoadedPlugins:
         if new_provider_count:
             _publish_plugin_providers(self)
 
-        # Fire on_session_start once per new plugin against the
-        # already-active session. Bench / no-session contexts skip.
         if self.session is not None:
             for state in new_states:
                 for fn in state.on_start_hooks:
@@ -1302,10 +1149,6 @@ class LoadedPlugins:
                             state.manifest.name,
                         )
 
-        # Tell the LLM what loaded. Same pending_async_replies channel
-        # the subagent-notes machinery uses; the agent loop drains it
-        # immediately after this rescan call so the message lands on
-        # this turn's API request.
         for state in new_states:
             m = state.manifest
             live = live_tools_by_plugin.get(m.name, [])
@@ -1316,14 +1159,10 @@ class LoadedPlugins:
                 f"tools=[{', '.join(live) or '(none)'}]",
             ]
             if skipped:
-                parts.append(
-                    f"tools-skipped-conflict=[{', '.join(skipped)}]"
-                )
+                parts.append(f"tools-skipped-conflict=[{', '.join(skipped)}]")
             if sections:
                 parts.append(f"sections=[{', '.join(sections)}]")
-            note = _format_plugin_note(
-                "plugin-loader", "; ".join(parts)
-            )
+            note = _format_plugin_note("plugin-loader", "; ".join(parts))
             agent.pending_async_replies.put(note)
 
         return len(new_states)
@@ -1343,8 +1182,7 @@ class LoadedPlugins:
         for state in self.states:
             if cancel_check is not None and cancel_check():
                 logger.info(
-                    "on_session_start: cancel detected; skipping "
-                    "remaining plugins"
+                    "on_session_start: cancel detected; skipping " "remaining plugins"
                 )
                 return
             for fn in state.on_start_hooks:
@@ -1378,9 +1216,7 @@ class LoadedPlugins:
                         state.manifest.name,
                     )
 
-    def call_before_tool_call(
-        self, name: str, args: dict
-    ) -> "BeforeToolDispatch":
+    def call_before_tool_call(self, name: str, args: dict) -> BeforeToolDispatch:
         """Fire every plugin's before_tool hook in registration order.
 
         Conflict resolution (matches the v2 contract documented in
@@ -1431,9 +1267,7 @@ class LoadedPlugins:
                     continue
                 if rv.extra_user_message:
                     dispatch.extra_user_messages.append(
-                        _format_plugin_note(
-                            plugin_name, rv.extra_user_message
-                        )
+                        _format_plugin_note(plugin_name, rv.extra_user_message)
                     )
                 if rv.decision == "block":
                     dispatch.blocked = True
@@ -1455,7 +1289,7 @@ class LoadedPlugins:
 
     def call_after_tool_call(
         self, name: str, args: dict, result: str, is_error: bool
-    ) -> "AfterToolDispatch":
+    ) -> AfterToolDispatch:
         """Fire every plugin's after_tool hook in registration order.
 
         v1 hooks accept ``(name, args, result)`` and have their return
@@ -1500,9 +1334,7 @@ class LoadedPlugins:
                     continue
                 if rv.extra_user_message:
                     dispatch.extra_user_messages.append(
-                        _format_plugin_note(
-                            plugin_name, rv.extra_user_message
-                        )
+                        _format_plugin_note(plugin_name, rv.extra_user_message)
                     )
                 if rv.replace_result is not None:
                     if not isinstance(rv.replace_result, str):
@@ -1519,7 +1351,7 @@ class LoadedPlugins:
 
 
 def _load_one_record(
-    record: PluginRecord, loaded: "LoadedPlugins"
+    record: PluginRecord, loaded: LoadedPlugins
 ) -> _PluginState | None:
     """Import one plugin's module, run its ``register()``, validate
     declared-vs-registered names, and return the resulting
@@ -1563,7 +1395,7 @@ def _load_one_record(
     return state
 
 
-def _publish_plugin_providers(loaded: "LoadedPlugins") -> None:
+def _publish_plugin_providers(loaded: LoadedPlugins) -> None:
     """Push the loader's resolved provider table into ``pyagent.llms``
     so ``get_client("<plugin-provider>/<model>")`` can route to it.
 
@@ -1596,8 +1428,6 @@ def load(*, is_subagent: bool = False) -> LoadedPlugins:
     """
     records = discover()
 
-    # declared_tool_provenance covers ALL discovered plugins, including
-    # disabled ones, so the rich missing-tool error can cite them.
     declared_tool_provenance: dict[str, str] = {}
     for r in records:
         for tool in r.manifest.provides_tools:
@@ -1619,9 +1449,7 @@ def load(*, is_subagent: bool = False) -> LoadedPlugins:
             continue
         reason = _eligibility_check(record.manifest)
         if reason:
-            logger.info(
-                "plugin %s: skipped (%s)", record.manifest.name, reason
-            )
+            logger.info("plugin %s: skipped (%s)", record.manifest.name, reason)
             continue
         state = _load_one_record(record, loaded)
         if state is None:
@@ -1632,16 +1460,8 @@ def load(*, is_subagent: bool = False) -> LoadedPlugins:
 
     loaded._resolve_conflicts()
 
-    # Publish plugin-registered providers to the LLM router so
-    # `get_client("<plugin-provider>/<model>")` resolves them. The
-    # router is the source of truth at call sites; the loader is the
-    # only writer. Subagents call `load()` independently, so each
-    # process ends up with its own narrowed view of plugin providers.
     _publish_plugin_providers(loaded)
     return loaded
-
-
-# ---- Helpers used by the agent loop ----------------------------
 
 
 def _to_message(entry: Any) -> Message:
@@ -1678,9 +1498,7 @@ def make_prompt_context(conversation: list[Any]) -> PromptContext:
         if len(conversation) <= RECENT_MESSAGES_WINDOW
         else conversation[-RECENT_MESSAGES_WINDOW:]
     )
-    return PromptContext(
-        recent_messages=tuple(_to_message(e) for e in tail)
-    )
+    return PromptContext(recent_messages=tuple(_to_message(e) for e in tail))
 
 
 def format_missing_tool_error(

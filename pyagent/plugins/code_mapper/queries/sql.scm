@@ -24,9 +24,9 @@
     (object_reference
         name: (identifier) @name)) @definition.function
 
-(create_procedure
-    (object_reference
-        name: (identifier) @name)) @definition.procedure
+; NOTE: `create_procedure` is not a node in the bundled SQL grammar
+; (tree-sitter-language-pack 0.x); re-add the clause if/when the
+; grammar gains the node.
 
 ; create_trigger has multiple object_references (the trigger name,
 ; the target table, optionally the executed function). The trigger

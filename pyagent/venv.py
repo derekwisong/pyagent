@@ -93,12 +93,8 @@ def _create(target: Path) -> Path:
     decides how to surface that (likely as a tool-result marker).
     Returns the resolved path on success.
     """
-    logger.info(
-        "creating venv at %s using %s", target, sys.executable
-    )
+    logger.info("creating venv at %s using %s", target, sys.executable)
     try:
-        # `--without-pip` would be faster but then we have to
-        # bootstrap pip ourselves; default behavior installs pip.
         subprocess.run(
             [sys.executable, "-m", "venv", str(target)],
             check=True,
@@ -112,9 +108,7 @@ def _create(target: Path) -> Path:
             f"{(e.stderr or e.stdout or '').strip()[:500]}"
         ) from e
     except subprocess.TimeoutExpired as e:
-        raise RuntimeError(
-            f"venv creation timed out after 120s at {target}"
-        ) from e
+        raise RuntimeError(f"venv creation timed out after 120s at {target}") from e
 
     if not is_venv(target):
         raise RuntimeError(

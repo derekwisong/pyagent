@@ -82,27 +82,6 @@ def _on_text(text: str, agent_id: str | None = None) -> None:
     console.print()
 
 
-# Per-agent streaming state.
-#   _streaming_active: keys (agent_id or "root") with an open stream
-#     — the closing `assistant_text` event branches on presence to
-#     decide between streaming-close (walk back, re-render as
-#     Markdown) and a fresh non-streaming render.
-#   _streaming_text: cumulative text-so-far per key. Re-emitted in
-#     full on every delta so the rendered region always matches the
-#     latest accumulated text.
-#   _streaming_rendered_rows: how many terminal rows the previous
-#     render of the cumulative text consumed. Each new delta walks
-#     back exactly this many rows before re-emitting, so the
-#     terminal region stays in sync without per-chunk drift.
-#
-# Why not just `console.print(chunk, end="", ...)` per delta? Doing
-# so emits partial lines (no trailing \n) into patch_stdout. On
-# patch_stdout's next render tick the cursor is repositioned at the
-# top of the prompt area, which clobbers the in-progress row — the
-# user saw "! How can I assist you today?" when the model actually
-# emitted "Hello! How can I assist you today?" (issue #111).
-# Re-rendering the full cumulative text inside one atomic
-# walk-back-then-write buffer keeps positioning deterministic.
 _streaming_active: set[str] = set()
 _streaming_text: dict[str, str] = {}
 _streaming_rendered_rows: dict[str, int] = {}
@@ -156,34 +135,21 @@ def _on_text_delta(chunk: str, agent_id: str | None = None) -> None:
 
     prev_rows = _streaming_rendered_rows[key]
     term_width = shutil.get_terminal_size((80, 24)).columns
-    # Trailing \n pushes the cursor to a fresh line below the text,
-    # which is where prompt_toolkit redraws the prompt — and the
-    # row we'll walk back FROM on the next delta.
     new_rows = _cursor_advance_rows(text + "\n", term_width)
 
     parts: list[str] = []
     if prev_rows > 0:
-        # \x1b[{N}F = move cursor to start of N rows up
-        # \x1b[J   = clear from cursor to end of screen
         parts.append(f"\x1b[{prev_rows}F\x1b[J")
-    # \x1b[2m / \x1b[22m: dim on / normal intensity off (the LLM
-    # stream is visually subordinate to the bold/shaded user line).
     parts.append(f"\x1b[2m{text}\x1b[22m\n")
     sys.stdout.write("".join(parts))
     sys.stdout.flush()
     _streaming_rendered_rows[key] = new_rows
 
 
-# Tool calls made during the current root-agent turn. Cleared on
-# each new user_prompt and at the end of each turn after the
-# summary line is printed. Each entry is a dict so `_on_tool_result`
-# can mutate the matching call's status in place.
 _turn_tool_calls: list[dict[str, Any]] = []
 
 
-def _on_tool_call(
-    name: str, args: dict[str, Any], agent_id: str | None = None
-) -> None:
+def _on_tool_call(name: str, args: dict[str, Any], agent_id: str | None = None) -> None:
     """Render a single tool call as a visible cyan ⏵ line so the
     user can scan a turn and immediately see which tools fired.
 
@@ -199,26 +165,19 @@ def _on_tool_call(
         _turn_tool_calls.append({"name": name, "ok": True})
 
 
-def _on_tool_result(
-    name: str, content: str, agent_id: str | None = None
-) -> None:
+def _on_tool_result(name: str, content: str, agent_id: str | None = None) -> None:
     """Show every tool result as a one-line `↳ preview`, dim-cyan on
     success and dim-red on error. Errors also flip the matching
     call's status in `_turn_tool_calls` so the end-of-turn summary
     can mark it ✗."""
     first = (content.splitlines()[0] if content else "").strip()
-    is_error = first.startswith("Error:") or first.startswith("<")
+    is_error = first.startswith(("Error:", "<"))
     if not first:
         return
     preview = first if len(first) <= 80 else first[:79] + "…"
     style = "dim red" if is_error else "dim cyan"
-    console.print(
-        f"{_agent_label(agent_id)}  [{style}]↳ {preview}[/{style}]"
-    )
+    console.print(f"{_agent_label(agent_id)}  [{style}]↳ {preview}[/{style}]")
     if is_error and agent_id is None:
-        # Walk backwards to flip the most recent still-OK call of
-        # this name. Multiple calls of the same tool in one turn
-        # match in LIFO order.
         for entry in reversed(_turn_tool_calls):
             if entry["name"] == name and entry["ok"]:
                 entry["ok"] = False
@@ -231,47 +190,27 @@ def _render_turn_tool_summary() -> None:
     when no tools fired. Clears the accumulator either way."""
     if not _turn_tool_calls:
         return
-    parts = [
-        f"{c['name']} {'✓' if c['ok'] else '✗'}"
-        for c in _turn_tool_calls
-    ]
+    parts = [f"{c['name']} {'✓' if c['ok'] else '✗'}" for c in _turn_tool_calls]
     console.print(f"[dim]tools: {' · '.join(parts)}[/dim]")
     _turn_tool_calls.clear()
 
 
-# Status footer ----------------------------------------------------
-#
-# The bottom-of-screen `thinking…` line gets a richer rendering once
-# subagents are alive: each agent's most-recent activity is shown
-# inline, separated by `│`. The single-agent rendering is unchanged
-# from before the footer landed — same `thinking…` text — so users
-# who don't use subagents see no UI churn.
-#
-# State is per-CLI-process (one dict, mutated in place by the
-# asyncio pipe-reader callback in `_repl_async`). It carries across
-# turns so a subagent spawned in turn N is still tracked at turn N+1.
-
 _SPAWN_INFO_RE = re.compile(
     r"spawned subagent (?P<name>\S+) \(id=(?P<sid>\S+), depth=\d+\)"
 )
-_TERM_INFO_RE = re.compile(
-    r"terminated subagent \S+ \(id=(?P<sid>[^)]+)\)"
-)
+_TERM_INFO_RE = re.compile(r"terminated subagent \S+ \(id=(?P<sid>[^)]+)\)")
 
 
-# Pricing math lives in pyagent.pricing now so the audit / bench
-# entry points can reuse it without dragging click + readline + rich
-# along. The aliases below preserve the private names existing tests
-# (smoke_token_meter etc.) import from this module — zero-touch.
-from pyagent.pricing import (
-    ANTHROPIC_CACHE_READ_MULT as _ANTHROPIC_CACHE_READ_MULT,
-    ANTHROPIC_CACHE_WRITE_MULT as _ANTHROPIC_CACHE_WRITE_MULT,
-    PRICING_USD_PER_MTOK as _PRICING_USD_PER_MTOK,
-    estimate_cost_usd as _estimate_cost_usd,
+# re-exports for tests (test_token_meter etc.)
+from pyagent.pricing import (  # noqa: E402
+    ANTHROPIC_CACHE_READ_MULT as _ANTHROPIC_CACHE_READ_MULT,  # noqa: F401
+    ANTHROPIC_CACHE_WRITE_MULT as _ANTHROPIC_CACHE_WRITE_MULT,  # noqa: F401
+    PRICING_USD_PER_MTOK as _PRICING_USD_PER_MTOK,  # noqa: F401
+    estimate_cost_usd as _estimate_cost_usd,  # noqa: F401
     format_right_zone as _format_right_zone,
     format_usage_suffix as _format_usage_suffix,
-    is_anthropic_model as _is_anthropic_model,
-    model_name as _model_name,
+    is_anthropic_model as _is_anthropic_model,  # noqa: F401
+    model_name as _model_name,  # noqa: F401
 )
 
 
@@ -387,11 +326,6 @@ def _dump_prompt(
         out_lines.append("")
         out_lines.append("[no volatile content this turn]")
 
-    # Build tool schemas unconditionally — we want their sizes in the
-    # footer even when the user didn't ask to dump the bulky JSON.
-    # Static built-ins from agent_tools mirror what agent_proc
-    # registers, minus dynamic tools (subagent meta, ask_parent,
-    # checklist) that depend on session/checklist state.
     builtins = [
         ("read_file", agent_tools.read_file),
         ("write_file", agent_tools.write_file),
@@ -413,18 +347,13 @@ def _dump_prompt(
     def _push_schema(name: str, fn: Any) -> None:
         try:
             sch = build_schema(name, fn)
-        except Exception as e:  # noqa: BLE001 — surface but keep going
+        except Exception as e:  # noqa: BLE001
             sch = {"name": name, "error": f"<schema build failed: {e}>"}
         all_schemas.append(sch)
         per_tool_chars.append((name, len(_json.dumps(sch))))
 
     for name, fn in builtins:
         _push_schema(name, fn)
-    # Mirror the agent_proc bootstrap: role-only plugin tools never
-    # appear in the root agent's schema list, so don't count them in
-    # the dump either. Otherwise the size footer overstates root's
-    # actual schema cost. (A future --role flag could include them
-    # selectively; today the dump shows the root view.)
     role_only = loaded.role_only_tool_names()
     for tool_name, (_pname, fn) in loaded.tools().items():
         if tool_name in role_only:
@@ -441,10 +370,6 @@ def _dump_prompt(
         out_lines.append("")
         out_lines.append(schemas_block)
 
-    # Per-category breakdown for the size footer. Re-render each
-    # component independently so we can attribute chars to a source —
-    # `stable` itself is the concatenation and can't be partitioned by
-    # `\n\n` since components contain `\n\n` internally.
     soul_text = soul_path.read_text() if soul_path else ""
     tools_text = tools_path.read_text() if tools_path else ""
     primer_text = primer_path.read_text() if primer_path else ""
@@ -453,21 +378,16 @@ def _dump_prompt(
     persona_text = builder._persona_footer()
     plugin_sections: list[tuple[str, int]] = []
     from pyagent.plugins import PromptContext as _PromptCtx
+
     for sec in loaded.sections():
         try:
             rendered = sec.renderer(_PromptCtx())
         except Exception:  # noqa: BLE001
             rendered = ""
         if rendered:
-            plugin_sections.append(
-                (f"{sec.plugin_name}:{sec.name}", len(rendered))
-            )
+            plugin_sections.append((f"{sec.plugin_name}:{sec.name}", len(rendered)))
     plugin_total_chars = sum(c for _, c in plugin_sections)
 
-    # Targets are tuned for "works on a small local model" — system
-    # prompt + tool schemas combined comfortably under ~7K tokens so a
-    # 16K-context model has runway for the conversation. Adjust per
-    # section as the prose evolves.
     targets = {
         "SOUL.md": 1000,
         "TOOLS.md": 1500,
@@ -497,7 +417,12 @@ def _dump_prompt(
             _tok(plugin_total_chars),
             targets["plugin sections"],
         ),
-        ("persona footer", len(persona_text), _tok(len(persona_text)), targets["persona footer"]),
+        (
+            "persona footer",
+            len(persona_text),
+            _tok(len(persona_text)),
+            targets["persona footer"],
+        ),
         (
             f"tool schemas ({schema_count})",
             len(schemas_block),
@@ -524,9 +449,7 @@ def _dump_prompt(
             status = "near limit"
         else:
             status = "ok"
-        out_lines.append(
-            f"  {label:<28}  {chars:>7}  {toks:>7}  {tgt:>7}  {status}"
-        )
+        out_lines.append(f"  {label:<28}  {chars:>7}  {toks:>7}  {tgt:>7}  {status}")
     if volatile:
         out_lines.append(
             f"  {'volatile (turn-local)':<28}  {len(volatile):>7}  "
@@ -539,9 +462,6 @@ def _dump_prompt(
         f"{'+' + str(grand_tokens - target_total) + ' over' if grand_tokens > target_total else 'ok'}"
     )
 
-    # Per-tool schema breakdown — fattest tools are the cheapest wins
-    # for trim. Plugin tools tend to dominate; built-ins are usually
-    # already terse.
     per_tool_chars.sort(key=lambda x: -x[1])
     out_lines.append("")
     out_lines.append("Top tool schemas by size:")
@@ -550,7 +470,6 @@ def _dump_prompt(
     if len(per_tool_chars) > 10:
         out_lines.append(f"  ({len(per_tool_chars) - 10} more)")
 
-    # Trim suggestions: name what's over budget, point to where.
     overs = [(label, toks - tgt, tgt) for label, _, toks, tgt in rows if toks > tgt]
     out_lines.append("")
     out_lines.append("Trim suggestions (largest deltas first):")
@@ -612,11 +531,7 @@ def _resolve_model(cli_model: str | None) -> str:
     detected = llms.auto_detect_provider()
     if detected:
         return llms.resolve_model(detected.name)
-    expected = ", ".join(
-        v
-        for spec in llms.PROVIDERS
-        for v in spec.env_vars
-    )
+    expected = ", ".join(v for spec in llms.PROVIDERS for v in spec.env_vars)
     raise click.UsageError(
         "no model selected and no API-key env var is set.\n"
         f"Set one of: {expected}\n"
@@ -630,12 +545,8 @@ def _agents_tokens(agents: dict) -> tuple[int, int, int, int]:
     tracked agents."""
     in_tot = sum(a.get("tokens", {}).get("input", 0) for a in agents.values())
     out_tot = sum(a.get("tokens", {}).get("output", 0) for a in agents.values())
-    cw_tot = sum(
-        a.get("tokens", {}).get("cache_creation", 0) for a in agents.values()
-    )
-    cr_tot = sum(
-        a.get("tokens", {}).get("cache_read", 0) for a in agents.values()
-    )
+    cw_tot = sum(a.get("tokens", {}).get("cache_creation", 0) for a in agents.values())
+    cr_tot = sum(a.get("tokens", {}).get("cache_read", 0) for a in agents.values())
     return in_tot, out_tot, cw_tot, cr_tot
 
 
@@ -771,8 +682,6 @@ def _agents_tier_c(agents: dict) -> str:
     if buckets["error"] > 0:
         pieces.append(f"{buckets['error']} error")
     if not pieces:
-        # Edge case: every agent in some pre-spawn limbo. Still show
-        # the count so the user knows the tree exists.
         pieces.append("0 working")
     return f"{len(agents)} agents: " + " · ".join(pieces)
 
@@ -805,7 +714,7 @@ def _render_status(agents: dict, model: str = "") -> str:
     accepted for API compatibility with earlier versions; the right
     zone (gross/net/$cost) lives in `_format_right_zone_markup` now.
     """
-    del model  # right zone is composed separately now
+    del model
     checklist = _checklist_segment(agents)
     if len(agents) <= 1:
         return f"[dim]{_root_status_text(agents)}{checklist}[/dim]"
@@ -846,9 +755,7 @@ def _format_right_zone_markup(
     return f"[dim]{cost_str}[/dim]"
 
 
-def _update_agents_state(
-    agents: dict[str, dict[str, str]], event: dict
-) -> None:
+def _update_agents_state(agents: dict[str, dict[str, str]], event: dict) -> None:
     """Mutate `agents` in place from a single inbound event.
 
     Tracks per-agent activity for the footer. Spawn / terminate use
@@ -860,9 +767,9 @@ def _update_agents_state(
     key = agent_id or "root"
 
     if kind == "tool_call_started":
-        agents.setdefault(key, {"status": "idle"})["status"] = (
-            f"· {event.get('name', '?')}"
-        )
+        agents.setdefault(key, {"status": "idle"})[
+            "status"
+        ] = f"· {event.get('name', '?')}"
         return
     if kind in ("tool_result", "assistant_text"):
         if key in agents:
@@ -887,11 +794,6 @@ def _update_agents_state(
             agents.pop(m.group("sid"), None)
             return
     if kind == "checklist":
-        # Always lands on root: the checklist is a per-session
-        # construct, not per-agent. (Subagents don't get their own
-        # list — see pyagent/checklist.py.) Compute the footer
-        # summary here so _render_status doesn't have to re-walk
-        # the task list on every redraw.
         tasks = event.get("tasks") or []
         slot = agents.setdefault("root", {"status": "thinking"})
         if not tasks:
@@ -902,22 +804,15 @@ def _update_agents_state(
         completed = sum(1 for t in tasks if t.get("status") == "completed")
         current = next(
             (t for t in tasks if t.get("status") == "in_progress"), None
-        ) or next(
-            (t for t in tasks if t.get("status") == "pending"), None
-        )
+        ) or next((t for t in tasks if t.get("status") == "pending"), None)
         slot["checklist"] = {
             "completed": completed,
             "total": total,
             "current_title": current.get("title", "") if current else "",
         }
-        # Stash the full list so /tasks can render it without an IPC
-        # round-trip. Cheap (≤ ~20 entries) and avoids an additional
-        # request/response event type.
         slot["checklist_tasks"] = tasks
         return
     if kind == "notes_unread":
-        # Root-only event from agent_proc (issue #65). Stash on root
-        # so the footer (#67) can render `msgs:N` without polling.
         slot = agents.setdefault("root", {"status": "thinking"})
         slot["notes_unread"] = {
             "count": int(event.get("count", 0) or 0),
@@ -926,9 +821,6 @@ def _update_agents_state(
         return
     if kind == "usage":
         slot = agents.setdefault(key, {"status": "idle"})
-        # Use .get(k, 0) + … so old two-key dicts in long-running state
-        # (or session.jsonl re-replays predating the cache schema) don't
-        # KeyError on cache_creation / cache_read.
         tokens = slot.setdefault(
             "tokens",
             {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0},
@@ -937,10 +829,6 @@ def _update_agents_state(
             tokens[k] = tokens.get(k, 0) + int(event.get(k, 0) or 0)
         return
     if kind == "context_status":
-        # Root-emitted (subagents could too in principle, but the
-        # warning that matters for footer real estate is the root's
-        # context). Stash the latest reading; `_context_segment`
-        # reads from here on every footer redraw.
         slot = agents.setdefault(key, {"status": "thinking"})
         slot["context"] = {
             "pct": int(event.get("pct", 0) or 0),
@@ -988,6 +876,7 @@ def _resume_callback(
         for sid in ids:
             click.echo(sid)
     ctx.exit()
+    return None
 
 
 _TASK_STATUS_GLYPH = {
@@ -1034,9 +923,7 @@ def _handle_model_command(
     """
     parts = line.split(maxsplit=1)
     if len(parts) < 2:
-        console.print(
-            "[red]usage: /model <provider[/model-name]> | <role-name>[/red]"
-        )
+        console.print("[red]usage: /model <provider[/model-name]> | <role-name>[/red]")
         return current_model
     spec = parts[1].strip()
     try:
@@ -1071,7 +958,6 @@ def _prompt_message() -> ANSI:
     """
     width = shutil.get_terminal_size((80, 24)).columns
     divider = "─" * max(8, width - 1)
-    # \x1b[2m = dim, \x1b[0m = reset
     return ANSI(f"\x1b[2m{divider}\x1b[0m\n> ")
 
 
@@ -1104,16 +990,11 @@ def _commit_user_line(line: str) -> None:
     Long lines that wrap across multiple terminal rows only get
     the last 2 rows handled; wider inputs are an edge case.
     """
-    # \x1b[2F = move cursor to start of line 2 rows up (the divider)
-    # \x1b[J  = clear from cursor to end of screen
     sys.stdout.write("\x1b[2F\x1b[J")
     if line:
         term_width = shutil.get_terminal_size((80, 24)).columns
         text = f"│ {line}"
         pad = " " * max(0, term_width - _visual_width(text) - 1)
-        # 48;5;236 = dark-grey bg, 97 = bright-white fg
-        # 1 / 22   = bold on/off (scoped to the user's text only)
-        # 39 / 49  = default fg / bg
         sys.stdout.write(
             "\x1b[48;5;236m\x1b[97m│ "
             f"\x1b[1m{line}\x1b[22m{pad}"
@@ -1158,9 +1039,7 @@ def _context_segment(agents: dict) -> str:
     return f" · ctx: {pct}%"
 
 
-def _perms_segment(
-    perms: "collections.deque[dict]", drop_head: bool = False
-) -> str:
+def _perms_segment(perms: "collections.deque[dict]", drop_head: bool = False) -> str:
     """Render the footer's permissions segment (' · perms: …') or empty.
 
     Issue #69 — when N>=1 concurrent permission_request events are in
@@ -1187,13 +1066,8 @@ def _perms_segment(
     return f" · perms: {n} (head: {head_target})"
 
 
-# Braille spinner — 10 frames, indistinguishable in 0-width-glyph
-# fonts but reads as a smooth rotating dot in any modern terminal.
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-_SPINNER_FPS = 10  # ticks per second; chosen to feel "alive" without
-                   # being distracting. The bottom_toolbar's
-                   # refresh_interval needs to be ≤ 1/_SPINNER_FPS to
-                   # actually render every frame.
+_SPINNER_FPS = 10
 
 
 def _tree_busy(agents: dict) -> bool:
@@ -1226,11 +1100,7 @@ def _spinner_segment(busy: bool) -> str:
     return f"\x1b[2m{_SPINNER_FRAMES[idx]}\x1b[0m "
 
 
-# Right-zone budget: the spec caps it at 28 cols so wide terminals
-# don't swallow huge stretches of footer with a stale dollar figure.
 _RIGHT_ZONE_MAX = 28
-# Tier-C agent-count threshold: lazygit-style heuristic. Past 6 live
-# agents, even Tier B feels noisy on most terminals.
 _TIER_C_AGENT_THRESHOLD = 6
 
 
@@ -1299,9 +1169,7 @@ def _style_left(text: str, has_error: bool) -> str:
 
 
 def _has_error(agents: dict) -> bool:
-    return any(
-        a.get("status") == "error" for a in agents.values()
-    )
+    return any(a.get("status") == "error" for a in agents.values())
 
 
 def _compose_footer(
@@ -1325,11 +1193,6 @@ def _compose_footer(
     has_error = _has_error(agents)
     multi_agent = len(agents) > 1
 
-    # Right zone composition (drop-tier knobs flipped during
-    # degradation). Pre-render to ANSI once so width math sees the
-    # same byte sequence we'll embed. Anything wider than 28 cols
-    # forces an internal drop_gross / drop_net step so the right
-    # zone always honors its budget.
     def render_right(drop_gross: bool, drop_net: bool) -> tuple[str, int]:
         for dg, dn in ((drop_gross, drop_net), (True, drop_net), (True, True)):
             markup = _format_right_zone_markup(
@@ -1341,11 +1204,8 @@ def _compose_footer(
             w = _visible_width(ansi)
             if w <= _RIGHT_ZONE_MAX:
                 return ansi, w
-        # Fall through with the most-degraded variant even if it still
-        # exceeds the cap (extreme edge case — 8-digit cost number).
         return ansi, w
 
-    # Helper: compose left given a set of degradation choices.
     def build_left(
         agent_tier: str,
         drop_perms_head: bool,
@@ -1371,58 +1231,33 @@ def _compose_footer(
         if not drop_msgs:
             msgs_text, _ = _msgs_segment(agents, drop_severity_tag=drop_msgs_severity)
             center += msgs_text
-        # Context utilization sits at the tail of the center zone:
-        # less load-bearing than checklist/perms/msgs (those are
-        # action items), but still worth a glance. No degradation
-        # path — it's a single short atom that drops itself when the
-        # window is unknown.
         center += _context_segment(agents)
         return center
 
-    # Degradation pipeline. Each step makes one targeted concession
-    # in the order the spec lists (1..9). We try the budget after
-    # each and stop on the first fit.
     def fits(left_text: str, drop_gross: bool, drop_net: bool) -> tuple[bool, str, int]:
         right_a, right_wlocal = render_right(drop_gross, drop_net)
         left_w = _visible_width(left_text)
-        # `+1` for the minimum single-space gap between left and right
-        # when the right zone is non-empty.
         gap = 1 if right_a else 0
         return spinner_w + left_w + gap + right_wlocal <= cols, right_a, right_wlocal
 
-    # The tuple structure is the dial set the composer has to pick:
-    # (agent_tier, drop_perms_head, drop_msgs_severity,
-    #  drop_checklist_title, drop_gross, drop_net, drop_msgs, drop_perms)
-    # Order matches the spec's 1..9 priority list.
     steps: list[tuple[str, bool, bool, bool, bool, bool, bool, bool]] = []
-    # Decide the starting agent tier. If there are >6 agents we go
-    # straight to Tier C — the count alone already says enough.
     base_tier = "A"
     if multi_agent and len(agents) > _TIER_C_AGENT_THRESHOLD:
         base_tier = "C"
 
-    # Step 0: nothing dropped.
     steps.append((base_tier, False, False, False, False, False, False, False))
-    # Step 1: drop perms head preview.
     steps.append((base_tier, True, False, False, False, False, False, False))
-    # Step 2: drop msgs severity tag.
     steps.append((base_tier, True, True, False, False, False, False, False))
-    # Step 3: drop checklist title.
     steps.append((base_tier, True, True, True, False, False, False, False))
-    # Step 4: drop gross.
     steps.append((base_tier, True, True, True, True, False, False, False))
-    # Step 5: tier collapse A → B → C.
     if multi_agent and base_tier == "A":
         steps.append(("B", True, True, True, True, False, False, False))
         steps.append(("C", True, True, True, True, False, False, False))
     elif multi_agent and base_tier == "B":
         steps.append(("C", True, True, True, True, False, False, False))
-    # Step 6: drop net.
     final_tier = "C" if multi_agent else base_tier
     steps.append((final_tier, True, True, True, True, True, False, False))
-    # Step 7: drop msgs entirely.
     steps.append((final_tier, True, True, True, True, True, True, False))
-    # Step 8: drop perms entirely (last resort — always-on signal).
     steps.append((final_tier, True, True, True, True, True, True, True))
 
     chosen_step: tuple[str, bool, bool, bool, bool, bool, bool, bool] | None = None
@@ -1441,8 +1276,6 @@ def _compose_footer(
             break
 
     if chosen_step is None:
-        # Even the most-degraded variant didn't fit. Truncate the
-        # center with `…` so the right zone keeps its column.
         tier, dph, dms, dct, dg, dn, dmsgs, dperms = steps[-1]
         left_text = build_left(tier, dph, dms, dct, dmsgs, dperms)
         right_a, right_wlocal = render_right(dg, dn)
@@ -1461,8 +1294,6 @@ def _compose_footer(
     right_wlocal = chosen_right_w
 
     if truncated:
-        # Single-style the truncated text — no per-segment coloring
-        # because the segment boundaries are gone.
         left_markup = _style_left(chosen_left_text, has_error)
     else:
         if multi_agent:
@@ -1483,8 +1314,6 @@ def _compose_footer(
         else:
             msgs_text, sev = _msgs_segment(agents, drop_severity_tag=dms)
             msgs_markup = _style_msgs(msgs_text, sev) if msgs_text else ""
-        # Context segment carries its own (yellow / red) styling at
-        # threshold so we don't pipe it through `_style_left`.
         ctx_markup = _context_segment(agents)
         left_markup = f"{center_markup}{perms_markup}{msgs_markup}{ctx_markup}"
 
@@ -1531,32 +1360,11 @@ def _print_event(event: dict) -> None:
         was_streaming = key in _streaming_active
         _streaming_active.discard(key)
         if not was_streaming:
-            # Non-streaming provider — full markdown render.
             _on_text(event["text"], agent_id=agent_id)
         else:
-            # Walk back over the streamed-text region and re-emit
-            # the same content as Markdown so the final view has
-            # bold / headers / code-block formatting. The agent
-            # label (if any) sits in the prefix above the streamed
-            # region — don't re-emit it here.
-            #
-            # Two invariants the working delta loop already proves:
-            #   1. ANSI + replacement bytes must reach patch_stdout as
-            #      ONE atomic write that ends in `\n`. A split write
-            #      (escape via sys.stdout, then markdown via
-            #      console.print) lets patch_stdout commit the markdown
-            #      before the walk-back is part of any committed unit.
-            #      So we capture the Markdown render into a string and
-            #      write everything in one shot.
-            #   2. The walk-back here needs ONE extra row beyond what
-            #      the deltas use. Each delta + this close write are
-            #      separate patch_stdout flushes (separate
-            #      `run_in_terminal` calls). Between the last delta and
-            #      this one, prompt_toolkit redraws the prompt; the
-            #      renderer's `erase()` then lands cursor one row
-            #      further down than where the deltas left it, so we
-            #      walk back rendered_rows + 1 to reach the streamed
-            #      text line.
+            # Walk back rendered_rows + 1: prompt_toolkit's redraw
+            # between deltas and this close lands the cursor one row
+            # below where the deltas left it.
             _streaming_text.pop(key, None)
             rendered_rows = _streaming_rendered_rows.pop(key, 0)
             with console.capture() as cap:
@@ -1576,11 +1384,6 @@ def _print_event(event: dict) -> None:
         label = _agent_label(agent_id)
         console.print(f"{label}[dim]ready[/dim]")
     elif kind == "subagent_ask":
-        # A subagent is asking its parent a question mid-turn.
-        # Yellow so the user spots cross-agent conversation in
-        # the same scan they use for permission prompts. The
-        # parent will see the same text as a synthesized user
-        # message at the start of its next turn (issue #47).
         label = _agent_label(agent_id)
         req_id = event.get("request_id", "")
         question = event.get("question", "") or ""
@@ -1589,16 +1392,9 @@ def _print_event(event: dict) -> None:
             f"[dim]{question}[/dim]"
         )
     elif kind == "subagent_note":
-        # A subagent dropped a non-blocking note to its parent
-        # (issue #64). The parent's IO thread also queued it onto
-        # the parent's pending_async_replies; the model sees it
-        # at its next LLM call. Surface in the transcript so the
-        # human can read along.
         label = _agent_label(agent_id)
         severity = event.get("severity", "info") or "info"
         text = event.get("text", "") or ""
-        # Color severity: warn / alert get yellow to draw the eye;
-        # info stays dim.
         sev_style = "yellow" if severity in ("warn", "alert") else "cyan"
         console.print(
             f"{label}[{sev_style}]notes ({severity}):[/{sev_style}] "
@@ -1613,14 +1409,10 @@ def _print_event(event: dict) -> None:
         elif event.get("kind") == "KeyboardInterrupt":
             console.print("[dim]interrupted[/dim]")
         else:
-            console.print(
-                f"[red]Error:[/red] {event['kind']}: {event['message']}"
-            )
+            console.print(f"[red]Error:[/red] {event['kind']}: {event['message']}")
 
 
-def _handle_perms_command(
-    line: str, perms: "collections.deque[dict]"
-) -> None:
+def _handle_perms_command(line: str, perms: "collections.deque[dict]") -> None:
     """Implement /perms (list) and /perms <n> (jump-the-queue).
 
     Issue #69. With multiple concurrent permission requests, the user
@@ -1639,38 +1431,29 @@ def _handle_perms_command(
             target = entry.get("target", "?")
             sid = entry.get("agent_id") or "root"
             tag = "" if i > 1 else " [dim](active)[/dim]"
-            console.print(
-                f"[dim]  {i}. {sid}: {target}[/dim]{tag}"
-            )
+            console.print(f"[dim]  {i}. {sid}: {target}[/dim]{tag}")
         return
     try:
         idx = int(sub)
     except ValueError:
         console.print(
-            f"[red]unknown perms command {sub!r}; "
-            f"use /perms or /perms <n>[/red]"
+            f"[red]unknown perms command {sub!r}; " f"use /perms or /perms <n>[/red]"
         )
         return
     if not perms:
         console.print("[dim]no pending permission requests[/dim]")
         return
     if idx < 1 or idx > len(perms):
-        console.print(
-            f"[red]/perms {idx}: out of range (1..{len(perms)})[/red]"
-        )
+        console.print(f"[red]/perms {idx}: out of range (1..{len(perms)})[/red]")
         return
     if idx == 1:
         console.print("[dim]already active[/dim]")
         return
-    # Move entry at position idx-1 to the head. Rotating preserves
-    # arrival order of the others, which keeps the list intuitive.
     entry = perms[idx - 1]
     del perms[idx - 1]
     perms.appendleft(entry)
     target = entry.get("target", "?")
-    console.print(
-        f"[dim]active: {target} (was index {idx})[/dim]"
-    )
+    console.print(f"[dim]active: {target} (was index {idx})[/dim]")
 
 
 async def _repl_async(
@@ -1698,9 +1481,6 @@ async def _repl_async(
       - idle → next typed line is sent as `user_prompt` (existing
         path).
     """
-    # Pending permission requests, FIFO. Each entry:
-    # {target, agent_id, request_id}. /perms lists; /perms <n>
-    # rotates index n to head; submit-while-non-empty answers head.
     perms: collections.deque[dict] = collections.deque()
     state: dict[str, Any] = {
         "model": model,
@@ -1742,18 +1522,16 @@ async def _repl_async(
             kind = event.get("type")
             agent_id = event.get("agent_id")
             if kind == "permission_request":
-                # Issue #69: append to the deque (don't overwrite a
-                # single slot). The head is the active prompt the
-                # next y/n/a answers; /perms <n> can reorder.
-                perms.append({
-                    "target": event["target"],
-                    "agent_id": agent_id,
-                    "request_id": event.get("request_id", ""),
-                })
-                # Only print the inline banner for the new arrival;
-                # the head's status sits on the footer continuously.
+                perms.append(
+                    {
+                        "target": event["target"],
+                        "agent_id": agent_id,
+                        "request_id": event.get("request_id", ""),
+                    }
+                )
                 tail_note = (
-                    "" if len(perms) == 1
+                    ""
+                    if len(perms) == 1
                     else f" [dim](queued; {len(perms)} pending)[/dim]"
                 )
                 console.print(
@@ -1767,14 +1545,7 @@ async def _repl_async(
             elif kind == "turn_complete" and agent_id is None:
                 state["turn_busy"] = False
                 _render_turn_tool_summary()
-                # Issue #68: no local input queue to drain anymore.
-                # If the user typed during the turn, those lines
-                # already landed as `user_note` events; the agent
-                # handled them mid-turn (or promoted them to a
-                # fresh prompt if the idle-window race fired).
-                agents_state.setdefault(
-                    "root", {"status": "ready"}
-                )["status"] = "ready"
+                agents_state.setdefault("root", {"status": "ready"})["status"] = "ready"
             elif kind == "agent_error":
                 _print_event(event)
                 if agent_id is None:
@@ -1782,24 +1553,14 @@ async def _repl_async(
                         state["fatal"] = True
                         pt_session.app.exit(result="")
                         return
-                    # Non-fatal root error: turn is over. Surface
-                    # the error and let the user decide whether to
-                    # keep going.
                     state["turn_busy"] = False
             elif kind in ("usage", "checklist", "notes_unread"):
-                # State already updated; no inline render. Footer
-                # picks it up on the next bottom_toolbar refresh.
                 pass
             else:
                 _print_event(event)
-            # Trigger a footer redraw.
             pt_session.app.invalidate()
 
     def bottom_toolbar() -> ANSI:
-        # Three-zone composition lives in `_compose_footer` now; the
-        # spinner predicate broadened to cover non-root activity (see
-        # `_tree_busy`) so a finished root with a still-thinking
-        # subagent keeps the heartbeat visible.
         cols = shutil.get_terminal_size((120, 24)).columns
         return ANSI(
             _render_status_ansi(
@@ -1814,34 +1575,22 @@ async def _repl_async(
 
     @bindings.add("escape", eager=True)
     def _esc(event: Any) -> None:
-        # Esc means "cancel the in-flight turn" when busy. The agent
-        # propagates cancel down to all subagents and SIGKILLs in-flight
-        # shells. Pending permission requests get cleared locally too —
-        # the agent's tearing down whatever was waiting on them. When
-        # idle, no-op (don't interfere with line editing).
         if not state["turn_busy"]:
             return
         send_or_die("cancel")
         perms.clear()
         pt_session.app.invalidate()
 
-    # prompt_toolkit's default `class:bottom-toolbar` style is
-    # `reverse`, which produces a bright bar that fights the dim
-    # ANSI colors emitted by `_render_status_ansi`. Use a near-black
-    # gray instead — just enough lift off the terminal background to
-    # register as a separate band, dim enough that the rich-emitted
-    # text remains the dominant ink.
-    pt_style = Style.from_dict({
-        "bottom-toolbar": "noreverse bg:#1c1c1c fg:default",
-        "bottom-toolbar.text": "noreverse bg:#1c1c1c fg:default",
-    })
+    pt_style = Style.from_dict(
+        {
+            "bottom-toolbar": "noreverse bg:#1c1c1c fg:default",
+            "bottom-toolbar.text": "noreverse bg:#1c1c1c fg:default",
+        }
+    )
 
     pt_session: PromptSession = PromptSession(
         history=input_history,
         bottom_toolbar=bottom_toolbar,
-        # 0.1s tick so the spinner runs at its full 10 fps; lower
-        # would burn CPU on idle redraws, higher would make the
-        # spinner look choppy.
         refresh_interval=0.1,
         key_bindings=bindings,
         style=pt_style,
@@ -1852,26 +1601,16 @@ async def _repl_async(
         while True:
             try:
                 with patch_stdout(raw=True):
-                    # Pass the message as a callable so prompt_toolkit
-                    # re-evaluates the divider width on each redraw
-                    # (terminal resize between turns).
                     line = await pt_session.prompt_async(_prompt_message)
             except (EOFError, KeyboardInterrupt):
-                # Ctrl-D / Ctrl-C at the prompt — clean exit.
                 console.print()
                 return "eof"
             if state["fatal"]:
                 return "fatal"
             stripped = (line or "").strip()
-            # Always erase the divider + arrow row(s) prompt_toolkit
-            # just committed. For non-empty input, replace with a
-            # shaded historical row; for empty input, the next loop
-            # iteration redraws the prompt in place — silent no-op.
             _commit_user_line(stripped)
             if not stripped:
                 continue
-            # Slash commands always process locally — they never go
-            # through the perm_pending / busy / idle gate.
             if stripped.startswith("/perms"):
                 _handle_perms_command(stripped, perms)
                 continue
@@ -1883,10 +1622,6 @@ async def _repl_async(
             if stripped == "/tasks":
                 _print_tasks(agents_state)
                 continue
-            # State machine (issue #68 / #69):
-            #   1. perms non-empty → answer head as y/n/a.
-            #   2. turn_busy       → send user_note (mid-turn inject).
-            #   3. idle            → send user_prompt (start new turn).
             if perms:
                 answer = stripped.lower()
                 if answer in ("y", "yes", "n", "no", "a", "always"):
@@ -1906,8 +1641,6 @@ async def _repl_async(
                         request_id=request_id,
                     ):
                         return "fatal"
-                    # If more requests remain, surface the next head
-                    # so the user knows what they're answering next.
                     if perms:
                         next_target = perms[0].get("target", "?")
                         console.print(
@@ -1922,24 +1655,17 @@ async def _repl_async(
                     )
                 continue
             if state["turn_busy"]:
-                # Mid-turn typed input: ship as user_note. Agent
-                # surfaces it as `[user adds]: …` at next LLM call.
                 if not send_or_die("user_note", text=line):
                     return "fatal"
                 preview = line if len(line) <= 60 else line[:57] + "..."
-                console.print(
-                    f"[dim grey42]>> note sent: {preview}[/dim grey42]"
-                )
+                console.print(f"[dim grey42]>> note sent: {preview}[/dim grey42]")
             else:
                 if not send_or_die("user_prompt", prompt=line):
                     return "fatal"
-                # Defensive: if the previous turn errored out
-                # before turn_complete fired, stale call entries
-                # would leak into the next summary.
                 _turn_tool_calls.clear()
-                agents_state.setdefault(
-                    "root", {"status": "thinking"}
-                )["status"] = "thinking"
+                agents_state.setdefault("root", {"status": "thinking"})[
+                    "status"
+                ] = "thinking"
                 state["turn_busy"] = True
     finally:
         try:
@@ -2115,10 +1841,6 @@ def main(
         logging.getLogger("pyagent").setLevel(logging.INFO)
 
     if list_models_flag:
-        # Plugins must be loaded so plugin-registered providers (like
-        # ollama) show up in the listing. plugins.load() only runs
-        # register() — no session-start hooks fire — so this is cheap
-        # and side-effect-free for the CLI exit path.
         from pyagent import plugins as _plugins
 
         _plugins.load()
@@ -2201,17 +1923,12 @@ def main(
         from pyagent import roles as roles_mod
 
         roles_dict = roles_mod.load()
-        # Reuse the same case/dash/underscore normalization roles uses
-        # for spawn_subagent lookups, so `--role memory-curator`,
-        # `--role memory_curator`, and `--role MEMORY-CURATOR` all
-        # resolve to the same role.
         normalized = re.sub(r"[-_]+", "_", role_name.strip().lower())
         role = roles_dict.get(normalized)
         if role is None:
             available = ", ".join(sorted(roles_dict)) or "(none)"
             raise click.UsageError(
-                f"unknown role {role_name!r}. Available roles: "
-                f"{available}"
+                f"unknown role {role_name!r}. Available roles: " f"{available}"
             )
         role_extra["role_body"] = role.system_prompt
         role_extra["role_meta_tools"] = role.meta_tools
@@ -2235,9 +1952,6 @@ def main(
     primer = paths.resolve("PRIMER.md", override=primer, seed="PRIMER.md")
     permissions.pre_approve(paths.config_dir())
 
-    # CLI keeps a read-only view of history to seed prompt_toolkit's
-    # in-memory up-arrow history and to render the "resumed N entries"
-    # line; the child owns writes during the run.
     prior = session.load_history()
     input_history = _build_input_history(prior)
 
@@ -2253,16 +1967,8 @@ def main(
         **role_extra,
     }
 
-    # spawn (not fork): pickles fresh, doesn't drag the parent's
-    # threading state across, and behaves predictably under termios
-    # mode changes from the cancel watcher.
-    #
-    # daemon=False (Phase 3): the agent process must be allowed to
-    # spawn its own multiprocessing children (subagents). We trade
-    # the auto-cleanup-on-parent-exit that daemon=True gave us for
-    # the explicit try/finally below; the child also installs
-    # PR_SET_PDEATHSIG as a belt-and-suspenders against the CLI
-    # being SIGKILLed before the finally block runs.
+    # daemon=False: the agent must be allowed to spawn its own
+    # multiprocessing children (subagents).
     ctx = multiprocessing.get_context("spawn")
     parent_conn, child_conn = ctx.Pipe(duplex=True)
     proc = ctx.Process(
@@ -2274,13 +1980,9 @@ def main(
     proc.start()
 
     interrupted = False
-    # Hoisted so the exit summary can read totals even if we bail
-    # before the main loop populates this (e.g. during the ready
-    # handshake).
     agents_state: dict[str, dict[str, str]] = {}
     try:
-        # Parent doesn't need the child's end of the pipe; closing it
-        # lets the parent's recv() see EOF promptly when the child dies.
+        # Close child end so parent's recv() sees EOF promptly when the child dies.
         child_conn.close()
 
         console.print(f"[dim]session: {session.id}[/dim]")
@@ -2288,7 +1990,6 @@ def main(
         if prior:
             console.print(f"[dim]resumed {len(prior)} entries[/dim]")
 
-        # Wait for the child's `ready` (or fatal error) before accepting input.
         while True:
             try:
                 event = parent_conn.recv()
@@ -2311,20 +2012,8 @@ def main(
             logger.warning("cli: unexpected pre-ready event %r", kind)
 
         logger.info("soul=%s tools=%s primer=%s", soul, tools_md, primer)
-        # Per-agent state shared across turns. Root starts in `ready`
-        # (the agent has bootstrapped and is waiting for input); the
-        # submit branch in `_repl_async` flips it to `thinking` when
-        # the user actually fires a turn. Subagents are added/removed
-        # as info events flow through `_update_agents_state`.
         agents_state["root"] = {"status": "ready"}
 
-        # All REPL loop state lives in `_repl_async`. Returns one of
-        # "eof" (clean Ctrl-D / Ctrl-C at the prompt), "fatal"
-        # (agent subprocess died mid-session), or "interrupt" (KI
-        # arrived outside the prompt). asyncio.run owns its own
-        # signal handling for SIGINT — Ctrl-C delivered to the CLI
-        # process raises KeyboardInterrupt out of `prompt_async`,
-        # caught inside the coroutine.
         outcome = asyncio.run(
             _repl_async(
                 parent_conn,
@@ -2336,20 +2025,13 @@ def main(
         if outcome == "fatal":
             console.print("[red]agent subprocess exited unexpectedly[/red]")
     except KeyboardInterrupt:
-        # User Ctrl+C'd somewhere outside the input prompt's own
-        # except (e.g. mid-turn while a tool was running, or during
-        # the ready handshake). The cleanup below sends cancel + then
-        # shutdown so the child has a chance to wind down its in-
-        # flight turn instead of being blocked waiting for the next
-        # event when shutdown finally arrives.
         interrupted = True
         console.print()
         console.print("[dim]interrupted[/dim]")
     finally:
         if proc.is_alive():
             if interrupted:
-                # Cancel first so the child stops any in-flight tool
-                # batch, then shutdown to break out of its main loop.
+                # Cancel first to stop any in-flight tool batch, then shutdown.
                 try:
                     protocol.send(parent_conn, "cancel")
                 except (BrokenPipeError, OSError):
@@ -2370,9 +2052,7 @@ def main(
     if session.exists():
         console.print(f"[dim]to resume: pyagent --resume {session.id}[/dim]")
         in_tot, out_tot, cw_tot, cr_tot = _agents_tokens(agents_state)
-        usage_suffix = _format_usage_suffix(
-            in_tot, out_tot, model, cw_tot, cr_tot
-        )
+        usage_suffix = _format_usage_suffix(in_tot, out_tot, model, cw_tot, cr_tot)
         if usage_suffix:
             console.print(f"[dim]usage:{usage_suffix}[/dim]")
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from typing import Iterable
+from collections.abc import Iterable
 
 from pyagent.sessions_audit import AuditReport, _total_tokens_summary
 
@@ -55,17 +55,11 @@ def render_text(
     sec = set(sections) if sections else set(ALL_SECTIONS)
     lines: list[str] = []
 
-    # Always-shown orientation header.
     lines.append(f"session: {report.session_id}")
     lines.append(f"model:   {report.model or '(none)'}")
     lines.append(f"turns:   {report.turn_count}")
 
     if "cost" in sec:
-        # On Anthropic the four counts are disjoint and the displayed
-        # total bundles all four. On OpenAI / Gemini the providers'
-        # `prompt_tokens` / `prompt_token_count` already includes their
-        # cached count; bundling cache_read on top would double-count.
-        # `_total_tokens_summary` applies that gate.
         tokens = report.total_tokens
         total_all = _total_tokens_summary(report.model, tokens)
         lines.append(

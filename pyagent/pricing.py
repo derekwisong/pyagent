@@ -12,9 +12,7 @@ from __future__ import annotations
 
 from pyagent import llms
 
-
-# USD per million tokens, (input, output). Models not listed get
-# token-only display, no $ amount. Update freely as pricing changes.
+# USD per million tokens, (input, output).
 PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     "claude-opus-4-7": (15.0, 75.0),
     "claude-sonnet-4-6": (3.0, 15.0),
@@ -24,8 +22,6 @@ PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     "gemini-2.5-flash": (0.075, 0.30),
 }
 
-# Anthropic ephemeral-cache pricing multipliers applied to the model's
-# base input rate: writes are 1.25× input, reads are 0.1× input.
 ANTHROPIC_CACHE_WRITE_MULT = 1.25
 ANTHROPIC_CACHE_READ_MULT = 0.1
 
@@ -108,12 +104,7 @@ def gross_net_tokens(
     """
     name = model_name(model)
     if is_anthropic_model(name):
-        gross = (
-            input_tokens
-            + output_tokens
-            + cache_creation_tokens
-            + cache_read_tokens
-        )
+        gross = input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens
         net = (
             input_tokens
             + output_tokens

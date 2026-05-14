@@ -6,7 +6,7 @@ api_version = "1"
 # Exercises the plugin provider surface (api.register_provider). When
 # loaded, `--model echo-plugin/<anything>` resolves through the plugin
 # router instead of the built-in `pyagent/echo` stub. Useful for
-# smoke-testing the plugin → llm-router wiring without spending tokens.
+# testing the plugin → llm-router wiring without spending tokens.
 [provides]
 providers = ["echo-plugin"]
 

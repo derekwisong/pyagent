@@ -36,8 +36,6 @@ from pyagent.plugins import AfterToolHookResult
 
 CONSECUTIVE_FAILURE_THRESHOLD = 3
 
-# Per-process state. The plugin is `in_subagents = false`, so this
-# only ever lives in the root agent's process.
 _consecutive_fails: dict[str, int] = {}
 
 
@@ -65,26 +63,19 @@ def _on_after_tool(
     if path is None:
         return None
     if name != "edit_file":
-        # Reset the counter on any other tool against this path —
-        # evidence the agent is inspecting rather than blind-
-        # retrying.
         _consecutive_fails.pop(path, None)
         return None
 
     if not is_error:
-        # Successful edit. Reset.
         _consecutive_fails.pop(path, None)
         return None
 
-    # Bumping the counter.
     n = _consecutive_fails.get(path, 0) + 1
     _consecutive_fails[path] = n
     if n < CONSECUTIVE_FAILURE_THRESHOLD:
         return None
 
-    # Threshold tripped. Reset so the note doesn't fire on every
-    # subsequent failure too — the agent gets one nudge, not a
-    # spammy stream.
+    # Reset after firing so the agent gets one nudge, not a stream.
     _consecutive_fails.pop(path, None)
     return AfterToolHookResult(
         extra_user_message=(
@@ -99,6 +90,6 @@ def register(api: Any) -> None:
 
 
 def _reset_for_tests() -> None:
-    """Clear the per-path counter. Called by smoke tests so each test
+    """Clear the per-path counter. Called by tests so each test
     starts from a known state."""
     _consecutive_fails.clear()

@@ -26,13 +26,8 @@ from typing import Any
 
 from pyagent import pricing
 
-
-# Matches the prefix produced by `Agent._format_offload_ref` (issue #82
-# changed the header from prose to structured tokens). Captures the
-# attachment path and its char count. Anchored to the start of the
-# tool-result content; unanchored matching would catch the substring
-# inside an inline tool result that happens to mention an attachment,
-# inflating the offload count.
+# Anchored to the start of the tool-result content so an inline mention
+# of an attachment doesn't falsely register as an offload header.
 _OFFLOAD_RE = re.compile(r"^\[offload (\S+) \| produced (\d+)c")
 
 
@@ -58,7 +53,7 @@ class BloatRow:
     turn_idx: int
     tool_name: str
     char_count: int
-    preview: str  # first ~200 chars, newlines collapsed
+    preview: str
 
 
 @dataclass
@@ -69,9 +64,6 @@ class AuditReport:
     total_tokens: dict[str, int] = field(default_factory=dict)
     total_cost_usd: float | None = None
     cost_is_lower_bound: bool = False
-    # Number of assistant turns whose `usage` dict lacked cache fields
-    # (pre-#15 sessions). The renderer uses this for an "X of Y" warning
-    # so the user can judge how much the cost number is missing.
     pre_15_turns: int = 0
     per_turn: list[TurnRow] = field(default_factory=list)
     attachments: list[AttachmentRow] = field(default_factory=list)
@@ -147,21 +139,11 @@ def audit_session(
     attachment_refs: dict[str, int] = {}
     cost_is_lower_bound = False
 
-    # turn_idx counts user→assistant exchanges by assistant-turn order
-    # (1-indexed). Inline-bloat rows are tagged with the turn the tool
-    # result LANDED in, which is the next assistant turn (since tool
-    # results are in a user-role message that precedes the assistant's
-    # follow-up). Approximation: we tag with the assistant index just
-    # seen, which is what the human cares about for "blame which turn".
     last_assistant_idx = 0
     pre_15_turns = 0
     totals = {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0}
-    # Per-turn cost runs through the turn's RECORDED model (added to
-    # usage by the LLM clients in the bench-followups PR), falling back
-    # to the function arg for older sessions. Aggregating per-turn
-    # costs (vs. multiplying summed tokens by one model's rates) is the
-    # only way to stay correct across a session that spanned multiple
-    # models — e.g. the user switched via /model partway through.
+    # Aggregate by summing per-turn costs (not by pricing summed tokens)
+    # so a session that switched models mid-stream stays correct.
     per_turn_costs_sum = 0.0
     any_cost_priced = False
     recorded_models: list[str] = []
@@ -173,10 +155,6 @@ def audit_session(
         if role == "assistant":
             usage = entry.get("usage") or {}
             if "cache_creation" not in usage or "cache_read" not in usage:
-                # Pre-#15 transcript missing cache fields. Token totals
-                # still meaningful (input/output present), but the cost
-                # estimate is a lower bound — cache writes/reads cost
-                # real money on Anthropic.
                 cost_is_lower_bound = True
                 pre_15_turns += 1
             input_t = int(usage.get("input", 0) or 0)
@@ -222,9 +200,7 @@ def audit_session(
                 name = tr.get("name", "?")
                 m = _OFFLOAD_RE.match(content)
                 if m:
-                    attachment_refs[m.group(1)] = (
-                        attachment_refs.get(m.group(1), 0) + 1
-                    )
+                    attachment_refs[m.group(1)] = attachment_refs.get(m.group(1), 0) + 1
                     continue
                 inline_bloat.append(
                     BloatRow(
@@ -238,22 +214,14 @@ def audit_session(
     inline_bloat.sort(key=lambda r: r.char_count, reverse=True)
     inline_bloat = inline_bloat[:top_bloat]
 
-    # Attachments: list every file in attachments/ and tag with the
-    # ref count from the tool-result scan. Files with ref_count == 0
-    # are orphans (tool ran, but the attachment is no longer
-    # referenced — usually because the turn was rolled back).
     attachments: list[AttachmentRow] = []
     orphans: list[str] = []
     if attach_dir.exists():
         for f in sorted(attach_dir.iterdir()):
             if not f.is_file():
                 continue
-            # The offload prefix uses the path as written by the agent.
-            # Match by suffix `attachments/<name>` so a relative or
-            # absolute path both hit. Mirrors `Session.find_orphan_attachments`.
-            # The `attachments/` segment anchors the match so a tool
-            # result that happens to mention a bare filename can't
-            # falsely register as a reference.
+            # Match suffix "attachments/<name>" so relative and absolute
+            # offload paths both hit; bare-filename mentions can't.
             ref_count = 0
             for ref_path, count in attachment_refs.items():
                 if ref_path.endswith(f"attachments/{f.name}"):
@@ -267,9 +235,6 @@ def audit_session(
             if ref_count == 0:
                 orphans.append(f.name)
 
-    # Aggregate cost = sum of per-turn costs (correct across mixed
-    # models). Falls back to summing-then-pricing only when no turn
-    # had a priceable model.
     if any_cost_priced:
         total_cost_usd: float | None = per_turn_costs_sum
     else:
@@ -281,10 +246,8 @@ def audit_session(
             totals["cache_read"],
         )
 
-    # Header model: prefer the most recent turn's recorded model (the
-    # session's "current" identity) so a session whose only
-    # caller-supplied model was a fallback still surfaces what actually
-    # ran. Drop back to the function arg if no turn recorded one.
+    # Prefer the most recent turn's recorded model so the header
+    # reflects what actually ran, not the caller's fallback arg.
     header_model = recorded_models[-1] if recorded_models else model
 
     return AuditReport(

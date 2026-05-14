@@ -33,7 +33,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 import requests
 
@@ -44,26 +45,10 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_HOST = "http://localhost:11434"
-# Long timeout because the first request after a cold start can sit
-# waiting for Ollama to mmap/load a multi-GB GGUF before any tokens
-# come back.
 DEFAULT_TIMEOUT = 600
-# Ollama's server defaults to num_ctx=2048/4096 regardless of what the
-# model architecture supports, silently truncating tool-heavy pyagent
-# prompts. We override that. Floor (when the architecture window is
-# unknown) is 2x the server default so basic prompts fit; cap (when
-# the architecture window is huge, e.g. llama3.2's 128k) bounds KV-
-# cache memory on small local boxes — at fp16 a 3B-class model burns
-# ~110 KB/token, so 16k ≈ ~2 GB just for KV. Override with
-# PYAGENT_OLLAMA_NUM_CTX to bypass both.
+# Ollama server defaults num_ctx to 2048/4096 regardless of model arch; override.
 NUM_CTX_FLOOR = 8192
 NUM_CTX_CAP = 16384
-# Hardcoded fallback when nothing in env or config supplies a
-# temperature. Kept low because Ollama's 0.8 server default lets
-# multilingual models (qwen 2.5 14b) drift out of English mid-reply
-# and weaker tool-callers (llama 3.1 8b) hallucinate fake JSON tool
-# calls into the message body. Override globally in `[ollama]
-# temperature` or per model in `[ollama.temperature_per_model]`.
 DEFAULT_TEMPERATURE = 0.3
 
 
@@ -90,8 +75,6 @@ def _raise_with_body(resp: requests.Response, where: str) -> None:
         else:
             detail = str(body)
     except (ValueError, requests.exceptions.JSONDecodeError):
-        # Non-JSON body — fall back to the raw text, capped so a stray
-        # HTML error page doesn't blow up the log.
         detail = (resp.text or "").strip()[:500]
     msg = f"Ollama {where} returned {resp.status_code}"
     if detail:
@@ -161,28 +144,12 @@ class OllamaClient:
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         if not model:
-            raise ValueError(
-                "OllamaClient requires a model name; got empty string"
-            )
+            raise ValueError("OllamaClient requires a model name; got empty string")
         self.model = model
         self.provider_model = f"ollama/{model}"
         self.host = (host or _resolve_host()).rstrip("/")
         self.timeout = timeout
-        # Latched once we discover (via a 400 retry) that this model
-        # rejects the `tools` field. Subsequent turns skip tools so we
-        # don't burn a wasted round trip per call. We avoid a
-        # `/api/show` preflight on construction so the lazy-network
-        # contract holds — the cost is exactly one extra failed
-        # request the first time a no-tools model is used.
         self._skip_tools = False
-        # /api/show is consulted by both the context-window lookup
-        # and the dialect detection. We cache the whole payload so
-        # both can read from it without paying for two round trips
-        # on the first turn. None = not yet fetched; {} = fetched-
-        # and-failed (server unreachable, /api/show errored). Both
-        # downstream consumers latch their own derived values, so
-        # transient failures stick — same behavior the prior
-        # context-window cache had.
         self._show_payload: dict[str, Any] | None = None
         self._context_window: int | None = None
         self._dialect: dialects.Dialect | None = None
@@ -218,10 +185,6 @@ class OllamaClient:
         """
         if self._context_window is not None:
             return self._context_window
-        # Ollama's /api/show puts the architecture's context length
-        # under model_info["<family>.context_length"]. The family
-        # name varies (llama, qwen2, mistral, ...), so scan all keys
-        # ending with `.context_length` and take the first hit.
         model_info = self._show().get("model_info") or {}
         if isinstance(model_info, dict):
             for key, val in model_info.items():
@@ -290,9 +253,11 @@ class OllamaClient:
         per_model = cfg.get("temperature_per_model") or {}
         if isinstance(per_model, dict) and self.model in per_model:
             candidate = per_model[self.model]
-            if isinstance(candidate, (int, float)) and not isinstance(
-                candidate, bool
-            ) and candidate >= 0:
+            if (
+                isinstance(candidate, (int, float))
+                and not isinstance(candidate, bool)
+                and candidate >= 0
+            ):
                 return float(candidate)
             logger.warning(
                 "[ollama.temperature_per_model] %r = %r is not a "
@@ -302,14 +267,15 @@ class OllamaClient:
             )
 
         candidate = cfg.get("temperature")
-        if isinstance(candidate, (int, float)) and not isinstance(
-            candidate, bool
-        ) and candidate >= 0:
+        if (
+            isinstance(candidate, (int, float))
+            and not isinstance(candidate, bool)
+            and candidate >= 0
+        ):
             return float(candidate)
         if candidate is not None:
             logger.warning(
-                "[ollama] temperature = %r is not a non-negative "
-                "number; ignoring",
+                "[ollama] temperature = %r is not a non-negative " "number; ignoring",
                 candidate,
             )
 
@@ -366,9 +332,6 @@ class OllamaClient:
         on_text_delta: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
-        # Ollama has no prefix-cache surface to preserve, so stable +
-        # volatile concatenate into one system message — same shape
-        # the OpenAI client uses.
         full_system = system or ""
         if system_volatile:
             full_system = (
@@ -381,11 +344,6 @@ class OllamaClient:
         for m in conversation:
             messages.extend(self._to_ollama(m))
 
-        # Streaming hinges entirely on the on_text_delta callback. When
-        # set, ask Ollama to NDJSON-stream and surface chunks as they
-        # arrive; when unset, ask for a single-shot reply so callers
-        # like the audit / bench paths that just want the final dict
-        # don't pay any iteration overhead.
         streaming = on_text_delta is not None
         body: dict[str, Any] = {
             "model": self.model,
@@ -438,10 +396,7 @@ class OllamaClient:
         try:
             _raise_with_body(resp, "/api/chat")
         except requests.HTTPError as e:
-            if (
-                "does not support tools" in str(e).lower()
-                and "tools" in body
-            ):
+            if "does not support tools" in str(e).lower() and "tools" in body:
                 logger.warning(
                     "ollama model %r does not support tools; retrying "
                     "without (subsequent turns in this session will skip "
@@ -483,9 +438,6 @@ class OllamaClient:
             fn = tc.get("function") or {}
             args = fn.get("arguments")
             if isinstance(args, str):
-                # Some Ollama versions/models hand back JSON-stringified
-                # arguments; normalise to dict so the agent sees a
-                # uniform shape regardless of model quirks.
                 try:
                     args = json.loads(args)
                 except json.JSONDecodeError:
@@ -542,9 +494,6 @@ class OllamaClient:
                 try:
                     chunk = json.loads(raw)
                 except json.JSONDecodeError:
-                    # Malformed line — skip rather than blow up the
-                    # whole turn. Real Ollama servers don't emit
-                    # these but a flaky proxy might.
                     logger.debug("ollama: skipping malformed NDJSON line: %r", raw)
                     continue
 
@@ -565,10 +514,6 @@ class OllamaClient:
             except Exception:
                 pass
 
-        # Reconstruct a single-shot-shaped payload so _build_response
-        # can do the rest. The accumulated text wins over whatever
-        # `message.content` ended up on the final chunk (which is
-        # typically empty in streaming mode anyway).
         synthetic = dict(final_meta)
         synthetic["message"] = {
             "role": "assistant",
@@ -580,9 +525,6 @@ class OllamaClient:
     def _to_ollama(self, message: dict[str, Any]) -> list[dict[str, Any]]:
         if message["role"] == "user":
             if "tool_results" in message:
-                # Ollama's tool-result wire shape is just role="tool"
-                # with content; tool_name is a hint that newer models
-                # honor and older ones ignore safely.
                 return [
                     {
                         "role": "tool",
@@ -593,26 +535,13 @@ class OllamaClient:
                 ]
             return [{"role": "user", "content": message["content"]}]
 
-        # assistant — content is required even when only tool_calls
-        # are present, so default to "" rather than omitting.
         text = message.get("content") or ""
         tool_calls = message.get("tool_calls") or []
 
         if tool_calls and text:
-            # Mixed turn (prose + tool_call). Most chat templates
-            # render assistant ``.Content`` OR ``.ToolCalls`` but
-            # never both — qwen-style drops the calls when content
-            # is set, llama-style does the inverse. Either way the
-            # next turn loses information and the model gets confused.
-            # Inline the calls into content using the family's native
-            # envelope, then omit the structured tool_calls field so
-            # the template's content branch renders our hand-built
-            # block unchanged. See pyagent.plugins.ollama.dialects
-            # for the per-family envelope and detection rules.
+            # Mixed prose+tool_call turn: inline calls via family envelope and drop structured tool_calls so templates don't silently drop one channel.
             inlined = self.dialect.render_tool_calls_in_content(tool_calls)
-            return [
-                {"role": "assistant", "content": f"{text}\n{inlined}"}
-            ]
+            return [{"role": "assistant", "content": f"{text}\n{inlined}"}]
 
         msg: dict[str, Any] = {"role": "assistant", "content": text}
         if tool_calls:

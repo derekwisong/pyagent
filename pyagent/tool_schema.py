@@ -29,7 +29,8 @@ Example:
 
 import inspect
 import types
-from typing import Any, Callable, Union, get_args, get_origin, get_type_hints
+from typing import Any, Union, get_args, get_origin, get_type_hints
+from collections.abc import Callable
 
 from docstring_parser import parse
 
@@ -80,9 +81,7 @@ def schema(name: str, fn: Callable[..., Any]) -> dict[str, Any]:
     if doc.long_description:
         description = f"{description}\n\n{doc.long_description}".strip()
     if doc.returns and doc.returns.description:
-        description = (
-            f"{description}\n\nReturns: {doc.returns.description}".strip()
-        )
+        description = f"{description}\n\nReturns: {doc.returns.description}".strip()
 
     return {
         "name": name,

@@ -44,22 +44,13 @@ because plugin tools call directly while skill scripts go through
 from __future__ import annotations
 
 import json
-from typing import Sequence
+from collections.abc import Sequence
 
 from pyagent.plugins.web_search import search as _search
 from pyagent.session import Attachment
 
-
-# Maximum results the agent is allowed to ask for in one call. DDG
-# starts rate-limiting around the high 20s in practice; cap is a
-# safety belt rather than the everyday limit.
 _MAX_RESULTS = 25
 
-# Side-save the structured SearchResult list to attachments by
-# default. Cost is ~3KB per call; benefit is downstream tools can
-# consume the URL list without re-running the search, and the agent
-# has a recovery path if it forgets which URLs it saw. Configurable
-# via [plugins.web-search] save_structured.
 _DEFAULT_SAVE_STRUCTURED = True
 
 
@@ -131,10 +122,9 @@ def _config_warnings(plugin_cfg: dict) -> list[str]:
             )
         else:
             bad = [
-                v for v in raw
-                if not isinstance(v, (int, float))
-                or isinstance(v, bool)
-                or v < 0
+                v
+                for v in raw
+                if not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0
             ]
             if bad:
                 out.append(
@@ -165,10 +155,6 @@ def _config_warnings(plugin_cfg: dict) -> list[str]:
 
 
 def register(api):
-    # Lightweight register-time validation of the [plugins.web-search]
-    # table. Bogus values still fall through to defaults at call time
-    # via the _resolve_* helpers — this is purely about surfacing
-    # config typos at startup instead of letting them sit silent.
     for warning in _config_warnings(api.plugin_config or {}):
         api.log("warning", warning)
 
@@ -220,14 +206,10 @@ def register(api):
             )
         except ImportError:
             return (
-                "<search error: ddgs package not installed — "
-                "run: pip install ddgs>"
+                "<search error: ddgs package not installed — " "run: pip install ddgs>"
             )
         except _search.SearchRateLimited as e:
-            return (
-                f"<search error: rate limited; pause and try again "
-                f"later ({e})>"
-            )
+            return f"<search error: rate limited; pause and try again " f"later ({e})>"
         except _search.SearchBackoffExhausted as e:
             return (
                 f"<search error: backend unavailable {e}; try a "
@@ -237,18 +219,11 @@ def register(api):
             return f"<search error: {e}>"
 
         markdown = _search.format_search_results(results, query)
-        # Empty-results path: format_search_results returned the
-        # `<no results ...>` marker. Nothing structurally useful to
-        # save; return the marker as a plain string so error/empty
-        # behavior stays consistent.
         if not save_structured or not results:
             return markdown
 
         structured = json.dumps(
-            [
-                {"title": r.title, "url": r.url, "snippet": r.snippet}
-                for r in results
-            ],
+            [{"title": r.title, "url": r.url, "snippet": r.snippet} for r in results],
             indent=2,
             ensure_ascii=False,
         )
@@ -258,8 +233,4 @@ def register(api):
             suffix=".json",
         )
 
-    # Role-only: keeps web_search out of the root agent's schema
-    # list. Reach for it via `pyagent --role researcher` (or
-    # spawn_subagent(role="researcher", ...)) — the bundled
-    # researcher role's allowlist names it explicitly.
     api.register_tool("web_search", web_search, role_only=True)

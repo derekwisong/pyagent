@@ -33,7 +33,8 @@ import uuid
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.context import SpawnProcess
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
 
 from pyagent import config as config_mod
 from pyagent import permissions
@@ -59,13 +60,6 @@ class SubagentEntry:
     depth: int
     status: str = "idle"  # idle | running | done | error
     last_text: str = ""
-    # Dispatch mode for the most-recent in-flight call to this
-    # subagent. None when no call is in flight; "sync" while a
-    # call_subagent is blocking on the reply queue; "async" while a
-    # call_subagent_async has fired and not yet replied. The IO
-    # thread reads this when a turn_complete arrives to decide
-    # whether to land the reply on the per-sid reply queue (sync)
-    # or on the parent Agent's pending_async_replies inbox (async).
     mode: str | None = None
 
 
@@ -73,7 +67,7 @@ def _build_subagent_config(
     name: str,
     system_prompt: str,
     base_config: dict[str, Any],
-    parent_session: "Session",
+    parent_session: Session,
     parent_depth: int,
     model_override: str = "",
     role: roles_mod.Role | None = None,
@@ -94,16 +88,14 @@ def _build_subagent_config(
         cfg["role_body"] = role.system_prompt
         cfg["role_tools"] = list(role.tools) if role.tools is not None else None
         cfg["role_meta_tools"] = role.meta_tools
-    # Inherit current approved paths so the user isn't re-prompted for
-    # paths they already accepted in the parent's process.
     cfg["approved_paths"] = [str(p) for p in permissions.approved_paths()]
     return sid, cfg
 
 
 def make_spawn_subagent(
-    state: "_ChildState",
-    agent: "Agent",
-    parent_session: "Session",
+    state: _ChildState,
+    agent: Agent,
+    parent_session: Session,
     base_config: dict[str, Any],
 ) -> Callable[..., str]:
     """Build the spawn_subagent tool, closing over the parent's state."""
@@ -111,9 +103,7 @@ def make_spawn_subagent(
     max_depth = cfg["subagents"]["max_depth"]
     max_fanout = cfg["subagents"]["max_fanout"]
 
-    def spawn_subagent(
-        name: str, system_prompt: str, model: str = ""
-    ) -> str:
+    def spawn_subagent(name: str, system_prompt: str, model: str = "") -> str:
         """Spawn a subagent in its own subprocess.
 
         The subagent inherits the universal SOUL/TOOLS/PRIMER base, the
@@ -175,8 +165,7 @@ def make_spawn_subagent(
         ctx = multiprocessing.get_context("spawn")
         parent_end, child_end = ctx.Pipe(duplex=True)
 
-        # Late import to avoid an agent_proc <-> subagent cycle at
-        # module-import time.
+        # late import to avoid agent_proc <-> subagent import cycle
         from pyagent import agent_proc
 
         proc = ctx.Process(
@@ -200,9 +189,6 @@ def make_spawn_subagent(
         )
         agent._subagents[sid] = entry
 
-        # Block on the subagent's `ready` event (or an `agent_error`
-        # if bootstrap failed). The IO thread routes both to the
-        # subagent's reply queue.
         try:
             first = reply_queue.get(timeout=30)
         except queue.Empty:
@@ -218,10 +204,7 @@ def make_spawn_subagent(
             agent._subagents.pop(sid, None)
             state.unregister_subagent_pipe(sid)
             proc.join(timeout=2)
-            return (
-                f"<spawn failed: {first.get('kind')}: "
-                f"{first.get('message')}>"
-            )
+            return f"<spawn failed: {first.get('kind')}: " f"{first.get('message')}>"
         if first.get("type") != "ready":
             agent._subagents.pop(sid, None)
             state.unregister_subagent_pipe(sid)
@@ -242,8 +225,8 @@ def make_spawn_subagent(
 
 
 def make_call_subagent(
-    state: "_ChildState",
-    agent: "Agent",
+    state: _ChildState,
+    agent: Agent,
 ) -> Callable[..., str]:
     """Build the call_subagent tool."""
 
@@ -274,7 +257,6 @@ def make_call_subagent(
         if not entry.process.is_alive():
             return f"<subagent {id} is no longer running>"
 
-        # Defensive drain in case prior turns left anything behind.
         while not entry.reply_queue.empty():
             try:
                 entry.reply_queue.get_nowait()
@@ -295,9 +277,6 @@ def make_call_subagent(
             entry.mode = None
             return f"<send failed to subagent {id}: {e}>"
 
-        # No timeout here — subagents can legitimately take a long
-        # time. Cancel from the CLI propagates down through the IO
-        # thread's cancel pathway.
         result = entry.reply_queue.get()
         entry.status = "idle"
         entry.mode = None
@@ -309,8 +288,7 @@ def make_call_subagent(
         if kind == "agent_error":
             entry.status = "error"
             return (
-                f"<subagent error: {result.get('kind')}: "
-                f"{result.get('message')}>"
+                f"<subagent error: {result.get('kind')}: " f"{result.get('message')}>"
             )
         return f"<unexpected reply kind {kind!r}>"
 
@@ -318,8 +296,8 @@ def make_call_subagent(
 
 
 def make_call_subagent_async(
-    state: "_ChildState",
-    agent: "Agent",
+    state: _ChildState,
+    agent: Agent,
 ) -> Callable[..., str]:
     """Build the call_subagent_async tool.
 
@@ -386,8 +364,8 @@ def make_call_subagent_async(
 
 
 def make_wait_for_subagents(
-    state: "_ChildState",
-    agent: "Agent",
+    state: _ChildState,
+    agent: Agent,
 ) -> Callable[..., str]:
     """Build the wait_for_subagents tool.
 
@@ -430,8 +408,8 @@ def make_wait_for_subagents(
 
 
 def make_ask_parent(
-    state: "_ChildState",
-    agent: "Agent",
+    state: _ChildState,
+    agent: Agent,
 ) -> Callable[..., str]:
     """Build the `ask_parent` tool — only registered on subagents.
 
@@ -486,8 +464,6 @@ def make_ask_parent(
         req_id = f"req-{uuid.uuid4().hex[:8]}"
         rq: queue.Queue = queue.Queue(maxsize=1)
         with state._ask_lock:
-            # Refuse stacked asks — keep the model's reasoning
-            # straightforward (one question at a time per subagent).
             if state._pending_ask_replies:
                 return (
                     "<refused: another ask_parent is already in "
@@ -496,9 +472,7 @@ def make_ask_parent(
             state._pending_ask_replies[req_id] = rq
 
         try:
-            state.send(
-                "subagent_ask", request_id=req_id, question=question
-            )
+            state.send("subagent_ask", request_id=req_id, question=question)
         except Exception as e:
             with state._ask_lock:
                 state._pending_ask_replies.pop(req_id, None)
@@ -520,8 +494,8 @@ _NOTIFY_VALID_SEVERITIES = ("info", "warn", "alert")
 
 
 def make_notify_parent(
-    state: "_ChildState",
-    agent: "Agent",
+    state: _ChildState,
+    agent: Agent,
 ) -> Callable[..., str]:
     """Build the `notify_parent` tool — only registered on subagents.
 
@@ -571,9 +545,7 @@ def make_notify_parent(
             valid = ", ".join(repr(s) for s in _NOTIFY_VALID_SEVERITIES)
             return f"<refused: severity {severity!r} not in {{{valid}}}>"
         try:
-            state.send(
-                "subagent_note", severity=severity, text=text
-            )
+            state.send("subagent_note", severity=severity, text=text)
         except Exception as e:
             return f"<send failed: {type(e).__name__}: {e}>"
         return f"note sent ({severity})"
@@ -582,8 +554,8 @@ def make_notify_parent(
 
 
 def make_reply_to_subagent(
-    state: "_ChildState",
-    agent: "Agent",
+    state: _ChildState,
+    agent: Agent,
 ) -> Callable[..., str]:
     """Build the `reply_to_subagent` tool — registered on agents
     that can spawn subagents (`allow_meta=True`).
@@ -628,8 +600,7 @@ def make_reply_to_subagent(
         entry: SubagentEntry | None = agent._subagents.get(sid)
         if entry is None or not entry.process.is_alive():
             return (
-                f"<subagent {sid} for request {request_id!r} is "
-                f"no longer running>"
+                f"<subagent {sid} for request {request_id!r} is " f"no longer running>"
             )
         try:
             protocol.send(
@@ -646,8 +617,8 @@ def make_reply_to_subagent(
 
 
 def make_tell_subagent(
-    state: "_ChildState",
-    agent: "Agent",
+    state: _ChildState,
+    agent: Agent,
 ) -> Callable[..., str]:
     """Build the `tell_subagent` tool — registered on agents that
     can spawn subagents (`allow_meta=True`).
@@ -705,7 +676,7 @@ def make_tell_subagent(
 
 
 def _collect_subagent_notes(
-    agent: "Agent", sid: str, cursor: int | None
+    agent: Agent, sid: str, cursor: int | None
 ) -> dict[str, Any]:
     """Return a structured record of one subagent's notes.
 
@@ -756,8 +727,6 @@ def _collect_subagent_notes(
     else:
         cur_label = cursor
         visible = [e for e in ring if e[0] > cursor]
-        # Missing entries: seqs in (cursor, earliest_seq) were
-        # dropped from the ring before this peek caught up.
         missing = max(0, earliest_seq - 1 - cursor)
 
     return {
@@ -797,15 +766,13 @@ def _format_peek_section(record: dict[str, Any]) -> str:
         return "\n".join(lines)
     for e in entries:
         ts_label = f"t+{int(e['ts'])}s"
-        lines.append(
-            f"  - ({e['severity']}, {ts_label}) {e['text']}"
-        )
+        lines.append(f"  - ({e['severity']}, {ts_label}) {e['text']}")
     return "\n".join(lines)
 
 
 def make_peek_subagent(
-    state: "_ChildState",
-    agent: "Agent",
+    state: _ChildState,
+    agent: Agent,
 ) -> Callable[..., str]:
     """Build the `peek_subagent` tool — registered on agents that
     can spawn subagents (`allow_meta=True`).
@@ -816,9 +783,7 @@ def make_peek_subagent(
     invalidate the next planned tool call. Issue #65.
     """
 
-    def peek_subagent(
-        sid: str | None = None, since: str | None = None
-    ) -> str:
+    def peek_subagent(sid: str | None = None, since: str | None = None) -> str:
         """Do not call this reflexively.
 
         Default expectation: subagent notes surface as user-role
@@ -867,9 +832,7 @@ def make_peek_subagent(
                             f"or JSON object, got {type(obj).__name__}>"
                         )
                     try:
-                        parsed_dict = {
-                            str(k): int(v) for k, v in obj.items()
-                        }
+                        parsed_dict = {str(k): int(v) for k, v in obj.items()}
                     except (ValueError, TypeError) as e:
                         return (
                             f"<refused: invalid since: cursor values "
@@ -914,17 +877,14 @@ def make_peek_subagent(
             record = _collect_subagent_notes(agent, s, cur)
             sections.append(_format_peek_section(record))
             next_cursors[s] = record["next_cursor"]
-        return (
-            "\n\n".join(sections)
-            + f"\n\nnext_cursor: {json.dumps(next_cursors)}"
-        )
+        return "\n\n".join(sections) + f"\n\nnext_cursor: {json.dumps(next_cursors)}"
 
     return peek_subagent
 
 
 def make_terminate_subagent(
-    state: "_ChildState",
-    agent: "Agent",
+    state: _ChildState,
+    agent: Agent,
 ) -> Callable[..., str]:
     """Build the terminate_subagent tool."""
 
@@ -946,9 +906,6 @@ def make_terminate_subagent(
             return f"<unknown subagent id: {id!r}>"
 
         state.unregister_subagent_pipe(id)
-        # Drop the per-sid notification ring (issue #65). After
-        # terminate, the sid is no longer peekable — late peeks
-        # of dead sids should return the unknown-subagent marker.
         agent._clear_subagent_notes(id)
 
         if entry.process.is_alive():
@@ -959,15 +916,14 @@ def make_terminate_subagent(
             entry.process.join(timeout=5)
             if entry.process.is_alive():
                 try:
-                    entry.process.terminate()  # SIGTERM
+                    entry.process.terminate()
                 except Exception:
                     pass
                 entry.process.join(timeout=2)
             if entry.process.is_alive():
-                # Last resort. terminate() should be enough, but a
-                # subagent stuck in C extension code might not heed it.
                 try:
                     import os
+
                     os.kill(entry.process.pid, signal.SIGKILL)
                 except Exception:
                     pass

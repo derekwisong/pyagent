@@ -29,7 +29,6 @@ def shorten(p: str) -> str:
         cwd = Path.cwd().resolve()
         return str(resolved.relative_to(cwd))
     except (ValueError, OSError):
-        # ValueError: not under cwd. OSError: filesystem hiccup.
         try:
             return str(Path(p).resolve())
         except OSError:

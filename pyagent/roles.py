@@ -98,15 +98,9 @@ class Role:
     source: Path | None = None
 
 
-# ---- Name normalization ---------------------------------------------
-
-
 def _normalize_name(raw: str) -> str:
     """Canonicalize a role name: lowercase, dashes → underscores."""
     return raw.replace("-", "_").lower()
-
-
-# ---- Frontmatter parsing --------------------------------------------
 
 
 _FRONTMATTER_RE = re.compile(
@@ -126,10 +120,9 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         return {}, text
     m = _FRONTMATTER_RE.match(text)
     if not m:
-        # Has opening +++ but no closing one — let the prose render.
         return {}, text
     fm_text = m.group(1)
-    body = text[m.end():].lstrip("\n")
+    body = text[m.end() :].lstrip("\n")
     try:
         fm = tomllib.loads(fm_text)
     except tomllib.TOMLDecodeError as e:
@@ -138,9 +131,6 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     if not isinstance(fm, dict):
         return {}, body
     return fm, body
-
-
-# ---- Description auto-derivation ------------------------------------
 
 
 _HEADING_RE = re.compile(r"^\s*#+\s.*$", re.MULTILINE)
@@ -157,16 +147,13 @@ def _derive_description(name: str, body: str) -> str:
     if not body.strip():
         return name
     lines = body.splitlines()
-    # Skip a leading heading (or chain of blank lines + heading).
     i = 0
     while i < len(lines) and not lines[i].strip():
         i += 1
     if i < len(lines) and lines[i].lstrip().startswith("#"):
         i += 1
-    # Skip blanks after the heading.
     while i < len(lines) and not lines[i].strip():
         i += 1
-    # Collect the first paragraph (until the next blank line).
     para: list[str] = []
     while i < len(lines) and lines[i].strip():
         para.append(lines[i].strip())
@@ -176,13 +163,9 @@ def _derive_description(name: str, body: str) -> str:
     text = " ".join(para)
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) > _DESCRIPTION_CAP:
-        # Cut on a word boundary if convenient.
-        cut = text[: _DESCRIPTION_CAP].rsplit(" ", 1)[0]
-        text = (cut or text[: _DESCRIPTION_CAP]).rstrip(",.;:") + "…"
+        cut = text[:_DESCRIPTION_CAP].rsplit(" ", 1)[0]
+        text = (cut or text[:_DESCRIPTION_CAP]).rstrip(",.;:") + "…"
     return text
-
-
-# ---- Coercion helpers -----------------------------------------------
 
 
 def _coerce_tools(name: str, raw: Any) -> tuple[str, ...] | None:
@@ -199,9 +182,7 @@ def _coerce_meta_tools(name: str, raw: Any) -> bool:
         return True
     if isinstance(raw, bool):
         return raw
-    logger.warning(
-        "role %r meta_tools must be bool; defaulting to True", name
-    )
+    logger.warning("role %r meta_tools must be bool; defaulting to True", name)
     return True
 
 
@@ -214,9 +195,6 @@ def _coerce_model(name: str, raw: Any) -> str:
         logger.warning("role %r model must be string; ignoring", name)
         return ""
     return llms.resolve_model(raw)
-
-
-# ---- File-tier loading ----------------------------------------------
 
 
 def _load_role_file(md_path: Path) -> Role | None:
@@ -276,9 +254,6 @@ def _bundled_root() -> Path | None:
         return None
 
 
-# ---- Legacy [models.<name>] backward-compat -------------------------
-
-
 def _coerce_legacy_body(name: str, body: str, body_path: str) -> str:
     if body and body_path:
         logger.warning(
@@ -299,7 +274,9 @@ def _coerce_legacy_body(name: str, body: str, body_path: str) -> str:
     except OSError as e:
         logger.warning(
             "role %r system_prompt_path %s unreadable: %s",
-            name, body_path, e,
+            name,
+            body_path,
+            e,
         )
         return ""
 
@@ -373,9 +350,6 @@ def _reset_deprecation_warning() -> None:
     _DEPRECATION_WARNED = False
 
 
-# ---- Public API -----------------------------------------------------
-
-
 def load() -> dict[str, Role]:
     """Return the dict of all defined roles, indexed by canonical name.
 
@@ -391,9 +365,6 @@ def load() -> dict[str, Role]:
     if bundled_root is not None:
         roles.update(_scan_dir(bundled_root))
 
-    # Legacy TOML form: lower than file-based tiers, higher than
-    # bundled (so a user can shadow a bundled role with a TOML entry
-    # if they really want, though we don't recommend it).
     roles.update(_legacy_roles())
 
     roles.update(_scan_dir(paths.config_dir() / "roles"))

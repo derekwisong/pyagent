@@ -29,16 +29,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Capabilities we filter from the per-model tag list before showing
-# them to the user. ``completion`` is reported by every chat model so
-# it carries no information; ``insert`` is fill-in-the-middle
-# infrastructure that pyagent doesn't surface as a feature.
 _BORING_CAPABILITIES = {"completion", "insert"}
 
 
 def _factory(**kw: Any):
-    # Lazy import: keeps `requests` and the client class out of the
-    # plugin-load critical path for users who never invoke ollama.
     from pyagent.plugins.ollama.client import OllamaClient
 
     model = kw.get("model") or ""
@@ -99,17 +93,12 @@ def _list_models():
 
 
 def register(api):
-    # Snapshot the env at register time so `default_model` on the
-    # ProviderSpec is stable for the agent process. Reading later
-    # would mean different subagents (or the same agent after a hot
-    # config change) could see different defaults — surprising.
     default_model = os.environ.get("OLLAMA_MODEL", "")
 
     api.register_provider(
         "ollama",
         _factory,
         default_model=default_model,
-        env_vars=(),  # local server, no required env
+        env_vars=(),
         list_models=_list_models,
     )
-

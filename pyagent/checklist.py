@@ -22,7 +22,8 @@ import json
 import os
 import threading
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 VALID_STATUSES = ("pending", "in_progress", "completed", "cancelled")
 
@@ -62,8 +63,6 @@ class Checklist:
         if isinstance(nxt, int) and nxt > 0:
             self._next_id = nxt
         else:
-            # Recover from a malformed file: pick max-id + 1 so a new
-            # add doesn't collide with an existing task.
             mx = 0
             for t in self.tasks:
                 tid = t.get("id", "")
@@ -103,9 +102,7 @@ class Checklist:
         self._notify()
         return dict(entry)
 
-    def update(
-        self, id: str, status: str, note: str | None = None
-    ) -> dict[str, Any]:
+    def update(self, id: str, status: str, note: str | None = None) -> dict[str, Any]:
         if status not in VALID_STATUSES:
             raise ValueError(
                 f"status must be one of {VALID_STATUSES!r}, got {status!r}"
@@ -183,9 +180,7 @@ def make_add_task(checklist: Checklist) -> Callable[..., dict[str, Any]]:
 
 
 def make_update_task(checklist: Checklist) -> Callable[..., dict[str, Any]]:
-    def update_task(
-        id: str, status: str, note: str = ""
-    ) -> dict[str, Any]:
+    def update_task(id: str, status: str, note: str = "") -> dict[str, Any]:
         """Change a task's status (and optionally attach a note).
 
         `status` is one of: `pending`, `in_progress`, `completed`,

@@ -116,7 +116,7 @@ def _format_tables(html: str) -> str:
             elif len(cells) == 2:
                 out.append(f"- {cells[0]}: {cells[1]}")
             elif len(cells) % 2 == 0:
-                pairs = zip(cells[0::2], cells[1::2])
+                pairs = zip(cells[0::2], cells[1::2], strict=False)
                 for label, value in pairs:
                     out.append(f"- {label}: {value}")
             else:

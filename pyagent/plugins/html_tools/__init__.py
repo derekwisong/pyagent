@@ -70,14 +70,9 @@ def register(api):
             return f"<no matches for selector {css!r} in {path}>"
         if returned < total:
             md = (
-                md
-                + f"\n[matched {total}; showing first {returned}. "
+                md + f"\n[matched {total}; showing first {returned}. "
                 f"Re-run with a tighter selector or higher `limit` to see more.]\n"
             )
         return md
 
-    # Role-only: html_select is the structured-extraction escape
-    # hatch when fetch_url's inline markdown lost a specific shape.
-    # Allowlisted in the bundled researcher role; the working agent
-    # rarely needs CSS-selector-level extraction.
     api.register_tool("html_select", html_select, role_only=True)

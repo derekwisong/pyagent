@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
+from collections.abc import Callable
 
 
 @dataclass(frozen=True)
@@ -67,15 +68,10 @@ class ProviderSpec:
     name: str
     env_vars: tuple[str, ...]
     default_model: str
-    factory: Callable[..., "LLMClient"]
+    factory: Callable[..., LLMClient]
     list_models: Callable[[], list[ModelInfo]] | None = None
 
 
-# Canonical recent-and-popular model lists for each built-in. Hardcoded
-# rather than queried so `pyagent --list-models` works without API
-# keys, instantly. Bumping these is a one-line edit when a new model
-# ships; the alternative (live `/v1/models` calls) silently fails for
-# users without keys configured.
 def _anthropic_models() -> list[ModelInfo]:
     return [
         ModelInfo(name="claude-opus-4-7"),
@@ -106,40 +102,37 @@ def _pyagent_models() -> list[ModelInfo]:
     return [ModelInfo(name="echo"), ModelInfo(name="loremipsum")]
 
 
-def _anthropic_factory(**kw: Any) -> "LLMClient":
+def _anthropic_factory(**kw: Any) -> LLMClient:
     from pyagent.llms.anthropic import AnthropicClient
 
     return AnthropicClient(**kw)
 
 
-def _openai_factory(**kw: Any) -> "LLMClient":
+def _openai_factory(**kw: Any) -> LLMClient:
     from pyagent.llms.openai import OpenAIClient
 
     return OpenAIClient(**kw)
 
 
-def _gemini_factory(**kw: Any) -> "LLMClient":
+def _gemini_factory(**kw: Any) -> LLMClient:
     from pyagent.llms.gemini import GeminiClient
 
     return GeminiClient(**kw)
 
 
-def _pyagent_factory(**kw: Any) -> "LLMClient":
+def _pyagent_factory(**kw: Any) -> LLMClient:
     from pyagent.llms.pyagent import EchoClient, LoremClient
 
     name = kw.get("model")
     stubs = {"echo": EchoClient, "loremipsum": LoremClient}
     cls = stubs.get(name) if name else EchoClient
     if cls is None:
-        raise ValueError(
-            f"Unknown pyagent stub {name!r} (expected: {sorted(stubs)})"
-        )
+        raise ValueError(f"Unknown pyagent stub {name!r} (expected: {sorted(stubs)})")
     return cls() if not name else cls(model=name)
 
 
-# Order matters: auto-detection picks the first provider whose env_vars
-# are satisfied. Real providers come before the local stub so a user
-# with a real API key never gets the echo stub by accident.
+# Auto-detection picks the first provider whose env_vars are satisfied;
+# real providers must precede the local stub.
 PROVIDERS: list[ProviderSpec] = [
     ProviderSpec(
         name="anthropic",
@@ -172,12 +165,6 @@ PROVIDERS: list[ProviderSpec] = [
 ]
 
 
-# Plugin-registered providers. Populated by `set_plugin_providers`,
-# which the plugin loader calls at the end of `plugins.load()`. Kept as
-# module state (rather than a parameter on every call site) because
-# `get_client` / `resolve_model` are scattered through the codebase
-# and threading a registry argument through all of them would be
-# invasive for a feature only a few callers need to think about.
 _PLUGIN_PROVIDERS: dict[str, ProviderSpec] = {}
 
 
@@ -200,7 +187,7 @@ def _by_name(name: str) -> ProviderSpec | None:
     return _PLUGIN_PROVIDERS.get(name)
 
 
-def get_client(model: str) -> "LLMClient":
+def get_client(model: str) -> LLMClient:
     """Resolve a "provider/model" string to a concrete LLMClient instance.
 
     Examples:
@@ -284,9 +271,7 @@ def list_all_models() -> list[ProviderListing]:
 
 def _listing_for(spec: ProviderSpec) -> ProviderListing:
     if spec.list_models is None:
-        return ProviderListing(
-            name=spec.name, default_model=spec.default_model
-        )
+        return ProviderListing(name=spec.name, default_model=spec.default_model)
     try:
         models = spec.list_models()
     except Exception as e:

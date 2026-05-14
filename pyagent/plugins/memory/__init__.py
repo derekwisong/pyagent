@@ -44,26 +44,13 @@ logger = logging.getLogger(__name__)
 _LEDGERS = {"USER": "USER.md", "MEMORY": "MEMORY.md"}
 _MEMORIES_DIRNAME = "memories"
 
-# ---- Recall (vector) constants ----------------------------------
-#
-# Embedding model for `recall_memory`. fastembed downloads it on first
-# use (~130 MB once-only). bge-small-en-v1.5 is the current sweet
-# spot for English embedding speed × quality at agent-memory scale.
 _MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
-# Bullet shape recall_memory parses out of MEMORY.md to map filename
-# → (title, hook) at query time. Loose enough for `-`, `*`, `+`
-# bullets and the various dash/colon separators we've seen between
-# title and hook.
 _INDEX_LINE_RE = re.compile(
     r"\s*[-*+]\s*\[(?P<title>[^\]]+)\]\((?P<file>[^)]+\.md)\)"
     r"(?:\s*[—\-:]\s*(?P<hook>.+))?\s*$"
 )
 
-# Process-local cache so multiple recalls in one session don't
-# re-instantiate the embedding model. fastembed itself caches model
-# weights on disk, but the Python-side ONNX session has nontrivial
-# init cost.
 _model = None
 
 
@@ -96,34 +83,11 @@ def _get_model():
         _model = TextEmbedding(model_name=_MODEL_NAME)
     return _model
 
-# Memory filenames must be lowercase snake_case with a .md suffix.
-# Why this strict: filenames are embedded into recall_memory's
-# searchable text via _filename_search_terms (above), so a
-# consistent shape keeps recall predictable. Also stops the agent
-# from drifting into mixed-case or spaced filenames that look
-# inconsistent in the index.
+
 _FILENAME_RE = re.compile(r"^[a-z0-9][a-z0-9_]*\.md$")
 
-# Two-stage drift check:
-#
-# (1) Token-level containment. Splitting on whitespace, if the
-#     target's token set is a strict subset/superset of an existing
-#     category's, that's the "Code Style" / "Style" case — flag it.
-#     Pure character similarity misses this (ratio is only ~0.67),
-#     and lowering the threshold to catch it produces false positives
-#     on unrelated 1-char-different names ("Stack" vs "Slack").
-#
-# (2) Fuzzy similarity at 0.85 for the leftover cases — pluralization
-#     ("Database" vs "Databases" ~0.94, "Style" vs "Styles" ~0.91)
-#     and minor typos. 0.85 is high enough to ignore "Stack" vs
-#     "Slack" (0.80) and "Stack" vs "Snack" (0.80).
 _CATEGORY_FUZZY_THRESHOLD = 0.85
 
-# When the rendered MEMORY.md section has at least this many
-# categories, we prepend a compact "Categories in use: ..." summary
-# above the bulleted detail so the agent can scan available
-# headings without parsing the full structure. Below this count
-# the bullets are short enough that scanning them is cheap.
 _CATEGORY_SUMMARY_MIN = 5
 
 
@@ -146,12 +110,14 @@ def _parse_index_entries_at(index_text: str) -> list[tuple[str, str, str, str]]:
         m = _INDEX_LINE_RE.match(line)
         if not m:
             continue
-        out.append((
-            current_category,
-            m.group("title").strip(),
-            m.group("file").strip(),
-            (m.group("hook") or "").strip(),
-        ))
+        out.append(
+            (
+                current_category,
+                m.group("title").strip(),
+                m.group("file").strip(),
+                (m.group("hook") or "").strip(),
+            )
+        )
     return out
 
 
@@ -177,9 +143,7 @@ def _extract_categories(index_text: str) -> list[str]:
     return out
 
 
-def _find_similar_category(
-    target: str, existing: list[str]
-) -> str | None:
+def _find_similar_category(target: str, existing: list[str]) -> str | None:
     """Return the closest existing category name if it's confusingly
     close to ``target``, else None. Case-insensitive comparison.
 
@@ -202,19 +166,12 @@ def _find_similar_category(
     if not target_lc:
         return None
 
-    # If ANY existing category matches case-insensitively, defer to
-    # _insert_index_bullet's case-insensitive collapse. Without this
-    # short-circuit, ``create_memory("STYLE")`` against an index that
-    # already has both ``Style`` and ``Code Style`` would trip the
-    # subset check on ``Code Style`` and refuse — but the canonical
-    # destination is the existing literal-match ``Style``.
     for cat in existing:
         if cat.lower().strip() == target_lc:
             return None
 
     target_tokens = set(target_lc.split())
 
-    # Stage 1: token containment (strict subset / superset).
     for cat in existing:
         cat_lc = cat.lower().strip()
         if not cat_lc:
@@ -225,7 +182,6 @@ def _find_similar_category(
         if target_tokens < cat_tokens or cat_tokens < target_tokens:
             return cat
 
-    # Stage 2: fuzzy similarity for the leftover near-equal cases.
     best_ratio = 0.0
     best_match: str | None = None
     for cat in existing:
@@ -267,9 +223,7 @@ def _validate_memory_filename(file: str) -> str | None:
     return None
 
 
-def _insert_index_bullet(
-    index_text: str, category: str, bullet: str
-) -> str:
+def _insert_index_bullet(index_text: str, category: str, bullet: str) -> str:
     """Insert `bullet` under `## <category>` in `index_text`.
 
     Match category case-insensitively against existing H2 headings.
@@ -277,10 +231,7 @@ def _insert_index_bullet(
     at the end of the file. Strips the `(no memories yet)` seed
     placeholder if present. Returns the new full text.
     """
-    lines = [
-        ln for ln in index_text.splitlines()
-        if ln.strip() != "(no memories yet)"
-    ]
+    lines = [ln for ln in index_text.splitlines() if ln.strip() != "(no memories yet)"]
 
     target_idx = None
     for i, line in enumerate(lines):
@@ -292,22 +243,15 @@ def _insert_index_bullet(
                 break
 
     if target_idx is not None:
-        # Find end of this section: next H2, or EOF.
         insert_at = len(lines)
         for j in range(target_idx + 1, len(lines)):
             if lines[j].lstrip().startswith("## "):
                 insert_at = j
                 break
-        # Step back past trailing blanks so bullets cluster directly
-        # under the heading.
-        while (
-            insert_at > target_idx + 1
-            and lines[insert_at - 1].strip() == ""
-        ):
+        while insert_at > target_idx + 1 and lines[insert_at - 1].strip() == "":
             insert_at -= 1
         lines.insert(insert_at, bullet)
     else:
-        # New category goes at the end.
         while lines and lines[-1].strip() == "":
             lines.pop()
         if lines:
@@ -321,10 +265,6 @@ def _insert_index_bullet(
     return text
 
 
-# Minimal YAML-flavored frontmatter parser. We only emit ``created_at:
-# <iso>`` blocks today; the parser is intentionally narrow — split on
-# the first ``:``, no quoting, no nesting, no lists. If the day comes
-# we need richer metadata, swap in a real YAML lib here.
 _FRONTMATTER_RE = re.compile(r"\A---\n(?P<inner>.*?)\n---\n?", re.DOTALL)
 
 
@@ -344,7 +284,7 @@ def _split_frontmatter(text: str) -> tuple[dict[str, str], str]:
             continue
         k, v = line.split(":", 1)
         meta[k.strip()] = v.strip()
-    return meta, text[m.end():]
+    return meta, text[m.end() :]
 
 
 def _format_frontmatter(meta: dict[str, str]) -> str:
@@ -360,9 +300,7 @@ def _format_frontmatter(meta: dict[str, str]) -> str:
 
 def _now_iso() -> str:
     """Current UTC time as RFC 3339 / ISO 8601, second-precision."""
-    return datetime.datetime.now(datetime.timezone.utc).isoformat(
-        timespec="seconds"
-    )
+    return datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -430,8 +368,6 @@ def register(api):
     plugin_dir = Path(__file__).parent
     seeds = plugin_dir / "defaults"
 
-    # Persistent ledger storage: <data-dir>/plugins/memory/.
-    # Lazy-created on first access.
     storage = api.user_data_dir
 
     def _ledger_path(name: str) -> Path:
@@ -448,8 +384,6 @@ def register(api):
         if bundled.is_file():
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(bundled, target)
-
-    # ---- Tools ------------------------------------------------------
 
     def read_memory(file: str) -> str:
         """Fetch a memory body from `memories/<file>`.
@@ -545,8 +479,6 @@ def register(api):
                 "<update_memory needs at least one of `content`, "
                 "`description`, or `category` to be set>"
             )
-        # Reject empty content — degenerate state. Use delete_memory
-        # to actually remove the body.
         if content is not None and not content.strip():
             return (
                 "<update_memory content is empty; use delete_memory "
@@ -564,18 +496,12 @@ def register(api):
                 return err
 
         body_path = _memory_file_path(filename)
-        # Seed MEMORY.md if a user wiped it manually — the missing
-        # bullet error below is more useful than "MEMORY.md not found".
         _seed_if_missing("MEMORY")
         index_path = _ledger_path("MEMORY")
         if not index_path.exists():
             return "<MEMORY.md not found>"
         index_text = index_path.read_text()
 
-        # Locate the bullet via the parsed index so we can match by
-        # filename anchored to bullet shape (not raw substring).
-        # Prevents clobbering another bullet whose description happens
-        # to reference this memory by relative-link.
         entries = _parse_index_entries_at(index_text)
         bullet_entry: tuple[str, str, str, str] | None = next(
             (e for e in entries if e[2] == filename), None
@@ -597,18 +523,11 @@ def register(api):
 
         actions: list[str] = []
 
-        # Body update first, since a failed index write afterwards
-        # can be retried via update_memory; a failed body write
-        # before any index touch leaves the index untouched.
         if content is not None:
             if not body_path.exists():
                 return f"<body memories/{filename} not found>"
             old_meta, _ = _split_frontmatter(body_path.read_text())
             new_meta, new_body = _split_frontmatter(content)
-            # Per-key merge: caller's keys win, absent keys preserved.
-            # Without this, caller content with frontmatter that
-            # lacks created_at would silently drop the existing
-            # created_at — losing the memory's age.
             merged_meta = {**old_meta, **new_meta}
             if not new_body.endswith("\n"):
                 new_body = new_body + "\n"
@@ -620,16 +539,9 @@ def register(api):
             _atomic_write(body_path, final)
             actions.append("body")
 
-        # Index update: rewrite the bullet's description (in place)
-        # then relocate (between sections) if both fields set. Order
-        # matters because relocation moves the bullet line as a
-        # whole — including any description we just spliced into it.
         if description is not None or category is not None:
             new_index = index_text
             if description is not None:
-                # Anchor the rewrite to bullet shape so a description
-                # on another bullet that references this memory by
-                # link doesn't get clobbered. Break after first hit.
                 needle = f"]({filename})"
                 rewritten: list[str] = []
                 done = False
@@ -654,8 +566,6 @@ def register(api):
                 actions.append("description")
 
             if category is not None:
-                # Anchor to bullet shape; break on first hit. Same
-                # rationale as the description rewrite above.
                 bullet_line: str | None = None
                 kept: list[str] = []
                 for line in new_index.splitlines():
@@ -668,9 +578,7 @@ def register(api):
                 if bullet_line is None:
                     return f"<no bullet for {filename!r} in MEMORY.md>"
                 rebuilt = "\n".join(kept)
-                new_index = _insert_index_bullet(
-                    rebuilt, category.strip(), bullet_line
-                )
+                new_index = _insert_index_bullet(rebuilt, category.strip(), bullet_line)
                 actions.append(f"category → '{category.strip()}'")
 
             _atomic_write(index_path, new_index)
@@ -751,14 +659,8 @@ def register(api):
         body_path = _memory_file_path(filename)
         _seed_if_missing("MEMORY")
         index_path = _ledger_path("MEMORY")
-        index_text = (
-            index_path.read_text() if index_path.exists() else ""
-        )
+        index_text = index_path.read_text() if index_path.exists() else ""
 
-        # Validation order: filename → collision → drift. Collision
-        # is decisive (can't recover); drift is a soft warning the
-        # caller can override. Doing collision first saves a wasted
-        # retry where the caller fixed drift only to hit a clash.
         if f"]({filename})" in index_text:
             return (
                 f"<filename collision: memories/{filename} is "
@@ -778,16 +680,9 @@ def register(api):
                     f"deliberately new heading>"
                 )
 
-        # Body: prepend frontmatter and ensure trailing newline.
-        # `created_at` lets read_memory and recall surface age.
         body_text = content if content.endswith("\n") else content + "\n"
-        body_with_meta = (
-            _format_frontmatter({"created_at": _now_iso()}) + body_text
-        )
+        body_with_meta = _format_frontmatter({"created_at": _now_iso()}) + body_text
 
-        # O_EXCL on the body file: the OS does the existence check
-        # atomically, eliminating the race between the index's "is
-        # this filename in use?" check and the actual write.
         body_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with open(body_path, "x", encoding="utf-8") as f:
@@ -798,23 +693,10 @@ def register(api):
                 "between check and write; pick a different filename>"
             )
 
-        # Index update is atomic via temp-then-rename so a crash
-        # leaves either the prior index or the new — never a
-        # truncated one. If the rename fails (disk full, perms, etc.)
-        # the body is already on disk; clean it up so a retry
-        # doesn't collide on its own orphan via O_EXCL while the
-        # index check still passes.
-        bullet = (
-            f"- [{title.strip()}]({filename})"
-            + (
-                f" — {description.strip()}"
-                if description and description.strip()
-                else ""
-            )
+        bullet = f"- [{title.strip()}]({filename})" + (
+            f" — {description.strip()}" if description and description.strip() else ""
         )
-        new_index = _insert_index_bullet(
-            index_text, category.strip(), bullet
-        )
+        new_index = _insert_index_bullet(index_text, category.strip(), bullet)
         index_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             _atomic_write(index_path, new_index)
@@ -829,16 +711,6 @@ def register(api):
             )
         return f"created {filename}: category='{category.strip()}'"
 
-    # ---- Recall (vector) -------------------------------------------
-    #
-    # Fastembed is a hard dep in pyproject.toml. If it's missing the
-    # install is broken — log a clear note and skip just the recall
-    # tool rather than failing the whole plugin so add/read/write
-    # still work. The plugin's [provides] manifest still declares
-    # recall_memory, which means a missing-fastembed install fails
-    # `_validate_provides` and the loader rejects the plugin entirely.
-    # That's intentional: recall is part of the memory contract and
-    # half-loading it silently is worse than refusing.
     try:
         import fastembed  # noqa: F401
         import numpy as np
@@ -877,49 +749,32 @@ def register(api):
         chunks: list[dict] = []
         for _category, title, filename, hook in _parse_index_entries():
             fn_terms = _filename_search_terms(filename)
-            text = (
-                f"{fn_terms} {title}: {hook}"
-                if hook
-                else f"{fn_terms} {title}"
-            )
+            text = f"{fn_terms} {title}: {hook}" if hook else f"{fn_terms} {title}"
             chunks.append({"kind": "hook", "filename": filename, "text": text})
         memories_dir = storage / _MEMORIES_DIRNAME
         if memories_dir.exists():
             for body_path in sorted(memories_dir.glob("*.md")):
                 fn_terms = _filename_search_terms(body_path.name)
                 _meta, body = _split_frontmatter(body_path.read_text())
-                # Filename tokens prepended on their own line so the
-                # body text is preserved as-is for the embedder; the
-                # double newline keeps them as a "topic anchor"
-                # rather than fusing with the body's first sentence.
-                chunks.append({
-                    "kind": "body",
-                    "filename": body_path.name,
-                    "text": f"{fn_terms}\n\n{body}",
-                })
+                chunks.append(
+                    {
+                        "kind": "body",
+                        "filename": body_path.name,
+                        "text": f"{fn_terms}\n\n{body}",
+                    }
+                )
         return chunks
 
     def _is_index_stale() -> bool:
         vec_path, idx_path = _vec_index_paths()
         if not vec_path.exists() or not idx_path.exists():
             return True
-        idx_mtime = min(
-            vec_path.stat().st_mtime, idx_path.stat().st_mtime
-        )
+        idx_mtime = min(vec_path.stat().st_mtime, idx_path.stat().st_mtime)
         index_path = _ledger_path("MEMORY")
-        if (
-            index_path.exists()
-            and index_path.stat().st_mtime > idx_mtime
-        ):
+        if index_path.exists() and index_path.stat().st_mtime > idx_mtime:
             return True
         memories_dir = storage / _MEMORIES_DIRNAME
         if memories_dir.exists():
-            # Stat the directory itself: its mtime updates when any
-            # entry is added or removed. Catches deletes (a deleted
-            # body file no longer appears in glob, so the per-file
-            # loop below wouldn't notice it). Without this check, a
-            # delete_memory orphan-body unlink could leave stale
-            # rows in the vec index pointing at a nonexistent body.
             if memories_dir.stat().st_mtime > idx_mtime:
                 return True
             for f in memories_dir.glob("*.md"):
@@ -932,8 +787,6 @@ def register(api):
         vec_path, idx_path = _vec_index_paths()
         vec_path.parent.mkdir(parents=True, exist_ok=True)
         if not chunks:
-            # Wipe stale on-disk artifacts so an empty store doesn't
-            # serve old hits.
             for p in (vec_path, idx_path):
                 if p.exists():
                     p.unlink()
@@ -944,9 +797,6 @@ def register(api):
         norms = np.linalg.norm(vectors, axis=1, keepdims=True)
         vectors = vectors / np.maximum(norms, 1e-9)
         np.save(vec_path, vectors)
-        # Strip the embedded text before saving — we re-derive
-        # snippets from source files at query time, no need to
-        # store twice.
         meta = [{"kind": c["kind"], "filename": c["filename"]} for c in chunks]
         idx_path.write_text(json.dumps(meta))
         return vectors, meta
@@ -961,8 +811,7 @@ def register(api):
             return vectors, meta
         except Exception as exc:
             logger.warning(
-                "memory: failed to load saved vector index (%s); "
-                "rebuilding",
+                "memory: failed to load saved vector index (%s); " "rebuilding",
                 exc,
             )
             return _build_and_save()
@@ -1025,16 +874,12 @@ def register(api):
         if vectors is None or len(meta) == 0:
             return "<no memories indexed yet>"
         model = _get_model()
-        q_vec = np.asarray(
-            next(iter(model.embed([query]))), dtype=np.float32
-        )
+        q_vec = np.asarray(next(iter(model.embed([query]))), dtype=np.float32)
         q_vec = q_vec / max(float(np.linalg.norm(q_vec)), 1e-9)
         scores = vectors @ q_vec  # cosine since normalized
         entries = _parse_index_entries()
         file_to_cat = {f: c for c, _t, f, _h in entries}
         hook_lookup = {f: h for _c, _t, f, h in entries if h}
-        # Group by filename: keep highest-scoring chunk per file so a
-        # body and its hook don't both show up.
         best: dict[str, tuple[float, dict]] = {}
         for i, m in enumerate(meta):
             score = float(scores[i])
@@ -1045,9 +890,9 @@ def register(api):
         target_cat = category.strip().lower() if category else None
         cutoff: datetime.datetime | None = None
         if created_within_days is not None:
-            cutoff = datetime.datetime.now(
-                datetime.timezone.utc
-            ) - datetime.timedelta(days=created_within_days)
+            cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(
+                days=created_within_days
+            )
 
         filtered: list[tuple[str, tuple[float, dict]]] = []
         for filename, (score, m) in best.items():
@@ -1058,10 +903,6 @@ def register(api):
                 if actual.lower() != target_cat:
                     continue
             if cutoff is not None:
-                # Read the body's frontmatter to find created_at.
-                # Drop on missing-frontmatter when the filter is set:
-                # the ask is "recent stuff", and undated entries
-                # can't qualify. Cheap because k is small.
                 body_path = storage / _MEMORIES_DIRNAME / filename
                 if not body_path.exists():
                     continue
@@ -1078,8 +919,6 @@ def register(api):
             filtered.append((filename, (score, m)))
         ranked = sorted(filtered, key=lambda kv: -kv[1][0])[:k]
 
-        # Header reflects active filters so the agent knows what
-        # was applied; unfiltered output is unchanged.
         filter_parts = []
         if min_score > 0:
             filter_parts.append(f"min_score={min_score:.2f}")
@@ -1087,9 +926,7 @@ def register(api):
             filter_parts.append(f"category={category!r}")
         if created_within_days is not None:
             filter_parts.append(f"created_within_days={created_within_days}")
-        filter_suffix = (
-            f" ({', '.join(filter_parts)})" if filter_parts else ""
-        )
+        filter_suffix = f" ({', '.join(filter_parts)})" if filter_parts else ""
 
         if not ranked:
             if filter_parts:
@@ -1100,9 +937,7 @@ def register(api):
                 )
             return f"<no matches for {query!r}>"
 
-        lines = [
-            f"Top {len(ranked)} matches for {query!r}{filter_suffix}:"
-        ]
+        lines = [f"Top {len(ranked)} matches for {query!r}{filter_suffix}:"]
         for filename, (score, m) in ranked:
             cat = file_to_cat.get(filename, "")
             cat_str = f", category='{cat}'" if cat else ""
@@ -1140,7 +975,6 @@ def register(api):
         index_path = _ledger_path("MEMORY")
         body_path = _memory_file_path(filename)
 
-        # Strip the bullet line (if present) from MEMORY.md.
         bullet_removed = False
         if index_path.exists():
             text = index_path.read_text()
@@ -1182,13 +1016,6 @@ def register(api):
     api.register_tool("write_user", write_user)
     api.register_tool("recall_memory", recall_memory)
 
-    # ---- Prompt sections --------------------------------------------
-    #
-    # Three sections, all volatile=False (stable across turns; cache
-    # stays warm). USER and MEMORY-INDEX content changes when the
-    # agent writes to them — that breaks the cache for one turn,
-    # then re-warms.
-
     prompt_path = seeds / "PROMPT.md"
 
     def render_memory_guidance(ctx) -> str:
@@ -1228,12 +1055,7 @@ def register(api):
         text = target.read_text()
         cats = _extract_categories(text)
         if len(cats) >= _CATEGORY_SUMMARY_MIN:
-            summary = (
-                f"\n*Categories in use: {', '.join(sorted(cats))}.*\n"
-            )
-            # Insert immediately after the H1 heading line so the
-            # summary sits at the top of the section, above the
-            # template preamble and the bulleted detail.
+            summary = f"\n*Categories in use: {', '.join(sorted(cats))}.*\n"
             head, sep, tail = text.partition("\n")
             if head.startswith("# ") and sep:
                 text = f"{head}{sep}{summary}{tail}"
@@ -1244,27 +1066,13 @@ def register(api):
     api.register_prompt_section(
         "memory-guidance", render_memory_guidance, volatile=False
     )
-    api.register_prompt_section(
-        "user-ledger", render_user_ledger, volatile=False
-    )
-    api.register_prompt_section(
-        "memory-index", render_memory_index, volatile=False
-    )
-
-    # ---- Lifecycle hooks --------------------------------------------
+    api.register_prompt_section("user-ledger", render_user_ledger, volatile=False)
+    api.register_prompt_section("memory-index", render_memory_index, volatile=False)
 
     def on_start(session):
-        # Seed both ledgers so the first read returns the template
-        # rather than an empty string. Idempotent.
         for name in _LEDGERS:
             _seed_if_missing(name)
 
-        # One-time orphan notice. Users coming from the pre-plugin
-        # era have memory at <config-dir>/MEMORY.md and
-        # <config-dir>/USER.md. The plugin's storage is at
-        # <data-dir>/plugins/memory/, so legacy files now sit on
-        # disk unused. We don't touch user data — just point them
-        # out once so the user knows they can delete by hand.
         sentinel = storage / ".legacy-notice-shown"
         if not sentinel.exists():
             legacy = []

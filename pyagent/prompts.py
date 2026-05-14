@@ -37,7 +37,8 @@ import os
 import platform
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
+from collections.abc import Callable
 
 if TYPE_CHECKING:
     from pyagent.plugins import LoadedPlugins, PromptContext
@@ -62,7 +63,7 @@ class SystemPromptBuilder:
         roles_catalog: str | Callable[[], str] = "",
         role_body: str = "",
         task_body: str = "",
-        plugin_loader: "LoadedPlugins | None" = None,
+        plugin_loader: LoadedPlugins | None = None,
         include_soul: bool = True,
     ) -> None:
         self.soul = Path(soul)
@@ -73,15 +74,9 @@ class SystemPromptBuilder:
         self.role_body = role_body
         self.task_body = task_body
         self.plugin_loader = plugin_loader
-        # SOUL is the root-conversation persona — voice, "How you
-        # work", memory framing. Subagents take their voice from
-        # their role file (or model defaults), so they pass
-        # include_soul=False and skip SOUL entirely. The behavior
-        # floor (Core Directives, "You are Never") lives in PRIMER
-        # which everyone loads.
         self.include_soul = include_soul
 
-    def build(self, ctx: "PromptContext | None" = None) -> str:
+    def build(self, ctx: PromptContext | None = None) -> str:
         """Concatenated stable+volatile segments. Use only when cache
         placement doesn't matter (e.g. tests, legacy callers)."""
         stable, volatile = self.build_segments(ctx)
@@ -89,9 +84,7 @@ class SystemPromptBuilder:
             return f"{stable}\n\n{volatile}"
         return stable
 
-    def build_segments(
-        self, ctx: "PromptContext | None" = None
-    ) -> tuple[str, str]:
+    def build_segments(self, ctx: PromptContext | None = None) -> tuple[str, str]:
         """Return (stable, volatile) — the two halves of the system
         prompt around the cache breakpoint."""
         from pyagent.plugins import PromptContext as _PromptContext
@@ -116,9 +109,7 @@ class SystemPromptBuilder:
             sections.append(skills)
 
         roles = (
-            self.roles_catalog()
-            if callable(self.roles_catalog)
-            else self.roles_catalog
+            self.roles_catalog() if callable(self.roles_catalog) else self.roles_catalog
         )
         if roles:
             sections.append(roles)
@@ -126,16 +117,12 @@ class SystemPromptBuilder:
         if self.task_body:
             sections.append(self.task_body)
 
-        # Plugin-contributed sections, split by `volatile`.
         volatile_sections: list[str] = []
         if self.plugin_loader is not None:
             for section in self.plugin_loader.sections():
                 try:
                     rendered = section.renderer(ctx)
                 except Exception:
-                    # A renderer raising is the plugin's bug; log and
-                    # skip its contribution this turn rather than
-                    # wedging the agent.
                     import logging
 
                     logging.getLogger(__name__).exception(
@@ -151,11 +138,6 @@ class SystemPromptBuilder:
                 else:
                     sections.append(rendered)
 
-        # USER ledger auto-load was here pre-plugin; now owned by the
-        # memory plugin's "user-ledger" prompt section. With the
-        # plugin disabled, USER content does not appear in the system
-        # prompt at all — that is the clean-replacement contract.
-
         sections.append(self._persona_footer())
 
         stable = "\n\n".join(s.rstrip() for s in sections)
@@ -167,10 +149,9 @@ class SystemPromptBuilder:
         shell_path = os.environ.get("SHELL") or os.environ.get("COMSPEC") or ""
         shell = Path(shell_path).name if shell_path else "unknown"
         os_label = f"{platform.system()} {platform.release()}".strip() or "unknown"
-        # Re-discovered each turn so a venv created mid-session shows up
-        # without restart. Lazy import dodges the prompts → venv → ...
-        # cycle and keeps the import surface narrow.
+        # Lazy import dodges the prompts -> venv -> ... import cycle.
         from pyagent import venv as venv_mod
+
         venv_line = venv_mod.describe(Path(os.getcwd()))
         return (
             "## Environment\n"
@@ -188,11 +169,7 @@ class SystemPromptBuilder:
             "initiative — self-modification without an ask is drift, "
             "not a feature. When the user asks (even casually), go "
             "ahead.\n"
-            + (
-                f"- SOUL:   {self.soul.resolve()}\n"
-                if self.include_soul
-                else ""
-            )
+            + (f"- SOUL:   {self.soul.resolve()}\n" if self.include_soul else "")
             + f"- TOOLS:  {self.tools.resolve()}\n"
             f"- PRIMER: {self.primer.resolve()}"
         )

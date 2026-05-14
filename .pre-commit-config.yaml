@@ -1,0 +1,16 @@
+# Run `pre-commit install` once after cloning so these fire on every
+# commit. CI re-runs them as a safety net via `pre-commit run --all-files`.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.12
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+        # `ruff format` is left disabled — black is the source of truth.
+        stages: [manual]
+
+  - repo: https://github.com/psf/black-pre-commit-mirror
+    rev: 26.3.1
+    hooks:
+      - id: black

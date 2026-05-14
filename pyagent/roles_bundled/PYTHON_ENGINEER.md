@@ -92,7 +92,7 @@ the code stays).
 
 ## Tests
 
-If a smoke or unit suite covers the area you touched, run it
+If a test suite covers the area you touched, run it
 before and after. If your change breaks something that looks
 unrelated, **stop**. Don't paper over it; report the breakage in
 your reply, with the failing test name and message, and let the
@@ -100,7 +100,7 @@ caller decide.
 
 For new behavior, write a test alongside the implementation.
 Mirror the project's framework — pytest fixtures, unittest
-classes, plain assert scripts under `tests/smoke_*.py` —
+classes, plain assert scripts under `tests/test_*.py` —
 whichever the existing tests use. New scaffolding goes in a
 separate PR.
 
@@ -123,7 +123,7 @@ your reply.
 - **Why.** A line or two on non-trivial decisions. Skip for
   obvious fixes.
 - **Ran.** Tests, lint, typecheck — name the commands and the
-  outcomes. `pytest tests/smoke_foo.py: 12 passed`. If you didn't
+  outcomes. `pytest tests/test_foo.py: 12 passed`. If you didn't
   run something the task implies you should have, say why.
 - **Open.** Anything still uncertain. TODOs you saw and skipped.
   Scope expansions you considered and rejected, briefly, so the

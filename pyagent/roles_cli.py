@@ -42,11 +42,7 @@ def _project_root() -> Path:
 @click.group()
 def main() -> None:
     """Inspect, seed, and migrate pyagent roles."""
-    # Surface roles-module warnings (e.g. legacy [models.<name>]) to
-    # stderr so `pyagent-roles list` actually shows them.
-    logging.basicConfig(
-        level=logging.WARNING, format="%(levelname)s: %(message)s"
-    )
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 
 
 def _render_tier(label: str, root: Path | None, roles: dict) -> None:
@@ -63,9 +59,7 @@ def _render_tier(label: str, root: Path | None, roles: dict) -> None:
 def list_cmd() -> None:
     """List roles across all three tiers (plus any legacy TOML roles)."""
     bundled_root = roles_mod._bundled_root()
-    bundled = (
-        roles_mod._scan_dir(bundled_root) if bundled_root else {}
-    )
+    bundled = roles_mod._scan_dir(bundled_root) if bundled_root else {}
     user = roles_mod._scan_dir(_user_root())
     project = roles_mod._scan_dir(_project_root())
     legacy = roles_mod._legacy_roles()
@@ -104,14 +98,14 @@ def show_cmd(name: str) -> None:
     normalized = roles_mod._normalize_name(name)
     role = roles_mod.load().get(normalized)
     if role is None:
-        raise click.ClickException(
-            f"no role named {name!r}; try `pyagent-roles list`."
-        )
+        raise click.ClickException(f"no role named {name!r}; try `pyagent-roles list`.")
     src = str(role.source) if role.source else "(legacy: config.toml [models.*])"
     click.echo(f"# name:        {role.name}")
     click.echo(f"# source:      {src}")
     click.echo(f"# model:       {role.model or '(inherits parent)'}")
-    click.echo(f"# tools:       {list(role.tools) if role.tools is not None else '(default set)'}")
+    click.echo(
+        f"# tools:       {list(role.tools) if role.tools is not None else '(default set)'}"
+    )
     click.echo(f"# meta_tools:  {role.meta_tools}")
     click.echo(f"# description: {role.description}")
     click.echo()
@@ -125,9 +119,7 @@ def path_cmd(name: str) -> None:
     normalized = roles_mod._normalize_name(name)
     role = roles_mod.load().get(normalized)
     if role is None:
-        raise click.ClickException(
-            f"no role named {name!r}; try `pyagent-roles list`."
-        )
+        raise click.ClickException(f"no role named {name!r}; try `pyagent-roles list`.")
     if role.source is None:
         raise click.ClickException(
             f"role {name!r} comes from config.toml [models.*]; "
@@ -205,7 +197,6 @@ def _render_migrated_role(role: roles_mod.Role, original_name: str) -> str:
     if role.meta_tools is not True:
         fm_lines.append(f"meta_tools = {_toml_value(role.meta_tools)}")
     if not body:
-        # No body to auto-derive from — pin the description explicitly.
         fm_lines.append(f"description = {_toml_value(role.description)}")
     fm_lines.append("+++")
     if not body:
@@ -245,10 +236,6 @@ def migrate_cmd(force: bool) -> None:
         role = roles_mod._coerce_legacy_role(name, entry)
         if role is None:
             continue
-        # Filename mirrors the bundled all-caps + underscores convention:
-        # legacy `[models.deep-thought]` → DEEP_THOUGHT.md (not
-        # DEEP-THOUGHT.md). Lookup normalization treats both equivalently
-        # but consistent filenames keep `pyagent-roles list` tidy.
         canonical = name.upper().replace("-", "_")
         dest = target_root / f"{canonical}.md"
         if dest.exists() and not force:
