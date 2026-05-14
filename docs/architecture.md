@@ -6,33 +6,55 @@ Three diagrams. See [design.md](design.md) for more detail.
 
 ```mermaid
 flowchart TB
-    CLI[CLI or library code]
-    AGENT["<b>Agent.run()</b><br/>turn loop"]
-    PROMPT["System prompt<br/>SOUL · TOOLS · PRIMER<br/>+ plugin sections"]
-    TOOLS["Tools<br/>built-in + plugin-registered"]
-    PLUGINS["Plugins<br/>tools · hooks · prompt sections"]
-    LLM["LLM<br/>Anthropic / OpenAI / Gemini / Ollama"]
-    SESSION["Session<br/>conversation.jsonl + attachments/"]
-    SUB["Subagent processes<br/>multiprocessing.spawn"]
+    APP["App / CLI<br/>uses an Agent"]
 
-    CLI --> AGENT
-    AGENT --> PROMPT
-    AGENT --> TOOLS
-    AGENT --> PLUGINS
-    AGENT --> LLM
-    AGENT <--> SESSION
-    AGENT <-->|duplex pipe| SUB
+    subgraph HARNESS["the agent harness"]
+        AGENT["<b>Agent.run()</b><br/>turn loop"]
+        PROMPT["Prompt builder<br/>SOUL · TOOLS · PRIMER<br/>— the agent's identity"]
+        TOOLS["Tools<br/>built-in + plugin-registered"]
+        SKILLS["Skills<br/>on-demand markdown playbooks"]
+        PLUGINS["Plugins<br/>tools · hooks · prompt sections · providers"]
+        LLM["LLM providers<br/>Anthropic · OpenAI · Gemini · plugin-added"]
+
+        AGENT --> PROMPT
+        AGENT --> TOOLS
+        AGENT --> SKILLS
+        AGENT --> LLM
+        PLUGINS -.extends.-> TOOLS
+        PLUGINS -.extends.-> LLM
+        PLUGINS -.contributes.-> PROMPT
+    end
+
+    MEMORY["Memory<br/>(bundled plugin)<br/>markdown ledgers + vector recall"]
+    RUNTIME["Session + subagents<br/>history, attachments, spawned child agents"]
+
+    APP --> AGENT
+    PLUGINS --- MEMORY
+    AGENT <--> RUNTIME
 ```
 
 Notes:
 
-- Subagents are separate OS processes, not threads. Parent and child
-  talk over a duplex pipe carrying the event protocol in
-  [`pyagent/protocol.py`](../pyagent/protocol.py).
-- Anthropic, OpenAI, and Gemini ship as built-in clients in
+- The "agent harness" is the framework itself: the turn loop plus the
+  five things it composes — prompt builder, tools, skills, LLM
+  providers, and the plugin system. An App or CLI just constructs an
+  `Agent` and calls `run()`.
+- Plugins are the extension seam (`PluginAPI`). They register tools and
+  LLM providers, contribute system-prompt sections, and observe or
+  control the turn loop. Big subsystems ship this way — memory
+  (markdown ledgers + fastembed vector recall) is a bundled plugin,
+  not core.
+- Anthropic, OpenAI, and Gemini ship as built-in providers in
   `pyagent.llms`. Ollama is added by a bundled plugin via
-  `api.register_provider("ollama", ...)`. Third-party plugins can
-  register providers the same way.
+  `api.register_provider("ollama", ...)`. Third-party plugins register
+  providers the same way.
+- Tools are callable functions the LLM invokes; skills are passive
+  markdown playbooks the agent pulls in on demand (`read_skill`). Both
+  come in built-in and plugin/user-provided flavors.
+- "Session + subagents" is the runtime state layer: conversation
+  history and attachments on disk, plus child agents spawned via
+  `multiprocessing.spawn` talking over a duplex pipe carrying the event
+  protocol in [`pyagent/protocol.py`](../pyagent/protocol.py).
 - The permissions gate only covers the built-in filesystem and shell
   tools. Plugin tools and your own `add_tool`s don't go through it
   unless they call it themselves.
