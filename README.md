@@ -10,7 +10,7 @@ or `from pyagent import Agent, auto_client` to embed the same loop
 in your own app, notebook, or service. Bring your own model —
 Anthropic, OpenAI, Gemini, or local Ollama.
 
-[![asciicast](https://asciinema.org/a/5FvXNO6wzrSkKVwd.svg)](https://asciinema.org/a/5FvXNO6wzrSkKVwd)
+![pyagent CLI dispatching parallel subagents](docs/demo.gif)
 
 ## Quick start
 
