@@ -6,15 +6,15 @@ Three diagrams. See [design.md](design.md) for more detail.
 
 ```mermaid
 flowchart TB
-    APP["App / CLI<br/>uses an Agent"]
+    APP["<b>App / CLI</b><br/>uses an Agent"]
 
     subgraph HARNESS["the agent harness"]
-        AGENT["<b>Agent.run()</b><br/>turn loop"]
-        PROMPT["Prompt builder<br/>SOUL · TOOLS · PRIMER<br/>— the agent's identity"]
-        TOOLS["Tools<br/>built-in + plugin-registered"]
-        SKILLS["Skills<br/>on-demand markdown playbooks"]
-        LLM["LLM providers<br/>Anthropic · OpenAI · Gemini · plugin-added"]
-        PLUGINS["Plugins<br/>the extension seam:<br/>tools · skills · providers · prompt sections"]
+        AGENT["<b>Agent.run()</b><br/>the turn loop"]
+        PROMPT["<b>Prompt Builder</b><br/>the agent's identity<br/>SOUL · TOOLS · PRIMER"]
+        TOOLS["<b>Tools</b><br/>built-in + plugin-registered"]
+        SKILLS["<b>Skills</b><br/>on-demand Markdown playbooks"]
+        LLM["<b>LLM Providers</b><br/>Anthropic · OpenAI · Gemini · pluggable"]
+        PLUGINS["<b>Plugins</b><br/>the extension seam<br/>tools · skills · providers · prompt"]
 
         AGENT --> PROMPT
         AGENT --> TOOLS
@@ -23,8 +23,8 @@ flowchart TB
         AGENT --> PLUGINS
     end
 
-    MEMORY["Memory<br/>a subsystem bundled as a plugin<br/>(markdown ledgers + vector recall)"]
-    RUNTIME["Session + subagents<br/>history, attachments, spawned child agents"]
+    MEMORY["<b>Memory</b><br/>a subsystem shipped as a plugin"]
+    RUNTIME["<b>Session + Subagents</b><br/>history · attachments · child processes"]
 
     APP --> AGENT
     PLUGINS --> MEMORY
