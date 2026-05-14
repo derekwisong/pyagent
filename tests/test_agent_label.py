@@ -1,4 +1,4 @@
-"""Smoke for the CLI's _agent_label rendering.
+"""Test of the CLI's _agent_label rendering.
 
 The label has to survive rich's markup parser and produce
 `[<agent_id>] ` in cyan around the brackets. A previous version used
@@ -50,4 +50,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

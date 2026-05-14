@@ -1,4 +1,4 @@
-"""Smoke for venv discovery / creation + the `python_env` tool.
+"""Test of venv discovery / creation + the `python_env` tool.
 
 Locks:
   1. `discover` finds nothing in an empty workspace.
@@ -241,4 +241,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

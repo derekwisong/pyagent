@@ -1,4 +1,4 @@
-"""Smoke for spawn_subagent depth and fan-out caps.
+"""Test of spawn_subagent depth and fan-out caps.
 
 Both caps come from <config-dir>/config.toml; we install a temporary
 config that sets them low (max_fanout=1, max_depth=1) and verify
@@ -117,4 +117,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

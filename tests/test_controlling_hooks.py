@@ -1,4 +1,4 @@
-"""Smoke tests for v2 controlling hooks (issue #66).
+"""Tests for v2 controlling hooks (issue #66).
 
 Covers every acceptance-criteria bullet:
 

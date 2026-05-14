@@ -1,4 +1,4 @@
-"""Smoke for the per-session attachments LRU cap (issue #86).
+"""Test of the per-session attachments LRU cap (issue #86).
 
 Locks these behaviors:
 
@@ -286,4 +286,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

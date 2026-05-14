@@ -1,4 +1,4 @@
-"""Smoke for glob.
+"""Test of glob.
 
 Exercises (in-process):
   1. Single-pattern recursive match returns sorted relative paths.
@@ -149,4 +149,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

@@ -1,4 +1,4 @@
-"""Smoke for the token / cost meter.
+"""Test of the token / cost meter.
 
 Exercises (in-process):
   1. Agent.token_usage accumulates across multiple LLM calls.
@@ -389,4 +389,9 @@ def _check_format_right_zone() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

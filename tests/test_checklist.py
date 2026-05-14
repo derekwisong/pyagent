@@ -1,4 +1,4 @@
-"""Smoke for the agent-managed checklist (issue #38).
+"""Test of the agent-managed checklist (issue #38).
 
 Locks the contract for `pyagent.checklist.Checklist`, the three
 tool factories that bind to it, the `checklist` event flowing into
@@ -306,4 +306,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

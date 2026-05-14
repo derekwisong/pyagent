@@ -85,18 +85,20 @@ Local Ollama needs no key — just the daemon running and a model pulled.
 
 ## Tests
 
-Smoke tests live under `tests/` as standalone scripts (no pytest):
-
 ```bash
 pip install -e '.[dev]'
-pre-commit install                       # one-time: run black + ruff on every commit
-python -m tests.test_token_meter        # run one
-for f in tests/test_*.py; do python -m tests.$(basename "$f" .py); done
+pre-commit install      # one-time: run black + ruff on every commit
+pytest tests/           # run everything
+pytest tests/test_token_meter.py        # run one file
 ```
+
+Each `tests/test_*.py` also runs standalone via
+`python -m tests.test_token_meter`, but pytest is the default
+runner and what CI uses.
 
 Three recall sub-tests in `test_plugins.py` are gated on
 `PYAGENT_HEAVY_TESTS=1` because they download a ~130MB embedding
-model. CI runs the same loop on every push and pull request.
+model.
 
 ## License
 

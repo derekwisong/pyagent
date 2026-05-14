@@ -1,4 +1,4 @@
-"""Smoke test for pip-pollution danger patterns.
+"""Test for pip-pollution danger patterns.
 
 Asserts `_safety_check` flags installs that would pollute system or
 user-level Python and that benign pip use still passes.
@@ -44,4 +44,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

@@ -30,24 +30,5 @@ jobs:
       - name: Ruff
         run: python -m ruff check pyagent tests
 
-      - name: Smoke tests
-        run: |
-          set +e
-          fail=0
-          failed=""
-          for t in tests/test_*.py; do
-            name=$(basename "$t" .py)
-            echo "::group::$name"
-            python -m "tests.$name"
-            rc=$?
-            echo "::endgroup::"
-            if [ $rc -ne 0 ]; then
-              fail=$((fail+1))
-              failed="$failed $name"
-            fi
-          done
-          if [ $fail -gt 0 ]; then
-            echo "FAILED ($fail tests):$failed"
-            exit 1
-          fi
-          echo "All tests passed"
+      - name: Tests
+        run: python -m pytest tests/

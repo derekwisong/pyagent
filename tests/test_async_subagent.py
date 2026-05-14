@@ -1,4 +1,4 @@
-"""Smoke for async subagent dispatch.
+"""Test of async subagent dispatch.
 
 Covers:
   1. `_drain_pending_async()` — appends queued replies as user-role
@@ -182,4 +182,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

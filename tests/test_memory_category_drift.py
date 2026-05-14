@@ -1,4 +1,4 @@
-"""Smoke for the Tier-2 memory category-drift improvements.
+"""Test of the Tier-2 memory category-drift improvements.
 
 Locks four behaviors:
 
@@ -255,4 +255,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

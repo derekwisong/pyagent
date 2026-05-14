@@ -1,4 +1,4 @@
-"""Smoke for clean Ctrl+C behavior.
+"""Test of clean Ctrl+C behavior.
 
 Subprocess-launches the full `pyagent` CLI in its own process group
 (simulating an interactive terminal), waits for the agent to become
@@ -92,4 +92,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

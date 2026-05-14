@@ -1,4 +1,4 @@
-"""Smoke for tool-call arg scrubbing.
+"""Test of tool-call arg scrubbing.
 
 Large string args in tool_call dicts get replaced with a short
 marker after the tool runs, so a write_file with 50KB of content

@@ -1,4 +1,4 @@
-"""Smoke for the read_file soft-threshold ceiling (issue #9).
+"""Test of the read_file soft-threshold ceiling (issue #9).
 
 Locks four behaviors:
   1. Small read_file output (< attachment_threshold) returns inline.
@@ -128,4 +128,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

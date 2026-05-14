@@ -1,4 +1,4 @@
-"""Smoke for the CLI status footer.
+"""Test of the CLI status footer.
 
 Drives `_update_agents_state`, `_render_status`, and `_compose_footer`
 directly with synthetic events and asserts the rendered footer
@@ -535,4 +535,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

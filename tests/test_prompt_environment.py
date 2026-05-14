@@ -1,4 +1,4 @@
-"""Smoke test for the system-prompt environment footer.
+"""Test for the system-prompt environment footer.
 
 Asserts the persona footer surfaces enough host context (OS, shell,
 python) for the agent to pick the right shell idioms.
@@ -89,4 +89,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()
