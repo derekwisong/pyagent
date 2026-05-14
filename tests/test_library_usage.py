@@ -1,4 +1,4 @@
-"""Smoke for the pyagent top-level library surface.
+"""Test of the pyagent top-level library surface.
 
 Locks the public re-exports + auto_client behavior. These are the
 names the README/library-usage.md teach; if they go missing, the
@@ -157,4 +157,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

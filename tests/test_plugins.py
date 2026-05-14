@@ -1,4 +1,4 @@
-"""Smoke tests for the plugin loader.
+"""Tests for the plugin loader.
 
 Covers:
   - Discover and load a drop-in plugin with manifest + plugin.py.
@@ -1570,7 +1570,7 @@ def test_write_session_attachment_no_session() -> None:
             "def get_state(): return _state\n"
             "def register(api):\n"
             "    def go() -> str:\n"
-            '        """Smoke: try to write."""\n'
+            '        """Test: try to write."""\n'
             "        path = api.write_session_attachment(\n"
             '            "go", "side-data", suffix=".json"\n'
             "        )\n"
@@ -1616,7 +1616,7 @@ def test_write_session_attachment_with_session() -> None:
             "def get_state(): return _state\n"
             "def register(api):\n"
             "    def go() -> str:\n"
-            '        """Smoke: write side-data."""\n'
+            '        """Test: write side-data."""\n'
             "        p = api.write_session_attachment(\n"
             '            "go", \'{"k": 1}\', suffix=".json"\n'
             "        )\n"

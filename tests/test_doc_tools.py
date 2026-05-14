@@ -710,3 +710,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
+    main()

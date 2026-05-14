@@ -1,4 +1,4 @@
-"""Smoke for edit_file.
+"""Test of edit_file.
 
 Exercises (in-process):
   1. Single-match replace, with correct 1-indexed line number in
@@ -133,4 +133,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

@@ -1,4 +1,4 @@
-"""Smoke tests for the plugin-provider surface (PluginAPI.register_provider
+"""Tests for the plugin-provider surface (PluginAPI.register_provider
 + pyagent.llms plugin-router integration).
 
 What's covered:

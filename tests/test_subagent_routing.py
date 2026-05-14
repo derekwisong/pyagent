@@ -1,4 +1,4 @@
-"""Smoke for permission_response routing root → subagent.
+"""Test of permission_response routing root → subagent.
 
 Drives `_ChildState._handle_parent_event` directly with a fake subagent
 pipe and verifies that:
@@ -96,4 +96,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

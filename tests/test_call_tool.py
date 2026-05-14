@@ -1,4 +1,4 @@
-"""Smoke tests for `PluginAPI.call_tool` — cross-plugin composition.
+"""Tests for `PluginAPI.call_tool` — cross-plugin composition.
 
 Covers:
   - Plugin B's tool calls plugin A's tool through `api.call_tool`.

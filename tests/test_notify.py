@@ -1,4 +1,4 @@
-"""Smoke for the subagent ↔ parent notification protocol (issue #64).
+"""Test of the subagent ↔ parent notification protocol (issue #64).
 
 Drives both directions of the new `subagent_note` / `parent_note`
 pipe events against real `_ChildState` IO threads without spawning
@@ -340,4 +340,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

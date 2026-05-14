@@ -1,4 +1,4 @@
-"""Smoke for `pyagent-sessions audit` (issue #14, Part B).
+"""Test of `pyagent-sessions audit` (issue #14, Part B).
 
 Locks four behaviors:
   1. audit_session aggregates four-key usage correctly across mixed
@@ -511,4 +511,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

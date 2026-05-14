@@ -1,4 +1,4 @@
-"""Smoke for the CLI submit-handler state machine (issues #68 + #69).
+"""Test of the CLI submit-handler state machine (issues #68 + #69).
 
 Replaces the old `test_input_queue.py` — issue #68 deletes the
 local input queue and replaces it with mid-turn `user_note`
@@ -253,4 +253,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

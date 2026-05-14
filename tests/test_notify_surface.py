@@ -1,4 +1,4 @@
-"""Smoke for the parent-side notification surface (issue #65).
+"""Test of the parent-side notification surface (issue #65).
 
 Drives `tell_subagent` and `peek_subagent` against real
 `_ChildState` IO threads with fake subagent pipes — the same
@@ -495,4 +495,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

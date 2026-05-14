@@ -39,7 +39,7 @@ def _write(p: Path, text: str) -> None:
     p.write_text(text)
 
 
-def test_frontmatter_full(tmp: Path) -> None:
+def _check_frontmatter_full(tmp: Path) -> None:
     """A role with every frontmatter field populated."""
     _write(
         tmp / ".pyagent" / "roles" / "alpha.md",
@@ -61,7 +61,7 @@ def test_frontmatter_full(tmp: Path) -> None:
     print("✓ frontmatter (full): all fields applied")
 
 
-def test_frontmatter_none(tmp: Path) -> None:
+def _check_frontmatter_none(tmp: Path) -> None:
     """A role with no frontmatter at all — defaults + auto-description."""
     _write(
         tmp / ".pyagent" / "roles" / "bare.md",
@@ -77,7 +77,7 @@ def test_frontmatter_none(tmp: Path) -> None:
     print("✓ frontmatter (none): defaults applied + description derived")
 
 
-def test_frontmatter_partial(tmp: Path) -> None:
+def _check_frontmatter_partial(tmp: Path) -> None:
     """Partial frontmatter — only `tools`, no model/description."""
     _write(
         tmp / ".pyagent" / "roles" / "partial.md",
@@ -94,7 +94,7 @@ def test_frontmatter_partial(tmp: Path) -> None:
     print("✓ frontmatter (partial): selective override + auto description")
 
 
-def test_frontmatter_malformed(tmp: Path) -> None:
+def _check_frontmatter_malformed(tmp: Path) -> None:
     """Bad TOML in frontmatter falls back to no frontmatter."""
     _write(
         tmp / ".pyagent" / "roles" / "broken.md",
@@ -111,7 +111,7 @@ def test_frontmatter_malformed(tmp: Path) -> None:
     print("✓ frontmatter (malformed): role still loads with defaults")
 
 
-def test_description_derivation_skips_heading(tmp: Path) -> None:
+def _check_description_derivation_skips_heading(tmp: Path) -> None:
     """Description should skip the leading heading line."""
     _write(
         tmp / ".pyagent" / "roles" / "headed.md",
@@ -124,7 +124,7 @@ def test_description_derivation_skips_heading(tmp: Path) -> None:
     print("✓ description: leading heading skipped, first paragraph used")
 
 
-def test_case_insensitive_lookup(tmp: Path) -> None:
+def _check_case_insensitive_lookup(tmp: Path) -> None:
     """File `RESEARCHER.md` callable as `researcher` and any case variant."""
     _write(
         tmp / ".pyagent" / "roles" / "BIG.md",
@@ -139,7 +139,7 @@ def test_case_insensitive_lookup(tmp: Path) -> None:
     print("✓ lookup: case-insensitive (BIG / Big / big all resolve)")
 
 
-def test_dash_underscore_normalization(tmp: Path) -> None:
+def _check_dash_underscore_normalization(tmp: Path) -> None:
     """`software-engineer.md` → role name `software_engineer`."""
     _write(
         tmp / ".pyagent" / "roles" / "field-tester.md",
@@ -155,7 +155,7 @@ def test_dash_underscore_normalization(tmp: Path) -> None:
     print("✓ filename: dash/underscore both normalize to underscores")
 
 
-def test_tier_precedence(tmp: Path, user_dir: Path) -> None:
+def _check_tier_precedence(tmp: Path, user_dir: Path) -> None:
     """Project > user > bundled on canonical-name collision.
 
     `RESEARCHER.md` ships bundled. We add a user-tier file and a
@@ -186,7 +186,7 @@ def test_tier_precedence(tmp: Path, user_dir: Path) -> None:
     print("✓ tier: project beats user beats bundled")
 
 
-def test_legacy_models_table_still_resolves_and_warns(tmp: Path, caplog) -> None:
+def _check_legacy_models_table_still_resolves_and_warns(tmp: Path, caplog) -> None:
     """[models.<name>] in config.toml still loads + emits one-time warning."""
     (tmp / ".pyagent" / "config.toml").write_text(
         "[models.legacyrole]\n"
@@ -214,7 +214,7 @@ def test_legacy_models_table_still_resolves_and_warns(tmp: Path, caplog) -> None
     print("✓ legacy: deprecation warning does not spam (one-time)")
 
 
-def test_file_based_role_shadows_legacy(tmp: Path) -> None:
+def _check_file_based_role_shadows_legacy(tmp: Path) -> None:
     """If both an .md role and a [models.<name>] entry exist with
     the same canonical name, the file-based form wins (newer
     authoring tool)."""
@@ -236,7 +236,7 @@ def test_file_based_role_shadows_legacy(tmp: Path) -> None:
     print("✓ collision: file-based role shadows legacy [models.shared]")
 
 
-def test_per_tier_disk_collision(tmp: Path) -> None:
+def _check_per_tier_disk_collision(tmp: Path) -> None:
     """Two files in the same tier that normalize to the same name —
     warn and keep the lexicographically-first."""
     _write(
@@ -254,7 +254,7 @@ def test_per_tier_disk_collision(tmp: Path) -> None:
     print("✓ per-tier collision: lexicographically-first wins")
 
 
-def test_catalog_reflects_file_based_roles(tmp: Path) -> None:
+def _check_catalog_reflects_file_based_roles(tmp: Path) -> None:
     _write(
         tmp / ".pyagent" / "roles" / "catalog_role.md",
         '+++\nmodel = "pyagent/echo"\n+++\n\nA cataloged role.\n',
@@ -265,7 +265,7 @@ def test_catalog_reflects_file_based_roles(tmp: Path) -> None:
     print("✓ catalog: file-based roles render in the system-prompt block")
 
 
-def test_cli_list_runs(tmp: Path, user_dir: Path) -> None:
+def _check_cli_list_runs(tmp: Path, user_dir: Path) -> None:
     """`pyagent-roles list` finds bundled + user + project roles."""
     # User-tier
     _write(user_dir / "roles" / "user_only.md", "# Role: User\n\nUser role.\n")
@@ -283,7 +283,7 @@ def test_cli_list_runs(tmp: Path, user_dir: Path) -> None:
     print("✓ pyagent-roles list: shows bundled + user + project tiers")
 
 
-def test_cli_show_and_path(tmp: Path) -> None:
+def _check_cli_show_and_path(tmp: Path) -> None:
     _write(
         tmp / ".pyagent" / "roles" / "shown.md",
         '+++\nmodel = "pyagent/echo"\n+++\n\n# Role: Shown\n\nShown body.\n',
@@ -301,7 +301,7 @@ def test_cli_show_and_path(tmp: Path) -> None:
     print("✓ pyagent-roles show / path: emit role content + resolved path")
 
 
-def test_cli_init_idempotent(tmp: Path, user_dir: Path) -> None:
+def _check_cli_init_idempotent(tmp: Path, user_dir: Path) -> None:
     """`pyagent-roles init` seeds config-dir/roles, idempotently."""
     runner = CliRunner()
     first = runner.invoke(roles_cli.main, ["init"])
@@ -322,7 +322,7 @@ def test_cli_init_idempotent(tmp: Path, user_dir: Path) -> None:
     print("✓ pyagent-roles init: idempotent (skips existing files)")
 
 
-def test_cli_migrate(tmp: Path, user_dir: Path) -> None:
+def _check_cli_migrate(tmp: Path, user_dir: Path) -> None:
     """`pyagent-roles migrate` synthesizes .md files from [models.<name>]."""
     (tmp / ".pyagent" / "config.toml").write_text(
         "[models.tomigrate]\n"
@@ -362,7 +362,7 @@ def test_cli_migrate(tmp: Path, user_dir: Path) -> None:
     print("✓ pyagent-roles migrate: writes .md and roles.load() picks it up")
 
 
-def test_cli_migrate_dashed_name(tmp: Path, user_dir: Path) -> None:
+def _check_cli_migrate_dashed_name(tmp: Path, user_dir: Path) -> None:
     """Legacy role names with dashes (`[models.deep-thought]`) migrate
     to canonical `DEEP_THOUGHT.md` — uppercase + underscores, matching
     the bundled-roles convention. Lookup still works either way via
@@ -394,7 +394,7 @@ def test_cli_migrate_dashed_name(tmp: Path, user_dir: Path) -> None:
     print("✓ pyagent-roles migrate: dashed names → underscored filenames")
 
 
-def test_cli_migrate_no_body_keeps_description(tmp: Path, user_dir: Path) -> None:
+def _check_cli_migrate_no_body_keeps_description(tmp: Path, user_dir: Path) -> None:
     """When the legacy [models.<name>] entry has no `system_prompt`,
     the migrated file must keep `description` in the frontmatter — the
     auto-derive has nothing to pull from."""
@@ -459,24 +459,24 @@ def main() -> None:
     try:
         caplog = _CapLog()
 
-        test_frontmatter_full(tmp)
-        test_frontmatter_none(tmp)
-        test_frontmatter_partial(tmp)
-        test_frontmatter_malformed(tmp)
-        test_description_derivation_skips_heading(tmp)
-        test_case_insensitive_lookup(tmp)
-        test_dash_underscore_normalization(tmp)
-        test_tier_precedence(tmp, user_dir)
-        test_legacy_models_table_still_resolves_and_warns(tmp, caplog)
-        test_file_based_role_shadows_legacy(tmp)
-        test_per_tier_disk_collision(tmp)
-        test_catalog_reflects_file_based_roles(tmp)
-        test_cli_list_runs(tmp, user_dir)
-        test_cli_show_and_path(tmp)
-        test_cli_init_idempotent(tmp, user_dir)
-        test_cli_migrate(tmp, user_dir)
-        test_cli_migrate_dashed_name(tmp, user_dir)
-        test_cli_migrate_no_body_keeps_description(tmp, user_dir)
+        _check_frontmatter_full(tmp)
+        _check_frontmatter_none(tmp)
+        _check_frontmatter_partial(tmp)
+        _check_frontmatter_malformed(tmp)
+        _check_description_derivation_skips_heading(tmp)
+        _check_case_insensitive_lookup(tmp)
+        _check_dash_underscore_normalization(tmp)
+        _check_tier_precedence(tmp, user_dir)
+        _check_legacy_models_table_still_resolves_and_warns(tmp, caplog)
+        _check_file_based_role_shadows_legacy(tmp)
+        _check_per_tier_disk_collision(tmp)
+        _check_catalog_reflects_file_based_roles(tmp)
+        _check_cli_list_runs(tmp, user_dir)
+        _check_cli_show_and_path(tmp)
+        _check_cli_init_idempotent(tmp, user_dir)
+        _check_cli_migrate(tmp, user_dir)
+        _check_cli_migrate_dashed_name(tmp, user_dir)
+        _check_cli_migrate_no_body_keeps_description(tmp, user_dir)
 
         print("\nALL CHECKS PASSED")
     finally:
@@ -484,4 +484,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

@@ -1,4 +1,4 @@
-"""Smoke for mid-task subagent ↔ parent conversation (issue #47).
+"""Test of mid-task subagent ↔ parent conversation (issue #47).
 
 Drives both sides of `ask_parent` / `reply_to_subagent` against
 real `_ChildState` IO threads without spawning subagent
@@ -324,4 +324,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

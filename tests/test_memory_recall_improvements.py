@@ -1,4 +1,4 @@
-"""Smoke for the Tier-1 memory recall improvements.
+"""Test of the Tier-1 memory recall improvements.
 
 Locks three behaviors:
 
@@ -246,4 +246,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

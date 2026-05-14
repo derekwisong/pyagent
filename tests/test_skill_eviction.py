@@ -1,4 +1,4 @@
-"""Smoke for `read_skill` body eviction (issue #10).
+"""Test of `read_skill` body eviction (issue #10).
 
 Locks six behaviors of `Agent._apply_eviction` and the
 `evict_after_use=True` flag on `Agent.add_tool`:
@@ -303,4 +303,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

@@ -1,4 +1,4 @@
-"""Smoke for the prompt_toolkit-backed REPL input.
+"""Test of the prompt_toolkit-backed REPL input.
 
 Runs pyagent under a real PTY so prompt_toolkit's interactive path
 is exercised (the PIPE-based test_ctrlc falls back to a non-tty
@@ -155,4 +155,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

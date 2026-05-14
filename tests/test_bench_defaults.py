@@ -1,4 +1,4 @@
-"""Smoke for `pyagent-bench`'s default-budget-by-model table.
+"""Test of `pyagent-bench`'s default-budget-by-model table.
 
 Locks the per-model defaults so a future model rename / pricing-table
 update doesn't silently make Opus runs halt at the Sonnet budget (or
@@ -52,4 +52,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

@@ -1,4 +1,4 @@
-"""Smoke tests for the claude-code-cli plugin's early-return error paths.
+"""Tests for the claude-code-cli plugin's early-return error paths.
 
 All cases exercised here return before subprocess is invoked, so the
 tests don't require the `claude` binary to be present on PATH. The

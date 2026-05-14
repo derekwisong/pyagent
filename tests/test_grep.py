@@ -1,4 +1,4 @@
-"""Smoke for grep.
+"""Test of grep.
 
 Exercises (in-process):
   1. Default behavior: bare pattern/path returns `path:lineno:line`,
@@ -216,4 +216,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

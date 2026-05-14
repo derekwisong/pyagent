@@ -48,7 +48,7 @@ description = "Cheap and fast for narrow tasks."
 """)
 
 
-def test_role_load_and_resolve(tmp: Path) -> None:
+def _check_role_load_and_resolve(tmp: Path) -> None:
     loaded = roles.load()
     # Bundled roles may also be present; assert legacy entries loaded.
     assert {"skim", "cheap"} <= set(loaded), loaded
@@ -82,7 +82,7 @@ def test_role_load_and_resolve(tmp: Path) -> None:
     print("✓ resolve('') → ('', None) — caller inherits parent's model")
 
 
-def test_build_subagent_config_with_role(tmp: Path) -> None:
+def _check_build_subagent_config_with_role(tmp: Path) -> None:
     parent_session = MagicMock()
     parent_session.dir = tmp / "fake-session"
     parent_session.dir.mkdir(exist_ok=True)
@@ -115,7 +115,7 @@ def test_build_subagent_config_with_role(tmp: Path) -> None:
     print(f"✓ _build_subagent_config: role data threaded into cfg ({sid})")
 
 
-def test_register_tools_allowlist() -> None:
+def _check_register_tools_allowlist() -> None:
     a = Agent(client=EchoClient())
     agent_proc._register_tools(a, allow_meta=False, allowlist=["read_file", "grep"])
     assert sorted(a.tools) == ["grep", "read_file"], sorted(a.tools)
@@ -132,7 +132,7 @@ def test_register_tools_allowlist() -> None:
     print("✓ _register_tools allowlist=None → full default set, no meta")
 
 
-def test_end_to_end_role_spawn(tmp: Path) -> None:
+def _check_end_to_end_role_spawn(tmp: Path) -> None:
     """Spawn an actual subprocess subagent with a role and round-trip a turn."""
     soul = paths.resolve("SOUL.md", seed="SOUL.md")
     tools_md = paths.resolve("TOOLS.md", seed="TOOLS.md")
@@ -198,7 +198,7 @@ def test_end_to_end_role_spawn(tmp: Path) -> None:
         io_thread.join(timeout=2)
 
 
-def test_set_model_handler() -> None:
+def _check_set_model_handler() -> None:
     ctx = multiprocessing.get_context("spawn")
     parent_end, child_end = ctx.Pipe(duplex=True)
     state = agent_proc._ChildState(conn=child_end)
@@ -234,14 +234,19 @@ def main() -> None:
 
     _write_config(tmp)
 
-    test_role_load_and_resolve(tmp)
-    test_build_subagent_config_with_role(tmp)
-    test_register_tools_allowlist()
-    test_end_to_end_role_spawn(tmp)
-    test_set_model_handler()
+    _check_role_load_and_resolve(tmp)
+    _check_build_subagent_config_with_role(tmp)
+    _check_register_tools_allowlist()
+    _check_end_to_end_role_spawn(tmp)
+    _check_set_model_handler()
 
     print("\nALL CHECKS PASSED")
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()

@@ -1,4 +1,4 @@
-"""Smoke tests for the py-dev-toolkit plugin (lint / typecheck / run_pytest).
+"""Tests for the py-dev-toolkit plugin (lint / typecheck / run_pytest).
 
 Each test is gated on the relevant binary being installed in the
 runtime environment. CI hosts without ruff / mypy / pytest will skip
@@ -36,12 +36,12 @@ def _setup() -> tuple[dict, Path]:
     return tools, workdir
 
 
-def test_plugin_registers_three_tools(tools: dict) -> None:
+def _check_plugin_registers_three_tools(tools: dict) -> None:
     for name in ("lint", "typecheck", "run_pytest"):
         _check(f"{name!r} registered", name in tools, f"have: {sorted(tools)}")
 
 
-def test_lint_findings_and_clean(tools: dict, workdir: Path) -> None:
+def _check_lint_findings_and_clean(tools: dict, workdir: Path) -> None:
     if shutil.which("ruff") is None:
         _check("ruff test skipped (binary missing)", True)
         return
@@ -62,7 +62,7 @@ def test_lint_findings_and_clean(tools: dict, workdir: Path) -> None:
     _check("lint clean run", out_clean.startswith("ruff: clean"), out_clean)
 
 
-def test_lint_input_validation(tools: dict, workdir: Path) -> None:
+def _check_lint_input_validation(tools: dict, workdir: Path) -> None:
     out = tools["lint"]("")
     _check("empty path → error", out.startswith("<error:"), out)
 
@@ -78,7 +78,7 @@ def test_lint_input_validation(tools: dict, workdir: Path) -> None:
         )
 
 
-def test_typecheck_mypy(tools: dict, workdir: Path) -> None:
+def _check_typecheck_mypy(tools: dict, workdir: Path) -> None:
     if shutil.which("mypy") is None:
         _check("mypy test skipped (binary missing)", True)
         return
@@ -96,7 +96,7 @@ def test_typecheck_mypy(tools: dict, workdir: Path) -> None:
     _check("mypy clean run", out_clean.startswith("mypy: clean"), out_clean)
 
 
-def test_typecheck_input_validation(tools: dict) -> None:
+def _check_typecheck_input_validation(tools: dict) -> None:
     out = tools["typecheck"]("/some/path", tool="pyflakes")
     _check(
         "unsupported typecheck tool → error",
@@ -105,19 +105,19 @@ def test_typecheck_input_validation(tools: dict) -> None:
     )
 
 
-def test_run_pytest_basic(tools: dict, workdir: Path) -> None:
+def _check_run_pytest_basic(tools: dict, workdir: Path) -> None:
     if shutil.which("pytest") is None:
         _check("pytest test skipped (binary missing)", True)
         return
     test_file = workdir / "test_demo.py"
     test_file.write_text(
-        "def test_pass():\n"
+        "def _check_pass():\n"
         "    assert 1 + 1 == 2\n"
         "\n"
-        "def test_fail():\n"
+        "def _check_fail():\n"
         "    assert 1 + 1 == 3, 'math broken'\n"
         "\n"
-        "def test_skip():\n"
+        "def _check_skip():\n"
         "    import pytest; pytest.skip('not relevant')\n"
     )
     out = tools["run_pytest"](str(test_file))
@@ -136,7 +136,7 @@ def test_run_pytest_basic(tools: dict, workdir: Path) -> None:
     )
 
 
-def test_run_pytest_k_filter(tools: dict, workdir: Path) -> None:
+def _check_run_pytest_k_filter(tools: dict, workdir: Path) -> None:
     if shutil.which("pytest") is None:
         return
     test_file = workdir / "test_demo.py"
@@ -155,7 +155,7 @@ def test_run_pytest_k_filter(tools: dict, workdir: Path) -> None:
     )
 
 
-def test_mypy_text_parser_handles_windows_paths() -> None:
+def _check_mypy_text_parser_handles_windows_paths() -> None:
     """Reviewer-found bug: previous regex used `[^:]+` for the file
     path, so `C:\\foo\\bar.py:3:1: error: …` never matched and
     Windows hosts got a false-clean result. New regex uses a
@@ -187,7 +187,7 @@ def test_mypy_text_parser_handles_windows_paths() -> None:
     )
 
 
-def test_mypy_text_parser_filters_notes() -> None:
+def _check_mypy_text_parser_filters_notes() -> None:
     """Reviewer-found bug: `note:` lines were being counted as
     findings, inflating the summary (e.g. `1 error, 4 notes` shown
     as 5 findings). They're context for the adjacent error, not
@@ -209,7 +209,7 @@ def test_mypy_text_parser_filters_notes() -> None:
     )
 
 
-def test_mypy_json_parser_filters_notes() -> None:
+def _check_mypy_json_parser_filters_notes() -> None:
     """Same notes-filtering applied to mypy's JSONL output."""
     from pyagent.plugins.py_dev_toolkit.typecheck import parse_mypy_json
 
@@ -229,7 +229,7 @@ def test_mypy_json_parser_filters_notes() -> None:
     )
 
 
-def test_lint_on_directory(tools: dict, workdir: Path) -> None:
+def _check_lint_on_directory(tools: dict, workdir: Path) -> None:
     if shutil.which("ruff") is None:
         return
     sub = workdir / "lint_dir"
@@ -245,7 +245,7 @@ def test_lint_on_directory(tools: dict, workdir: Path) -> None:
     _check("finding cites file in directory", "a.py" in out, out[:300])
 
 
-def test_pathutil_shorten() -> None:
+def _check_pathutil_shorten() -> None:
     """`_pathutil.shorten` normalizes path output across tools so
     `lint` (ruff resolves to absolute) and `typecheck` (mypy
     preserves caller input) emit the same shape: relative when
@@ -269,7 +269,7 @@ def test_pathutil_shorten() -> None:
     _check("empty input returns unchanged", shorten("") == "")
 
 
-def test_pytest_permission_gate_runs_for_nonexistent_paths(
+def _check_pytest_permission_gate_runs_for_nonexistent_paths(
     tools: dict,
 ) -> None:
     """Reviewer-found bug: `if target_path.exists() and not
@@ -295,7 +295,7 @@ def test_pytest_permission_gate_runs_for_nonexistent_paths(
         permissions.set_prompt_handler(saved_handler)
 
 
-def test_missing_binary_path(workdir: Path) -> None:
+def _check_missing_binary_path(workdir: Path) -> None:
     # Spoof PATH to confirm clean error when binary missing. Need a
     # real-on-disk file because the existence check runs before the
     # binary check.
@@ -318,22 +318,27 @@ def test_missing_binary_path(workdir: Path) -> None:
 
 def main() -> None:
     tools, workdir = _setup()
-    test_plugin_registers_three_tools(tools)
-    test_lint_findings_and_clean(tools, workdir)
-    test_lint_input_validation(tools, workdir)
-    test_typecheck_mypy(tools, workdir)
-    test_typecheck_input_validation(tools)
-    test_run_pytest_basic(tools, workdir)
-    test_run_pytest_k_filter(tools, workdir)
-    test_mypy_text_parser_handles_windows_paths()
-    test_mypy_text_parser_filters_notes()
-    test_mypy_json_parser_filters_notes()
-    test_lint_on_directory(tools, workdir)
-    test_pathutil_shorten()
-    test_pytest_permission_gate_runs_for_nonexistent_paths(tools)
-    test_missing_binary_path(workdir)
+    _check_plugin_registers_three_tools(tools)
+    _check_lint_findings_and_clean(tools, workdir)
+    _check_lint_input_validation(tools, workdir)
+    _check_typecheck_mypy(tools, workdir)
+    _check_typecheck_input_validation(tools)
+    _check_run_pytest_basic(tools, workdir)
+    _check_run_pytest_k_filter(tools, workdir)
+    _check_mypy_text_parser_handles_windows_paths()
+    _check_mypy_text_parser_filters_notes()
+    _check_mypy_json_parser_filters_notes()
+    _check_lint_on_directory(tools, workdir)
+    _check_pathutil_shorten()
+    _check_pytest_permission_gate_runs_for_nonexistent_paths(tools)
+    _check_missing_binary_path(workdir)
     print("\nALL CHECKS PASSED")
 
 
 if __name__ == "__main__":
+    main()
+
+
+def test_main() -> None:
+    """Entry point for pytest; runs the standalone main()."""
     main()
