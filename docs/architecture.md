@@ -13,23 +13,21 @@ flowchart TB
         PROMPT["Prompt builder<br/>SOUL · TOOLS · PRIMER<br/>— the agent's identity"]
         TOOLS["Tools<br/>built-in + plugin-registered"]
         SKILLS["Skills<br/>on-demand markdown playbooks"]
-        PLUGINS["Plugins<br/>tools · hooks · prompt sections · providers"]
         LLM["LLM providers<br/>Anthropic · OpenAI · Gemini · plugin-added"]
+        PLUGINS["Plugins<br/>the extension seam:<br/>tools · skills · providers · prompt sections"]
 
         AGENT --> PROMPT
         AGENT --> TOOLS
         AGENT --> SKILLS
         AGENT --> LLM
-        PLUGINS -.extends.-> TOOLS
-        PLUGINS -.extends.-> LLM
-        PLUGINS -.contributes.-> PROMPT
+        AGENT --> PLUGINS
     end
 
-    MEMORY["Memory<br/>(bundled plugin)<br/>markdown ledgers + vector recall"]
+    MEMORY["Memory<br/>a subsystem bundled as a plugin<br/>(markdown ledgers + vector recall)"]
     RUNTIME["Session + subagents<br/>history, attachments, spawned child agents"]
 
     APP --> AGENT
-    PLUGINS --- MEMORY
+    PLUGINS --> MEMORY
     AGENT <--> RUNTIME
 ```
 
