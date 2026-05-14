@@ -228,6 +228,8 @@ def _render_toml_value(v: Any) -> str:
         return "true" if v else "false"
     if isinstance(v, int):
         return str(v)
+    if isinstance(v, float):
+        return repr(v)
     if isinstance(v, str):
         escaped = v.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
