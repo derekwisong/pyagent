@@ -1,6 +1,6 @@
 # Pyagent
 
-A multi-provider agent framework with plugin, skill, subagent, and
+A multi-provider agent system with plugin, skill, subagent, and
 memory systems. Designed to explore how agent loops, tool calling,
 and orchestration can be structured outside of large frameworks.
 
