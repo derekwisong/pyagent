@@ -6,30 +6,28 @@ Three diagrams. See [design.md](design.md) for more detail.
 
 ```mermaid
 flowchart TB
-    APP["App / CLI<br/>uses an Agent"]
+    APP["<b>App / CLI</b><br/>uses an Agent"]
 
     subgraph HARNESS["the agent harness"]
-        AGENT["<b>Agent.run()</b><br/>turn loop"]
-        PROMPT["Prompt builder<br/>SOUL · TOOLS · PRIMER<br/>— the agent's identity"]
-        TOOLS["Tools<br/>built-in + plugin-registered"]
-        SKILLS["Skills<br/>on-demand markdown playbooks"]
-        PLUGINS["Plugins<br/>tools · hooks · prompt sections · providers"]
-        LLM["LLM providers<br/>Anthropic · OpenAI · Gemini · plugin-added"]
+        AGENT["<b>Agent.run()</b><br/>the turn loop"]
+        PROMPT["<b>Prompt Builder</b><br/>the agent's identity<br/>SOUL · TOOLS · PRIMER"]
+        TOOLS["<b>Tools</b><br/>built-in + plugin-registered"]
+        SKILLS["<b>Skills</b><br/>on-demand Markdown playbooks"]
+        LLM["<b>LLM Providers</b><br/>Anthropic · OpenAI · Gemini · pluggable"]
+        PLUGINS["<b>Plugins</b><br/>the extension seam<br/>tools · skills · providers · prompt"]
 
         AGENT --> PROMPT
         AGENT --> TOOLS
         AGENT --> SKILLS
         AGENT --> LLM
-        PLUGINS -.extends.-> TOOLS
-        PLUGINS -.extends.-> LLM
-        PLUGINS -.contributes.-> PROMPT
+        AGENT --> PLUGINS
     end
 
-    MEMORY["Memory<br/>(bundled plugin)<br/>markdown ledgers + vector recall"]
-    RUNTIME["Session + subagents<br/>history, attachments, spawned child agents"]
+    MEMORY["<b>Memory</b><br/>a subsystem shipped as a plugin"]
+    RUNTIME["<b>Session + Subagents</b><br/>history · attachments · child processes"]
 
     APP --> AGENT
-    PLUGINS --- MEMORY
+    PLUGINS --> MEMORY
     AGENT <--> RUNTIME
 ```
 
@@ -59,39 +57,32 @@ Notes:
   tools. Plugin tools and your own `add_tool`s don't go through it
   unless they call it themselves.
 
-## The turn cycle
+## The agent loop
 
 ```mermaid
-sequenceDiagram
-    participant U as User
-    participant A as Agent.run()
-    participant P as Plugins
-    participant L as LLM
-    participant T as Tool
-
-    U->>A: prompt
-    loop until no tool_calls
-        A->>L: respond(conversation, system, tools)
-        L-->>A: text + optional tool_calls
-        opt tool_calls
-            loop each call
-                A->>P: before_tool_call (may block / mutate)
-                A->>T: execute
-                T-->>A: result
-                A->>P: after_tool_call (may replace)
-            end
-        end
-    end
-    A-->>U: final text
+flowchart TD
+    START([User prompt]) --> LLM["Ask the LLM<br/>conversation + system prompt + tools"]
+    LLM --> Q{"Tool calls<br/>in the reply?"}
+    Q -->|no| DONE([Return final text to user])
+    Q -->|yes| RUN["Run each tool<br/>append results to the conversation"]
+    RUN --> LLM
 ```
 
-Notes:
+That is the whole loop: ask the LLM, and if it asked for tools, run
+them and ask again — otherwise you're done. The `Run → Ask` edge is
+the loop.
 
+Notes — the essentials happen above; a few things happen *around* the
+loop and aren't drawn:
+
+- At the top of every turn the plugin set is rescanned and the system
+  prompt is rebuilt. A plugin the agent just authored (via the
+  `write-plugin` skill) is callable on its next turn without
+  restarting.
+- Each tool call passes through plugin hooks: `before_tool_call` (may
+  block or mutate) and `after_tool_call` (may replace the result).
 - `before_tool_call` fires before the permissions prompt, so a plugin
   can block a call before the human is asked to approve it.
-- The plugin set is rescanned at the top of every turn. A plugin the
-  agent just authored (via the `write-plugin` skill) is callable on
-  its next turn without restarting.
 
 ## System prompt assembly
 
